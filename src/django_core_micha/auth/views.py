@@ -348,20 +348,35 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         throttle_classes=[ScopedRateThrottle, AnonRateThrottle],
         url_path="mfa/support-help",
     )
+    MFA_SUPPORT_MESSAGE_MAX_LENGTH = 2000
+
     def mfa_support_help(self, request):
         identifier = request.data.get("email") or request.data.get("identifier")
-        message = request.data.get("message", "")
+        raw_message = request.data.get("message", "") or ""
 
         if not identifier:
             return Response({"code": "Auth.MFA_IDENTIFIER_REQUIRED"}, status=400)
 
-        # Logic moved to service? Or keep simple DB create here if trivial.
-        # Keeping it here is acceptable as it's just a "create", but strictly:
+        if not isinstance(raw_message, str):
+            return Response({"code": "Auth.MFA_MESSAGE_INVALID"}, status=400)
+
+        if len(raw_message) > self.MFA_SUPPORT_MESSAGE_MAX_LENGTH:
+            return Response(
+                {"code": "Auth.MFA_MESSAGE_TOO_LONG"},
+                status=400,
+            )
+
+        # Strip any HTML tags so the message is rendered as plain text in support UI / e-mail.
+        # Defense-in-depth — the rendering layer must escape too, but this prevents
+        # tag content from ever entering the DB.
+        from django.utils.html import strip_tags
+        message = strip_tags(raw_message)
+
         try:
             user = User.objects.get(email__iexact=identifier)
             RecoveryRequest.objects.create(user=user, message=message)
         except User.DoesNotExist:
-            pass # Silent fail
+            pass # Silent fail — preserves enumeration resistance.
 
         return Response({"code": "Auth.MFA_HELP_REQUESTED"}, status=200)
 

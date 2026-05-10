@@ -58,7 +58,9 @@ DEEPL_API_KEY = os.getenv("DEEPL_API_KEY", "")
 
 ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=[])
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_URLS", default=[])
-CORS_ALLOWED_ORIGINS = CSRF_TRUSTED_ORIGINS
+# CORS_ALLOWED_URLS optional; fällt auf CSRF-Trust-Liste zurück (rückwärtskompatibel).
+# Getrennte Env-Var erlaubt, CORS bewusst weiter zu öffnen ohne CSRF-Trust mitzuerweitern.
+CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_URLS", default=CSRF_TRUSTED_ORIGINS)
 PUBLIC_ORIGIN = env("PUBLIC_ORIGIN", default="http://localhost:3000")
 
 if not IS_LOCAL:
@@ -168,6 +170,12 @@ EMAIL_HOST_USER = env("EMAIL_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_PASSWORD", default="")
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
+if not IS_LOCAL and not (EMAIL_HOST and EMAIL_HOST_PASSWORD):
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        "EMAIL_HOST and EMAIL_PASSWORD must be set in non-local environments."
+    )
+
 # -------------------------------------------------------------------
 # Templates (Projekt setzt DIRS / BASE_DIR)
 # -------------------------------------------------------------------
@@ -247,7 +255,7 @@ REST_FRAMEWORK = {
         "invite_anon": "30/hour",
         "invite_admin": "500/hour",
         "access_code_validate": "100/hour",
-        "mfa_support_help": "20/hour",
+        "mfa_support_help": "5/hour",
         "recovery_login": "30/hour",
     },
 }
@@ -365,8 +373,16 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "redact_pii": {
+            "()": "django_core_micha.logging_filters.SensitiveDataFilter",
+        },
+    },
     "handlers": {
-        "console": {"class": "logging.StreamHandler"},
+        "console": {
+            "class": "logging.StreamHandler",
+            "filters": ["redact_pii"],
+        },
     },
     "loggers": {
         "django": {"handlers": ["console"], "level": "INFO"},
