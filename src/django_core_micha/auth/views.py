@@ -340,7 +340,9 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         user.profile.role = new_role
         user.profile.save()
         return Response({"detail": "Role updated successfully."})
-    
+
+    MFA_SUPPORT_MESSAGE_MAX_LENGTH = 2000
+
     @action(
         detail=False,
         methods=["post"],
@@ -348,8 +350,6 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         throttle_classes=[ScopedRateThrottle, AnonRateThrottle],
         url_path="mfa/support-help",
     )
-    MFA_SUPPORT_MESSAGE_MAX_LENGTH = 2000
-
     def mfa_support_help(self, request):
         identifier = request.data.get("email") or request.data.get("identifier")
         raw_message = request.data.get("message", "") or ""
