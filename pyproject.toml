@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "django-core-micha"
+version = "2.4.23"
+authors = [
+  { name="Micha Bigler", email="micha.bigler2@gmail.com" },
+]
+description = "Core utilities and settings for Django Apps"
+requires-python = ">=3.10"
+dependencies = [
+    "Django>=4.0",
+    "PyYAML",
+    "psycopg2-binary",
+]
+
+[project.scripts]
+generate-env = "django_core_micha.scripts.generate_env:main"
+sync-secrets = "django_core_micha.scripts.sync_secrets:main"
+run-dev = "django_core_micha.scripts.run_dev:main"
+provision-app = "django_core_micha.scripts.provision_app:main"
+provision-server-access = "django_core_micha.scripts.provision_server_access:main"
+
+[project.urls]
+Homepage = "https://github.com/bigler-webapps/django-core-micha"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# WICHTIG: Templates / locale-Dateien explizit aufnehmen
+[tool.setuptools.package-data]
+"django_core_micha" = [
+  "templates/**/*.txt",
+  "templates/**/*.html",
+  "templates/**/*.email",
+  "locale/**/django.*",
+]
+
