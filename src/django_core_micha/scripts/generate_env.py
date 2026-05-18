@@ -162,7 +162,18 @@ def generate_env(
             allowed_github_secrets = {}
             for key, value in github_secrets.items():
                 definition = secrets_meta.get(key)
-                if isinstance(definition, dict) and sync_secrets.is_excluded_from_env(definition):
+                # Treat secrets.yaml as the source of truth: only declared,
+                # non-excluded secrets reach the runtime .env. Secrets present
+                # in SECRETS_CONTEXT but absent from secrets.yaml are dropped
+                # by default — this prevents CI-only secrets (e.g. SSH keys
+                # used for cross-server automation) from leaking into the
+                # runtime environment of every deployed app.
+                if not isinstance(definition, dict):
+                    print(
+                        f"   [INFO] Skipping {key} from SECRETS_CONTEXT (not declared in secrets.yaml)"
+                    )
+                    continue
+                if sync_secrets.is_excluded_from_env(definition):
                     print(f"   [INFO] Skipping {key} from SECRETS_CONTEXT (exclude_from_env)")
                     continue
                 allowed_github_secrets[key] = value
