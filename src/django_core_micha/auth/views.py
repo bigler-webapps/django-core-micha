@@ -48,6 +48,7 @@ from .serializers import (
     RegistrationRequestSerializer,
     SignupQrCreateSerializer,
 )
+from .throttles import PerEmailScopedRateThrottle
 from .permissions import IsSupportAgent, IsAssignedSupportOrAdmin
 
 User = get_user_model()
@@ -166,7 +167,26 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
             self.throttle_scope = "mfa_support_help"
         else:
             self.throttle_scope = None
-        return super().get_throttles()
+
+        throttles = super().get_throttles()
+
+        # Per-target-email throttles complement the existing per-IP throttles
+        # for email-sending actions (cf. S13). Distributed attacks bypass per-IP
+        # limits via proxy rotation; per-email is the dominant defense axis.
+        # Note: `reset_request` (handled by InviteActionsMixin) sends the
+        # password-reset email; `recovery_login` lives on RecoveryRequestViewSet
+        # and is patched separately there.
+        per_email_scopes = {
+            "register_request": "email_register_request",
+            "reset_request": "email_password_reset",
+        }
+        scope = per_email_scopes.get(action)
+        if scope is not None:
+            per_email = PerEmailScopedRateThrottle()
+            per_email.scope = scope
+            throttles = list(throttles) + [per_email]
+
+        return throttles
 
     @action(detail=False, methods=["get", "patch"], url_path="current")
     def current(self, request):
@@ -240,7 +260,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         if mode_requires_access_code(mode):
             validate_access_code_or_error(
                 data.get("access_code"),
-                consume=getattr(settings, "ACCESS_CODE_SINGLE_USE", False),
+                consume=policy_state.access_code_single_use,
             )
 
         if mode_requires_email_domain(mode) and not is_allowed_email_domain(
@@ -279,17 +299,18 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user_obj, created = self._upsert_user_for_registration(email)
+        user_obj, _created = self._upsert_user_for_registration(email)
         self.apply_registration_context(user_obj, registration_context)
 
         url = self._build_frontend_url(request, user_obj, is_new_user=True)
         send_invite_or_reset_email(user=user_obj, url=url, is_new_user=True)
 
+        # Response intentionally omits any "created"/existence signal to avoid
+        # user-enumeration (cf. S13).
         return Response(
             {
                 "code": "Auth.INVITE_SENT",
                 "email": email,
-                "created": created,
                 "mode": mode,
             },
             status=status.HTTP_201_CREATED,
@@ -414,7 +435,15 @@ class RecoveryRequestViewSet(viewsets.ModelViewSet):
             self.throttle_scope = "recovery_login"
         else:
             self.throttle_scope = None
-        return super().get_throttles()
+
+        throttles = super().get_throttles()
+
+        if getattr(self, "action", None) == "recovery_login":
+            per_email = PerEmailScopedRateThrottle()
+            per_email.scope = "email_recovery_login"
+            throttles = list(throttles) + [per_email]
+
+        return throttles
 
     def get_permissions(self):
         if self.action == "recovery_login":

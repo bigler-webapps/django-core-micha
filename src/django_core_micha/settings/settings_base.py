@@ -257,6 +257,11 @@ REST_FRAMEWORK = {
         "access_code_validate": "100/hour",
         "mfa_support_help": "5/hour",
         "recovery_login": "30/hour",
+        # Per-target-email throttles (PerEmailScopedRateThrottle). Address
+        # distributed attacks that bypass per-IP limits via proxy rotation.
+        "email_register_request": "4/hour",
+        "email_password_reset": "4/hour",
+        "email_recovery_login": "4/hour",
     },
 }
 

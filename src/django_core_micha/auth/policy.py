@@ -26,7 +26,10 @@ AUTH_FACTOR_SINGLE = 1
 AUTH_FACTOR_TWO = 2
 
 SIGNUP_TOKEN_SALT = "django_core_micha.auth.signup_context"
-DEFAULT_SIGNUP_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 365 * 100
+# Cryptographic max_age fallback when no policy is configured. 1 year is generous
+# enough for staging/dev but bounded — apps with an AuthPolicy override this via
+# `signup_qr_expiry_days`.
+DEFAULT_SIGNUP_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 365
 DEFAULT_SIGNUP_QR_EXPIRY_DAYS = 90
 
 
@@ -41,6 +44,8 @@ class RegistrationPolicyState:
     required_auth_factor_count: int
     admin_required_auth_factor_count: int
     signup_qr_expiry_days: int
+    require_email_verification: bool
+    access_code_single_use: bool
 
     @property
     def signup_modes(self) -> list[str]:
@@ -158,6 +163,8 @@ def get_policy_state(policy=None) -> RegistrationPolicyState:
             required_auth_factor_count=_default_required_factor_count(),
             admin_required_auth_factor_count=_default_required_factor_count(),
             signup_qr_expiry_days=_default_signup_qr_expiry_days(),
+            require_email_verification=False,
+            access_code_single_use=False,
         )
 
     required_auth_factor_count = _normalize_factor_count(
@@ -187,6 +194,12 @@ def get_policy_state(policy=None) -> RegistrationPolicyState:
                 "signup_qr_expiry_days",
                 _default_signup_qr_expiry_days(),
             )
+        ),
+        require_email_verification=bool(
+            getattr(policy, "require_email_verification", False)
+        ),
+        access_code_single_use=bool(
+            getattr(policy, "access_code_single_use", False)
         ),
     )
 
@@ -226,6 +239,7 @@ def build_public_auth_config(policy=None) -> dict[str, Any]:
         "qr_signup_enabled": bool(state.allow_self_signup_qr),
         "email_domain_hint": ", ".join(state.allowed_email_domains),
         "signup_qr_expiry_days": int(state.signup_qr_expiry_days),
+        "email_verification_required": bool(state.require_email_verification),
     }
 
 
@@ -241,6 +255,8 @@ def serialize_policy(policy=None) -> dict[str, Any]:
         "required_auth_factor_count": int(state.required_auth_factor_count),
         "admin_required_auth_factor_count": int(state.admin_required_auth_factor_count),
         "signup_qr_expiry_days": int(state.signup_qr_expiry_days),
+        "require_email_verification": state.require_email_verification,
+        "access_code_single_use": state.access_code_single_use,
     }
 
 
@@ -271,10 +287,27 @@ def decode_signup_context_token(token: str) -> dict[str, Any]:
     if not token:
         raise signing.BadSignature("Missing token")
 
+    # Cryptographic max_age comes from the active policy's signup_qr_expiry_days
+    # (admin-configurable per app). Falls back to DEFAULT_SIGNUP_TOKEN_MAX_AGE_SECONDS
+    # when no AUTH_POLICY_MODEL is configured, when no policy row exists yet,
+    # or when DB access fails. Read-only: must not create a policy row as a
+    # side-effect of decoding a token.
+    max_age = DEFAULT_SIGNUP_TOKEN_MAX_AGE_SECONDS
+    model = get_auth_policy_model()
+    if model is not None:
+        try:
+            policy_obj = model.objects.filter(pk=1).first()
+            if policy_obj is not None:
+                state = get_policy_state(policy_obj)
+                max_age = max(int(state.signup_qr_expiry_days), 1) * 86400
+        except Exception:
+            # Keep the safe fallback on any DB error.
+            pass
+
     payload = signing.loads(
         token,
         salt=SIGNUP_TOKEN_SALT,
-        max_age=DEFAULT_SIGNUP_TOKEN_MAX_AGE_SECONDS,
+        max_age=max_age,
     )
     expires_raw = payload.get("expires_at")
     expires_at = parse_datetime(expires_raw) if isinstance(expires_raw, str) else None

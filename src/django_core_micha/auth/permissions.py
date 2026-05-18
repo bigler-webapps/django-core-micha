@@ -138,12 +138,25 @@ class IsAssignedSupportOrAdmin(BasePermission):
 
 class IsSupportAgent(BasePermission):
     def has_permission(self, request, view):
+        # No request context (e.g. unusual programmatic call): deny. The shared
+        # `_admin_policy_satisfied` helper returns True for request=None as a
+        # backward-compatible default for other call sites; here we override
+        # that default because S17 explicitly gates a privileged role.
+        if request is None:
+            return False
         user = request.user
         if not user or not user.is_authenticated:
             return False
+        # Support agents handle privileged recovery flows — they must satisfy
+        # the admin-policy gate (typically: admin MFA active) regardless of role.
+        # When the admin MFA policy is not active for the app, a support-agent
+        # assignment is by definition redundant (users can self-reset), so the
+        # gate effectively requires both the role AND the policy to be active.
+        if not _admin_policy_satisfied(user, request=request):
+            return False
         if getattr(user, "is_superuser", False):
-            return _admin_policy_satisfied(user, request=request)
-        
+            return True
+
         profile = getattr(user, "profile", None)
         return bool(getattr(profile, "is_support_agent", False))
 

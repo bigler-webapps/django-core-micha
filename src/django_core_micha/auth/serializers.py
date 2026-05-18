@@ -85,6 +85,8 @@ class AuthPolicySerializer(serializers.Serializer):
         required=False,
         min_value=1,
     )
+    require_email_verification = serializers.BooleanField(required=False)
+    access_code_single_use = serializers.BooleanField(required=False)
 
 
 class RegistrationRequestSerializer(serializers.Serializer):
