@@ -61,6 +61,12 @@ class AbstractAuthPolicy(models.Model):
         default=AUTH_FACTOR_SINGLE
     )
     signup_qr_expiry_days = models.PositiveIntegerField(default=DEFAULT_SIGNUP_QR_EXPIRY_DAYS)
+    # S7: per-app admin policy — when True, social-login auto-connect requires
+    # a verified EmailAddress entry for the target user.
+    require_email_verification = models.BooleanField(default=False)
+    # S18: per-app admin policy — when True, access-code redemptions are
+    # consumed (single-use).
+    access_code_single_use = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
