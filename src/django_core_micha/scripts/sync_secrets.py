@@ -611,8 +611,20 @@ def sync_github(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sync secrets from Proton Pass to Local or GitHub.")
-    parser.add_argument("--target", choices=["local", "github"], required=True, help="Destination for secrets")
+    parser = argparse.ArgumentParser(
+        description="Sync secrets to a local .env file or to GitHub Environment Secrets."
+    )
+    destination_group = parser.add_mutually_exclusive_group(required=True)
+    destination_group.add_argument(
+        "--local",
+        action="store_true",
+        help="Write resolved secrets to a local .env file (replaces the old `--target local`).",
+    )
+    destination_group.add_argument(
+        "--server",
+        action="store_true",
+        help="Push resolved secrets to GitHub Environment Secrets (replaces the old `--target github`).",
+    )
     parser.add_argument("--secret-target", help="Target placeholder override for target-based secrets")
     parser.add_argument(
         "--secret-source",
@@ -622,6 +634,7 @@ def main():
     parser.add_argument("--values-file", help="Override local YAML file with target-specific secret values")
     parser.add_argument("--github-environment", help="Optional GitHub environment override for GitHub sync")
     args = parser.parse_args()
+    target = "local" if args.local else "github"
 
     project_config, project_config_path = load_project_config()
 
@@ -650,14 +663,14 @@ def main():
         project_config=project_config,
         project_config_path=project_config_path,
     )
-    validate_effective_settings(args.target, effective)
+    validate_effective_settings(target, effective)
 
-    has_proton = check_dependencies(args.target, secret_source=effective["secret_source"])
+    has_proton = check_dependencies(target, secret_source=effective["secret_source"])
     values_data = None
     if effective["values_file"] and effective["secret_source"] in ("yaml", "auto"):
         values_data = load_values_file(effective["values_file"])
 
-    if args.target == "local":
+    if target == "local":
         sync_local(
             config,
             secrets_def,

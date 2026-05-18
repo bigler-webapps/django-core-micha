@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 # Import existing scripts as modules
-from django_core_micha.scripts import generate_env, sync_secrets
+from django_core_micha.scripts import generate_env
 
 
 def normalize_project_name(name: str) -> str:
@@ -303,15 +303,7 @@ def cleanup_optional_local_services(compose_files_args, args):
 def main():
     parser = argparse.ArgumentParser(description="Developer Runner for Docker setup")
     parser.add_argument("--edge", action="store_true", help="Set environment to edge")
-    env_group = parser.add_mutually_exclusive_group()
-    env_group.add_argument("--env", action="store_true", help="Generate local .env file")
-    env_group.add_argument(
-        "--env-all",
-        "--all",
-        dest="env_all",
-        action="store_true",
-        help="Generate local .env and sync GitHub secrets (--all is kept as legacy alias)",
-    )
+    parser.add_argument("--env", action="store_true", help="Generate local .env file")
     parser.add_argument("--vite", action="store_true", help="Use Hot-Reloading Mode (Vite on Host)")
     parser.add_argument(
         "--build",
@@ -386,7 +378,7 @@ def main():
     
     env_mode = "edge" if args.edge else "local"
     MODE = "VITE" if args.vite else "CLASSIC"
-    FORCE_ENV = args.env or args.env_all
+    FORCE_ENV = args.env
     should_build = args.build or args.refresh
     uses_host_frontend_build = frontend_dir.exists() and local_compose_uses_host_frontend_build(BASE_DIR)
 
@@ -439,13 +431,8 @@ def main():
         frontend_env_path = frontend_dir / ".env"
         if frontend_dir.exists():
             shutil.copy(".env", frontend_env_path)
-        
-        if args.env_all:
-            print("[INFO] Syncing GitHub secrets...")
-            sys.argv = ["sync-secrets", "--target", "github"]
-            sync_secrets.main()
     else:
-        print("[INFO] Skipping .env generation (use --env or --env-all to force)")
+        print("[INFO] Skipping .env generation (use --env to force; for pushing to GitHub use `sync-secrets --server`)")
 
 
     # --- SCHRITT 2: DOCKER FILES ---
