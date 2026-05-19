@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-core-micha"
-version = "2.9.3"
+version = "2.9.4"
 authors = [
   { name="Micha Bigler", email="micha.bigler2@gmail.com" },
 ]
@@ -14,7 +14,19 @@ dependencies = [
     "Django>=4.0",
     "PyYAML",
     "psycopg2-binary",
+    "filetype>=1.2,<2.0",
 ]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7",
+    "pytest-django>=4",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+python_files = ["test_*.py"]
+testpaths = ["tests"]
 
 [project.scripts]
 generate-env = "django_core_micha.scripts.generate_env:main"
