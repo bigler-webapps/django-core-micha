@@ -6,11 +6,12 @@ from rest_framework.routers import DefaultRouter
 from django_core_micha.invitations.views import PasswordResetConfirmView
 from django_core_micha.invitations import urls as invitations_urls
 from django_core_micha.auth.views import (
-    csrf_token_view, 
+    csrf_token_view,
     auth_methods_view,
-    RecoveryRequestViewSet, 
+    RecoveryRequestViewSet,
     recovery_complete_view
 )
+from django_core_micha.health.views import healthz_view
 
 router = DefaultRouter()
 router.register(
@@ -20,6 +21,10 @@ router.register(
 )
 
 urlpatterns = [
+    # Health probe (public, no auth) — used by Uptime Kuma and the
+    # staging-health PR gate. Checks DB + cache.
+    path("healthz", healthz_view, name="healthz"),
+
     # Allauth Headless Endpoints (Login, Signup, MFA, etc.)
     # URLs sind dann z.B. /api/auth/login, /api/auth/signup
     path("auth/", include("allauth.headless.urls")),
