@@ -350,7 +350,6 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         leave the access-code or QR-token consumed without a corresponding
         user row.
         """
-        from django.contrib.auth import login as auth_login
         from django.contrib.auth.password_validation import validate_password
         from django.core.exceptions import ValidationError as DjangoValidationError
         from django.db import transaction
@@ -452,20 +451,10 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Sign in the session (outside the atomic block — session writes have
-        # their own backend and are not part of the auth-policy transaction).
-        # Use the first configured AUTHENTICATION_BACKENDS entry dynamically
-        # instead of hard-coding ModelBackend: apps that ship only a custom
-        # backend (e.g. EmailBackend / allauth) would otherwise store an
-        # invalid backend path in the session and the next request would see
-        # the user as anonymous.
-        from django.contrib.auth import get_backends
-        backends = get_backends()
-        if backends:
-            first = backends[0]
-            user_obj.backend = f"{first.__class__.__module__}.{first.__class__.__name__}"
-        auth_login(request, user_obj)
-
+        # Intentionally NO auto-login here. Aligns with the existing
+        # invite/password-reset pattern (PasswordInvitePage → /login) and
+        # preserves the MFA / login-event / audit-trail invariants. The
+        # frontend redirects to /login after a successful confirm.
         return Response(
             {"code": "Auth.REGISTRATION_CONFIRMED", "email": email},
             status=status.HTTP_201_CREATED,
