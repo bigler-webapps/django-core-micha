@@ -49,6 +49,36 @@ def get_greeting_name(user) -> str:
 # Texte: Invite (neuer Benutzer)
 # --------------------------------------
 
+PENDING_REGISTRATION_SUBJECT = {
+    "en": "Confirm your registration for {project_name}",
+    "de": "Registrierung für {project_name} bestätigen",
+    "fr": "Confirmez votre inscription pour {project_name}",
+}
+
+PENDING_REGISTRATION_BODY = {
+    "en": (
+        "Hello,\n\n"
+        "Please confirm your registration for {project_name} by opening the following link "
+        "and choosing a password. The link is valid for 24 hours:\n"
+        "{url}\n\n"
+        "If you did not request this, you can ignore this email.\n"
+    ),
+    "de": (
+        "Hallo,\n\n"
+        "Bitte bestätigen Sie Ihre Registrierung für {project_name} über folgenden Link und "
+        "wählen Sie ein Passwort. Der Link ist 24 Stunden gültig:\n"
+        "{url}\n\n"
+        "Falls Sie dies nicht angefordert haben, können Sie diese E-Mail ignorieren.\n"
+    ),
+    "fr": (
+        "Bonjour,\n\n"
+        "Veuillez confirmer votre inscription à {project_name} en ouvrant le lien suivant et "
+        "en choisissant un mot de passe. Le lien est valable 24 heures :\n"
+        "{url}\n\n"
+        "Si vous n'êtes pas à l'origine de cette demande, vous pouvez ignorer cet e-mail.\n"
+    ),
+}
+
 INVITE_SUBJECT = {
     "en": "You have been invited to {project_name}",
     "de": "Einladung zu {project_name}",
@@ -146,6 +176,21 @@ RECOVERY_BODY = {
         "Si vous n'êtes pas à l'origine de cette demande, veuillez contacter le support immédiatement.\n"
     ),
 }
+
+def render_pending_registration_email(email, url, language=None):
+    """S13: render the confirm-registration email.
+
+    No user object yet — language defaults to settings.LANGUAGE_CODE or 'en'.
+    """
+    project_name = get_project_name()
+    lang = language or (getattr(settings, "LANGUAGE_CODE", "en") or "en")[:2].lower()
+    if lang not in SUPPORTED_LANGUAGES:
+        lang = "en"
+    subject_tpl = PENDING_REGISTRATION_SUBJECT.get(lang, PENDING_REGISTRATION_SUBJECT["en"])
+    body_tpl = PENDING_REGISTRATION_BODY.get(lang, PENDING_REGISTRATION_BODY["en"])
+    ctx = {"url": url, "project_name": project_name}
+    return subject_tpl.format(**ctx), body_tpl.format(**ctx)
+
 
 def render_invite_email(user, url, language=None):
     project_name = get_project_name()

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-core-micha"
-version = "2.9.0"
+version = "2.9.1"
 authors = [
   { name="Micha Bigler", email="micha.bigler2@gmail.com" },
 ]
