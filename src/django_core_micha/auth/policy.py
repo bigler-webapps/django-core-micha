@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import hashlib
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from django.apps import apps
 from django.conf import settings
 from django.core import signing
+from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+
+logger = logging.getLogger(__name__)
 
 SIGNUP_MODE_ADMIN_INVITE = "admin_invite"
 SIGNUP_MODE_ACCESS_CODE = "self_signup_access_code"
@@ -26,6 +32,9 @@ AUTH_FACTOR_SINGLE = 1
 AUTH_FACTOR_TWO = 2
 
 SIGNUP_TOKEN_SALT = "django_core_micha.auth.signup_context"
+PENDING_REGISTRATION_SALT = "django_core_micha.auth.pending_registration"
+# S13: Pending-registration tokens have a fixed 24h lifetime.
+PENDING_REGISTRATION_MAX_AGE_SECONDS = 24 * 60 * 60
 # Cryptographic max_age fallback when no policy is configured. 1 year is generous
 # enough for staging/dev but bounded — apps with an AuthPolicy override this via
 # `signup_qr_expiry_days`.
@@ -44,7 +53,6 @@ class RegistrationPolicyState:
     required_auth_factor_count: int
     admin_required_auth_factor_count: int
     signup_qr_expiry_days: int
-    require_email_verification: bool
     access_code_single_use: bool
 
     @property
@@ -136,6 +144,37 @@ def get_auth_policy_model():
     return None
 
 
+def get_signup_qr_token_model():
+    """S30: optional per-app concrete model for DB-persistent QR tokens.
+
+    Apps that don't configure ``SIGNUP_QR_TOKEN_MODEL`` keep the legacy stateless
+    behaviour (signature-only verification, no use-counter).
+    """
+    configured = getattr(settings, "SIGNUP_QR_TOKEN_MODEL", None)
+    if not configured:
+        return None
+
+    if isinstance(configured, str):
+        try:
+            return apps.get_model(configured)
+        except Exception:
+            logger.warning(
+                "SIGNUP_QR_TOKEN_MODEL=%r could not be resolved; falling back "
+                "to stateless QR-token behaviour. Check that the app is in "
+                "INSTALLED_APPS and the model exists.",
+                configured,
+            )
+            return None
+
+    if hasattr(configured, "_meta"):
+        return configured
+    return None
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def get_or_create_auth_policy():
     model = get_auth_policy_model()
     if model is None:
@@ -163,7 +202,6 @@ def get_policy_state(policy=None) -> RegistrationPolicyState:
             required_auth_factor_count=_default_required_factor_count(),
             admin_required_auth_factor_count=_default_required_factor_count(),
             signup_qr_expiry_days=_default_signup_qr_expiry_days(),
-            require_email_verification=False,
             access_code_single_use=False,
         )
 
@@ -194,9 +232,6 @@ def get_policy_state(policy=None) -> RegistrationPolicyState:
                 "signup_qr_expiry_days",
                 _default_signup_qr_expiry_days(),
             )
-        ),
-        require_email_verification=bool(
-            getattr(policy, "require_email_verification", False)
         ),
         access_code_single_use=bool(
             getattr(policy, "access_code_single_use", False)
@@ -239,7 +274,6 @@ def build_public_auth_config(policy=None) -> dict[str, Any]:
         "qr_signup_enabled": bool(state.allow_self_signup_qr),
         "email_domain_hint": ", ".join(state.allowed_email_domains),
         "signup_qr_expiry_days": int(state.signup_qr_expiry_days),
-        "email_verification_required": bool(state.require_email_verification),
     }
 
 
@@ -255,7 +289,6 @@ def serialize_policy(policy=None) -> dict[str, Any]:
         "required_auth_factor_count": int(state.required_auth_factor_count),
         "admin_required_auth_factor_count": int(state.admin_required_auth_factor_count),
         "signup_qr_expiry_days": int(state.signup_qr_expiry_days),
-        "require_email_verification": state.require_email_verification,
         "access_code_single_use": state.access_code_single_use,
     }
 
@@ -266,7 +299,16 @@ def create_signup_context_token(
     label: str = "",
     expires_minutes: int | None = None,
     policy=None,
+    max_redemptions: int = 1,
+    created_by=None,
 ) -> tuple[str, str]:
+    """Create a signed signup-context token and (if a DB model is configured)
+    persist a tracking row with use-counter.
+
+    S30: when ``settings.SIGNUP_QR_TOKEN_MODEL`` resolves to a concrete model,
+    a row is created so that token usage can be capped via ``max_redemptions``.
+    Without the setting, the call falls back to legacy stateless behaviour.
+    """
     if expires_minutes is None:
         expires_minutes = get_policy_state(policy).signup_qr_expiry_days * 24 * 60
     else:
@@ -280,10 +322,34 @@ def create_signup_context_token(
         "registration_context": registration_context or {},
     }
     token = signing.dumps(payload, salt=SIGNUP_TOKEN_SALT)
+
+    model = get_signup_qr_token_model()
+    if model is not None:
+        try:
+            model.objects.create(
+                token_hash=_hash_token(token),
+                mode=SIGNUP_MODE_QR,
+                registration_context=registration_context or {},
+                expires_at=expires_at,
+                max_redemptions=max(1, int(max_redemptions)),
+                created_by=created_by,
+            )
+        except Exception:
+            # If persistence fails (e.g. duplicate hash from clock collision),
+            # keep the signed token usable but without DB-backed accounting.
+            pass
+
     return token, expires_at.isoformat()
 
 
 def decode_signup_context_token(token: str) -> dict[str, Any]:
+    """Decode and validate a signup-context token.
+
+    S30: when a DB model is configured, also enforces use-counter / max-redemption
+    by checking the row state. Read-only: never mutates the row. Use
+    ``consume_signup_context_token`` to atomically increment the counter at
+    registration confirmation.
+    """
     if not token:
         raise signing.BadSignature("Missing token")
 
@@ -317,4 +383,103 @@ def decode_signup_context_token(token: str) -> dict[str, Any]:
         expires_at = timezone.make_aware(expires_at, timezone.get_current_timezone())
     if expires_at <= timezone.now():
         raise signing.SignatureExpired("Token expired")
+
+    # S30: if DB-backed accounting is configured, enforce redemption cap.
+    qr_model = get_signup_qr_token_model()
+    if qr_model is not None:
+        token_hash = _hash_token(token)
+        try:
+            row = qr_model.objects.filter(token_hash=token_hash).first()
+        except Exception:
+            row = None
+        if row is not None:
+            if row.expires_at <= timezone.now():
+                raise signing.SignatureExpired("Token expired")
+            if row.use_count >= row.max_redemptions:
+                raise signing.SignatureExpired("Token exhausted")
+        # If row is missing, the token may pre-date the DB model rollout.
+        # Stay permissive: signature already passed.
+
+    return payload
+
+
+def consume_signup_context_token(token: str) -> None:
+    """S30+R1: atomically increment use_count.
+
+    Raises ``signing.SignatureExpired`` if the token is exhausted or expired.
+    No-op when ``SIGNUP_QR_TOKEN_MODEL`` is not configured.
+    """
+    model = get_signup_qr_token_model()
+    if model is None:
+        return
+
+    token_hash = _hash_token(token)
+    now = timezone.now()
+    with transaction.atomic():
+        # Compare-and-swap: only increment if not exhausted and not expired.
+        rows = model.objects.filter(
+            token_hash=token_hash,
+            use_count__lt=F("max_redemptions"),
+            expires_at__gt=now,
+        ).update(use_count=F("use_count") + 1)
+        if rows == 0:
+            # Either missing, exhausted, or expired — re-fetch to give a precise
+            # exception. Missing rows are treated as permissive (no DB-backing
+            # ever existed) to stay compatible with stateless legacy tokens.
+            exists = model.objects.filter(token_hash=token_hash).exists()
+            if exists:
+                raise signing.SignatureExpired("Token exhausted or expired")
+
+
+def create_pending_registration_token(
+    *,
+    email: str,
+    mode: str,
+    registration_context: dict[str, Any] | None = None,
+    access_code: str | None = None,
+    qr_signup_token: str | None = None,
+) -> str:
+    """S13: sign a pending-registration payload (no DB user yet).
+
+    Lifetime is fixed at 24h. The token is verified at ``register_confirm`` time;
+    only then does the actual ``User`` get created. Until then, the registration
+    request leaves no DB trace, eliminating the pre-squat attack surface.
+    """
+    expires_at = timezone.now() + timezone.timedelta(
+        seconds=PENDING_REGISTRATION_MAX_AGE_SECONDS
+    )
+    payload = {
+        "schema_version": "1",
+        "email": email.strip().lower(),
+        "mode": mode,
+        "registration_context": registration_context or {},
+        "access_code": access_code or None,
+        "qr_signup_token": qr_signup_token or None,
+        "expires_at": expires_at.isoformat(),
+    }
+    return signing.dumps(payload, salt=PENDING_REGISTRATION_SALT)
+
+
+def decode_pending_registration_token(token: str) -> dict[str, Any]:
+    """S13: decode + validate a pending-registration token.
+
+    Raises ``signing.SignatureExpired`` if expired, ``signing.BadSignature`` for
+    any other tampering / format issues.
+    """
+    if not token:
+        raise signing.BadSignature("Missing token")
+
+    payload = signing.loads(
+        token,
+        salt=PENDING_REGISTRATION_SALT,
+        max_age=PENDING_REGISTRATION_MAX_AGE_SECONDS,
+    )
+    expires_raw = payload.get("expires_at")
+    expires_at = parse_datetime(expires_raw) if isinstance(expires_raw, str) else None
+    if expires_at is None:
+        raise signing.BadSignature("Missing expiry")
+    if timezone.is_naive(expires_at):
+        expires_at = timezone.make_aware(expires_at, timezone.get_current_timezone())
+    if expires_at <= timezone.now():
+        raise signing.SignatureExpired("Pending registration token expired")
     return payload

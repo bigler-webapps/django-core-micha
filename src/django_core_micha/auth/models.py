@@ -61,9 +61,6 @@ class AbstractAuthPolicy(models.Model):
         default=AUTH_FACTOR_SINGLE
     )
     signup_qr_expiry_days = models.PositiveIntegerField(default=DEFAULT_SIGNUP_QR_EXPIRY_DAYS)
-    # S7: per-app admin policy — when True, social-login auto-connect requires
-    # a verified EmailAddress entry for the target user.
-    require_email_verification = models.BooleanField(default=False)
     # S18: per-app admin policy — when True, access-code redemptions are
     # consumed (single-use).
     access_code_single_use = models.BooleanField(default=False)
@@ -99,3 +96,36 @@ class AbstractAuthPolicy(models.Model):
         self.id = 1
         self.clean()
         return super().save(*args, **kwargs)
+
+
+class AbstractSignupQrToken(models.Model):
+    """S30: DB-persistent QR signup token with use-counter.
+
+    Apps that want true single-use / capped-redemption semantics provide a
+    concrete subclass and set ``settings.SIGNUP_QR_TOKEN_MODEL = "app.Model"``.
+
+    Apps without ``SIGNUP_QR_TOKEN_MODEL`` configured keep the legacy stateless
+    behaviour (signed token only, unlimited use within payload expiry).
+    """
+
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    mode = models.CharField(max_length=32)
+    registration_context = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField()
+    max_redemptions = models.PositiveSmallIntegerField(default=1)
+    use_count = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+
+    class Meta:
+        abstract = True
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"SignupQrToken({self.token_hash[:8]}…, {self.use_count}/{self.max_redemptions})"

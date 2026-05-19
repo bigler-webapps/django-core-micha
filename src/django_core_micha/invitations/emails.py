@@ -6,6 +6,35 @@ from django_core_micha.emails import email_texts
 
 logger = logging.getLogger(__name__)
 
+def send_pending_registration_email(*, email: str, url: str) -> None:
+    """S13: deliver the confirm-link for a pending-registration token.
+
+    Unlike ``send_invite_or_reset_email`` this does not require a DB ``User``
+    instance — the user does not exist yet at this point in the flow.
+    """
+    subject, body = email_texts.render_pending_registration_email(email, url)
+
+    if getattr(settings, "ENV_TYPE", "") == "local":
+        logger.info("[LOCAL] Pending-Registration-Mail an %s: %s", email, url)
+        return
+
+    from_email = getattr(settings, "INVITATIONS_FROM_EMAIL", None)
+    reply_to = getattr(settings, "INVITATIONS_REPLY_TO", None)
+
+    headers = {}
+    if reply_to:
+        headers["Reply-To"] = reply_to
+
+    message = EmailMessage(
+        subject=subject,
+        body=body,
+        from_email=from_email,
+        to=[email],
+        headers=headers,
+    )
+    message.send(fail_silently=False)
+
+
 def send_invite_or_reset_email(*, user, url, is_new_user: bool) -> None:
     """
     Generic helper: nimmt User + Link, holt sich Texte aus dem emails Modul

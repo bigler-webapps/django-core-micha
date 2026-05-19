@@ -19,7 +19,10 @@ from allauth.account.models import EmailAddress
 
 from django_core_micha.invitations.mixins import InviteActionsMixin
 from django_core_micha.invitations.access_codes import validate_access_code_or_error
-from django_core_micha.invitations.emails import send_invite_or_reset_email
+from django_core_micha.invitations.emails import (
+    send_invite_or_reset_email,
+    send_pending_registration_email,
+)
 from django_core_micha.auth.roles import RolePolicy
 from django_core_micha.auth import services  # <--- Central Logic Import
 from django_core_micha.auth.methods import get_auth_methods
@@ -31,7 +34,10 @@ from django_core_micha.auth.permissions import (
 )
 from django_core_micha.auth.policy import (
     SIGNUP_MODE_QR,
+    consume_signup_context_token,
+    create_pending_registration_token,
     create_signup_context_token,
+    decode_pending_registration_token,
     decode_signup_context_token,
     get_or_create_auth_policy,
     get_policy_state,
@@ -45,6 +51,7 @@ from .recovery import RecoveryRequest
 from .serializers import (
     AuthPolicySerializer,
     RecoveryRequestSerializer,
+    RegistrationConfirmSerializer,
     RegistrationRequestSerializer,
     SignupQrCreateSerializer,
 )
@@ -243,6 +250,12 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         url_path="register-request",
     )
     def register_request(self, request):
+        """S13: validate signup inputs and dispatch a pending-registration email.
+
+        Does NOT create a DB user, NOT consume access-codes, NOT consume QR tokens.
+        The actual side effects happen in ``register_confirm`` after the user
+        clicks the confirm-link from their email (= email-ownership proof).
+        """
         serializer = RegistrationRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -257,11 +270,9 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Validate (but do not consume) access code.
         if mode_requires_access_code(mode):
-            validate_access_code_or_error(
-                data.get("access_code"),
-                consume=policy_state.access_code_single_use,
-            )
+            validate_access_code_or_error(data.get("access_code"), consume=False)
 
         if mode_requires_email_domain(mode) and not is_allowed_email_domain(
             email, policy_state.allowed_email_domains
@@ -271,11 +282,11 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        has_registration_context_token = bool(data.get("registration_context_token"))
-        registration_context = {}
-        if has_registration_context_token:
+        qr_signup_token = data.get("registration_context_token") or None
+        registration_context: dict = {}
+        if qr_signup_token:
             try:
-                payload = decode_signup_context_token(data["registration_context_token"])
+                payload = decode_signup_context_token(qr_signup_token)
             except signing.SignatureExpired:
                 return Response(
                     {"code": "Auth.SIGNUP_QR_EXPIRED"},
@@ -293,26 +304,160 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        if mode_requires_qr_token(mode) and not has_registration_context_token:
+        if mode_requires_qr_token(mode) and not qr_signup_token:
             return Response(
                 {"code": "Auth.SIGNUP_QR_INVALID"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user_obj, _created = self._upsert_user_for_registration(email)
-        self.apply_registration_context(user_obj, registration_context)
+        # Sign the pending-registration token (no DB writes, no consumption).
+        pending_token = create_pending_registration_token(
+            email=email,
+            mode=mode,
+            registration_context=registration_context,
+            access_code=data.get("access_code") or None,
+            qr_signup_token=qr_signup_token,
+        )
 
-        url = self._build_frontend_url(request, user_obj, is_new_user=True)
-        send_invite_or_reset_email(user=user_obj, url=url, is_new_user=True)
+        base = request.build_absolute_uri("/").rstrip("/")
+        confirm_url = f"{base}/signup/confirm/?token={pending_token}"
+        send_pending_registration_email(email=email, url=confirm_url)
 
-        # Response intentionally omits any "created"/existence signal to avoid
-        # user-enumeration (cf. S13).
         return Response(
             {
                 "code": "Auth.INVITE_SENT",
                 "email": email,
                 "mode": mode,
             },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[AllowAny],
+        url_path="register-confirm",
+    )
+    def register_confirm(self, request):
+        """S13: complete a pending registration.
+
+        Verifies the pending-token, atomically consumes the access-code (R1) and
+        QR-token (S30), creates the user, marks the email verified (R2),
+        applies the registration_context, and signs the session in.
+
+        The entire side-effect chain is wrapped in ``transaction.atomic`` so
+        that a failure mid-flow (e.g. IntegrityError on User create) does not
+        leave the access-code or QR-token consumed without a corresponding
+        user row.
+        """
+        from django.contrib.auth import login as auth_login
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.db import transaction
+
+        serializer = RegistrationConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        token = serializer.validated_data["token"]
+        password = serializer.validated_data["password"]
+
+        try:
+            payload = decode_pending_registration_token(token)
+        except signing.SignatureExpired:
+            return Response(
+                {"code": "Auth.PENDING_TOKEN_EXPIRED"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except signing.BadSignature:
+            return Response(
+                {"code": "Auth.PENDING_TOKEN_INVALID"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        email = (payload.get("email") or "").strip().lower()
+        mode = payload.get("mode")
+        registration_context = payload.get("registration_context") or {}
+        access_code = payload.get("access_code")
+        qr_signup_token = payload.get("qr_signup_token")
+
+        if not email or not mode:
+            return Response(
+                {"code": "Auth.PENDING_TOKEN_INVALID"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Password policy check via Django validators.
+        try:
+            validate_password(password)
+        except DjangoValidationError as exc:
+            return Response(
+                {"code": "Auth.PASSWORD_INVALID", "detail": list(exc.messages)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # R2 follow-up: re-validate the QR token's own signature/expiry at
+        # confirm time. While the pending-token's signature already protects
+        # against tampering, the QR token itself may have expired in the 24h
+        # confirm window — defense-in-depth.
+        if qr_signup_token:
+            try:
+                decode_signup_context_token(qr_signup_token)
+            except signing.SignatureExpired:
+                return Response(
+                    {"code": "Auth.QR_TOKEN_EXHAUSTED"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            except signing.BadSignature:
+                return Response(
+                    {"code": "Auth.SIGNUP_QR_INVALID"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Reject re-confirmation when the user already exists.
+        if User.objects.filter(email__iexact=email).exists():
+            return Response(
+                {"code": "Auth.USER_ALREADY_EXISTS"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        policy_state = get_policy_state(self.get_auth_policy())
+
+        try:
+            with transaction.atomic():
+                # Atomically consume the access-code if single-use is enabled.
+                if access_code and policy_state.access_code_single_use:
+                    validate_access_code_or_error(access_code, consume=True)
+
+                # S30: atomically consume the QR token (no-op when
+                # SIGNUP_QR_TOKEN_MODEL not configured).
+                if qr_signup_token:
+                    consume_signup_context_token(qr_signup_token)
+
+                user_obj = User.objects.create_user(
+                    username=email, email=email, password=password
+                )
+                # R2: mark EmailAddress verified — the click on the confirm-link is
+                # the email-ownership proof. Without this row, social-login
+                # auto-connect would be blocked by InvitationOnlySocialAdapter.
+                EmailAddress.objects.update_or_create(
+                    user=user_obj,
+                    email=email,
+                    defaults={"verified": True, "primary": True},
+                )
+
+                self._mark_invited_profile(user_obj, created=True)
+                self.apply_registration_context(user_obj, registration_context)
+        except signing.SignatureExpired:
+            return Response(
+                {"code": "Auth.QR_TOKEN_EXHAUSTED"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Sign in the session (outside the atomic block — session writes have
+        # their own backend and are not part of the auth-policy transaction).
+        auth_login(request, user_obj, backend="django.contrib.auth.backends.ModelBackend")
+
+        return Response(
+            {"code": "Auth.REGISTRATION_CONFIRMED", "email": email},
             status=status.HTTP_201_CREATED,
         )
 
@@ -335,6 +480,8 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
             label=payload.get("label", ""),
             expires_minutes=payload.get("expires_minutes"),
             policy=self.get_auth_policy(),
+            max_redemptions=payload.get("max_redemptions") or 1,
+            created_by=request.user if request.user.is_authenticated else None,
         )
         signup_url = f"{request.build_absolute_uri('/').rstrip('/')}/signup?rt={token}"
         return Response(
@@ -342,6 +489,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                 "signup_url": signup_url,
                 "registration_context_token": token,
                 "expires_at": expires_at,
+                "max_redemptions": int(payload.get("max_redemptions") or 1),
                 "preview_context": payload.get("registration_context") or {},
             }
         )

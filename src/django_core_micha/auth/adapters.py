@@ -3,7 +3,6 @@ from django.contrib.auth import get_user_model
 from allauth.account.adapter import DefaultAccountAdapter
 from allauth.mfa.adapter import DefaultMFAAdapter
 from django.conf import settings
-from django_core_micha.auth.policy import get_policy_state
 from django_core_micha.auth.security import get_security_level, set_security_level
 import logging
 
@@ -19,31 +18,16 @@ class InvitationOnlySocialAdapter(DefaultSocialAccountAdapter):
         if not user_qs.exists():
             return False
 
-        # Policy-aware S7 mitigation: when the admin has set
-        # `require_email_verification=True`, block social auto-connect to
-        # accounts whose email has not been verified through allauth's
-        # EmailAddress flow. This closes the pre-squat + social-login takeover
-        # path (attacker creates unverified user → victim signs in via social
-        # provider → allauth auto-connects to attacker-controlled account).
-        try:
-            state = get_policy_state()
-        except Exception:
-            # Log loudly: a silent fallback here would bypass the S7 gate.
-            logger.exception(
-                "InvitationOnlySocialAdapter: failed to read auth policy state; "
-                "S7 email-verification gate cannot be enforced for this request."
-            )
-            state = None
-
-        if state is not None and state.require_email_verification:
-            from allauth.account.models import EmailAddress as _EmailAddress
-            verified = _EmailAddress.objects.filter(
-                user__in=user_qs, email__iexact=email, verified=True
-            ).exists()
-            if not verified:
-                return False
-
-        return True
+        # S7 hardcoded defense-in-depth: social auto-connect is only allowed
+        # when the target user has a verified EmailAddress entry. This closes
+        # the pre-squat + social-takeover path. Combined with the pending-token
+        # registration flow (S13), unconfirmed accounts no longer exist in DB
+        # in the first place, but this check stays as belt-and-braces.
+        from allauth.account.models import EmailAddress as _EmailAddress
+        verified = _EmailAddress.objects.filter(
+            user__in=user_qs, email__iexact=email, verified=True
+        ).exists()
+        return verified
 
 class CoreAccountAdapter(DefaultAccountAdapter):
     def is_open_for_signup(self, request):

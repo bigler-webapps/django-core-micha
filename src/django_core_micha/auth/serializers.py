@@ -85,8 +85,14 @@ class AuthPolicySerializer(serializers.Serializer):
         required=False,
         min_value=1,
     )
-    require_email_verification = serializers.BooleanField(required=False)
     access_code_single_use = serializers.BooleanField(required=False)
+
+
+class RegistrationConfirmSerializer(serializers.Serializer):
+    """S13: payload for the confirm-pending-registration endpoint."""
+
+    token = serializers.CharField()
+    password = serializers.CharField(min_length=8, max_length=256, trim_whitespace=False)
 
 
 class RegistrationRequestSerializer(serializers.Serializer):
@@ -120,6 +126,10 @@ class RegistrationRequestSerializer(serializers.Serializer):
 class SignupQrCreateSerializer(serializers.Serializer):
     label = serializers.CharField(required=False, allow_blank=True)
     expires_minutes = serializers.IntegerField(
+        required=False,
+        min_value=1,
+    )
+    max_redemptions = serializers.IntegerField(
         required=False,
         min_value=1,
     )
