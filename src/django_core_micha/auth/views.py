@@ -454,7 +454,17 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
 
         # Sign in the session (outside the atomic block — session writes have
         # their own backend and are not part of the auth-policy transaction).
-        auth_login(request, user_obj, backend="django.contrib.auth.backends.ModelBackend")
+        # Use the first configured AUTHENTICATION_BACKENDS entry dynamically
+        # instead of hard-coding ModelBackend: apps that ship only a custom
+        # backend (e.g. EmailBackend / allauth) would otherwise store an
+        # invalid backend path in the session and the next request would see
+        # the user as anonymous.
+        from django.contrib.auth import get_backends
+        backends = get_backends()
+        if backends:
+            first = backends[0]
+            user_obj.backend = f"{first.__class__.__module__}.{first.__class__.__name__}"
+        auth_login(request, user_obj)
 
         return Response(
             {"code": "Auth.REGISTRATION_CONFIRMED", "email": email},
