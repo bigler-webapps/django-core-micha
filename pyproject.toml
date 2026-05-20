@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
-    "pytest>=7",
+    "pytest>=9.0.3",
     "pytest-django>=4",
 ]
 
