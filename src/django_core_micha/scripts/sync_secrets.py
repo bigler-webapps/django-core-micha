@@ -139,8 +139,31 @@ def resolve_secret_target(config, secret_target=None):
     return secret_target or config.get("default_target")
 
 
-def resolve_source(definition, config, secret_target=None):
-    """Resolve a Proton source path from a plain source or a target template."""
+def resolve_server_from_project(project_config, secret_target):
+    """Look up environments[<target>].server from project.yaml; return None if absent."""
+    if not project_config or not secret_target:
+        return None
+    environments = project_config.get("environments", {})
+    if not isinstance(environments, dict):
+        return None
+    env_data = environments.get(secret_target)
+    if not isinstance(env_data, dict):
+        return None
+    server = env_data.get("server")
+    if server is None:
+        return None
+    return str(server).strip() or None
+
+
+def resolve_source(definition, config, secret_target=None, project_config=None):
+    """Resolve a Proton source path from a plain source or a target template.
+
+    Supports two placeholders in source_template:
+      - {target}: the literal secret_target value (e.g. 'production', 'staging')
+      - {server}: server name resolved via project.yaml environments[<target>].server
+                  Used when secrets should reference a centrally-managed server
+                  entry instead of duplicating per-app/per-env.
+    """
     source = definition.get("source")
     if source:
         return source
@@ -154,8 +177,19 @@ def resolve_source(definition, config, secret_target=None):
         print("   ⚠️  Cannot resolve source_template without a secret target.")
         return None
 
+    substitutions = {"target": target}
+    if "{server}" in source_template:
+        server = resolve_server_from_project(project_config, target)
+        if not server:
+            print(
+                f"   ⚠️  source_template uses {{server}} but project.yaml has no "
+                f"environments['{target}'].server entry."
+            )
+            return None
+        substitutions["server"] = server
+
     try:
-        return source_template.format(target=target)
+        return source_template.format(**substitutions)
     except KeyError as exc:
         print(f"   ⚠️  Invalid source_template placeholder {exc} in secrets.yaml.")
         return None
@@ -194,8 +228,18 @@ def get_inventory_target_data(config, secret_target=None):
     return target_data
 
 
-def resolve_github_environment(config, secret_target=None, github_environment=None):
-    """Resolve the GitHub environment for secret sync."""
+def resolve_github_environment(config, secret_target=None, github_environment=None, project_config=None):
+    """Resolve the GitHub environment for secret sync.
+
+    Resolution precedence:
+      1. explicit github_environment arg (CLI --github-environment)
+      2. inventory target's github_environment field (when inventory_path is set)
+      3. project.yaml environments[<secret_target>] (when use_project_yaml is opted-in)
+      4. github_environment_template with {target} substitution
+      5. static config.github_environment
+
+    Returns None when no source produces an env name → caller falls back to repo-level sync.
+    """
     if github_environment:
         return github_environment
 
@@ -204,6 +248,14 @@ def resolve_github_environment(config, secret_target=None, github_environment=No
         environment_name = target_data.get("github_environment")
         if environment_name:
             return environment_name
+
+    # Opt-in: when secrets.yaml config has use_project_yaml=true AND project.yaml
+    # declares the secret_target as an environment, use the secret_target value
+    # itself as the GH environment name (semantic naming).
+    if config.get("use_project_yaml") and project_config and secret_target:
+        environments = project_config.get("environments", {})
+        if isinstance(environments, dict) and secret_target in environments:
+            return secret_target
 
     environment_template = config.get("github_environment_template")
     if environment_template:
@@ -436,6 +488,7 @@ def sync_local(
     secret_target=None,
     secret_source="proton",
     values_data=None,
+    project_config=None,
 ):
     target = resolve_secret_target(config, secret_target)
     if target:
@@ -457,7 +510,7 @@ def sync_local(
             value = str(dev_default)
             print(f"   ✅ {key}: Using dev_default")
         else:
-            source = resolve_source(definition, config, secret_target=target)
+            source = resolve_source(definition, config, secret_target=target, project_config=project_config)
             fetched, resolved_from = resolve_secret_value(
                 key,
                 source,
@@ -484,7 +537,7 @@ def sync_local(
     print(f"✅ Successfully wrote {LOCAL_ENV_FILE}")
 
 
-def collect_github_secret_values(config, secrets_def, has_proton, secret_target, secret_source, values_data):
+def collect_github_secret_values(config, secrets_def, has_proton, secret_target, secret_source, values_data, project_config=None):
     """Resolve all GitHub secret values before any write when yaml input is active."""
     planned = []
     missing = []
@@ -494,7 +547,7 @@ def collect_github_secret_values(config, secrets_def, has_proton, secret_target,
             print(f"   ⏭️  Skipping {key}: exclude_from_github is set.")
             continue
 
-        source = resolve_source(definition, config, secret_target=secret_target)
+        source = resolve_source(definition, config, secret_target=secret_target, project_config=project_config)
         if secret_source == "proton" and not source:
             print(f"   ⚠️  Skipping {key}: No resolvable source defined in YAML.")
             continue
@@ -529,6 +582,7 @@ def sync_github(
     github_environment=None,
     secret_source="proton",
     values_data=None,
+    project_config=None,
 ):
     target_repo = config.get("target_repo")
     if not target_repo:
@@ -539,6 +593,7 @@ def sync_github(
         config,
         secret_target=secret_target,
         github_environment=github_environment,
+        project_config=project_config,
     )
 
     if environment_name:
@@ -563,6 +618,7 @@ def sync_github(
             secret_target,
             secret_source,
             values_data,
+            project_config=project_config,
         )
         if missing_keys:
             print("")
@@ -578,7 +634,7 @@ def sync_github(
                 print(f"   ⏭️  Skipping {key}: exclude_from_github is set.")
                 continue
 
-            source = resolve_source(definition, config, secret_target=secret_target)
+            source = resolve_source(definition, config, secret_target=secret_target, project_config=project_config)
             if secret_source == "proton" and not source:
                 print(f"   ⚠️  Skipping {key}: No resolvable source defined in YAML.")
                 continue
@@ -678,6 +734,7 @@ def main():
             secret_target=effective["secret_target"],
             secret_source=effective["secret_source"],
             values_data=values_data,
+            project_config=project_config,
         )
     else:
         sync_github(
@@ -688,6 +745,7 @@ def main():
             github_environment=args.github_environment,
             secret_source=effective["secret_source"],
             values_data=values_data,
+            project_config=project_config,
         )
 
 
