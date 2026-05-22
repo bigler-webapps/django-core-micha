@@ -1,6 +1,9 @@
 """Tests for sync_secrets.py — focused on project.yaml-based env/server resolution."""
 
+import pytest
+
 from django_core_micha.scripts.sync_secrets import (
+    get_target_scope,
     resolve_github_environment,
     resolve_server_from_project,
     resolve_source,
@@ -174,3 +177,29 @@ def test_resolve_github_environment_template_missing_target_returns_none(capsys)
     assert resolve_github_environment(config, secret_target=None) is None
     captured = capsys.readouterr()
     assert "without a secret target" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# get_target_scope — per-secret push scope override
+# ---------------------------------------------------------------------------
+
+
+def test_get_target_scope_defaults_to_env():
+    assert get_target_scope({}) == "env"
+
+
+def test_get_target_scope_honors_explicit_env():
+    assert get_target_scope({"target_scope": "env"}) == "env"
+
+
+def test_get_target_scope_honors_repo():
+    assert get_target_scope({"target_scope": "repo"}) == "repo"
+
+
+def test_get_target_scope_rejects_invalid_value(capsys):
+    with pytest.raises(SystemExit):
+        get_target_scope({"target_scope": "global"}, key="MY_SECRET")
+    captured = capsys.readouterr()
+    assert "invalid target_scope" in captured.out
+    assert "MY_SECRET" in captured.out
+    assert "allowed: env, repo" in captured.out
