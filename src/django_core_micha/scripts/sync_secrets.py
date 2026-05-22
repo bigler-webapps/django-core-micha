@@ -205,6 +205,25 @@ def is_excluded_from_github(definition):
     return bool(definition.get("exclude_from_github", False))
 
 
+VALID_TARGET_SCOPES = ("env", "repo")
+
+
+def get_target_scope(definition, key=None):
+    """Return per-secret push scope: 'env' (default) or 'repo'.
+
+    When 'repo', the secret is pushed at repository level regardless of any
+    github_environment / inventory / project.yaml env-resolution. Useful for
+    cross-cutting secrets that share a single value across all environments
+    (e.g. shared encryption keys, API tokens used by every workflow).
+    """
+    scope = definition.get("target_scope", "env")
+    if scope not in VALID_TARGET_SCOPES:
+        label = f" for secret '{key}'" if key else ""
+        print(f"❌ Error: invalid target_scope '{scope}'{label} (allowed: env, repo).")
+        sys.exit(1)
+    return scope
+
+
 def get_inventory_target_data(config, secret_target=None):
     """Load target metadata from the configured inventory file."""
     inventory_path = config.get("inventory_path")
@@ -653,9 +672,15 @@ def sync_github(
             planned_values.append((key, value, resolved_from))
 
     for key, value, resolved_from in planned_values:
-        print(f"   🚀 Pushing {key} to GitHub...", end="", flush=True)
+        definition = secrets_def.get(key, {})
+        scope = get_target_scope(definition, key=key)
+        use_env = bool(environment_name) and scope == "env"
+
+        scope_label = f"env {environment_name}" if use_env else "repo (forced)" if scope == "repo" else "repo"
+        print(f"   🚀 Pushing {key} to GitHub [{scope_label}]...", end="", flush=True)
+
         cmd = ["gh", "secret", "set", key, "--repo", target_repo]
-        if environment_name:
+        if use_env:
             cmd.extend(["--env", environment_name])
         proc = subprocess.run(cmd, input=value, text=True, capture_output=True)
 
