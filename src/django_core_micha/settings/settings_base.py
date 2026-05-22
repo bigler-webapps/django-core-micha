@@ -46,6 +46,12 @@ IS_EDGE = ENV_TYPE == "edge"
 
 IS_MASTER = IS_PRODUCTION and ORIGIN_SERVER_ID.upper().startswith("MASTER")
 
+if not IS_LOCAL and SECRET_KEY.strip() in ("", "local-dev-secret-key"):
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY must be set in non-local environments."
+    )
+
 
 logger.info(f"Starting with ENV_TYPE={ENV_TYPE}, ORIGIN_SERVER_ID={ORIGIN_SERVER_ID}, IS_MASTER={IS_MASTER}, IS_EDGE={IS_EDGE}, DEBUG={DEBUG}")
 
