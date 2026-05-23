@@ -248,6 +248,14 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.SessionAuthentication",
     ],
+    # Plattform-Default seit 2.12.0 (S70 Phase F): jede ViewSet/APIView ohne
+    # explizites `permission_classes`-Attribute UND ohne `get_permissions()`-Override
+    # bekommt deny-by-default. Public-Endpoints muessen `permission_classes =
+    # [AllowAny]` (oder eine Subklasse) explizit setzen. Siehe
+    # webapp-management/PLATFORM_PERMISSION_AUDIT.md fuer Audit-Trail je Konsument.
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
     "EXCEPTION_HANDLER": "django_core_micha.auth.exception_handler.custom_exception_handler",
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
