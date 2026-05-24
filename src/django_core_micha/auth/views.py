@@ -98,6 +98,25 @@ def auth_methods_view(request):
 
 # --- API ViewSets ---
 
+# S54: explizite Schreib-Allowlist für `auth_policy` PATCH (siehe
+# BaseUserViewSet.auth_policy). Verteidigung gegen "any new serializer field
+# becomes auto-writable" — jede neue Policy-Schreib-Erlaubnis muss hier
+# explizit ergänzt werden. Synchronisiert mit `AuthPolicySerializer.Meta.fields`
+# (nur Schreib-Operationen; Read-Side bleibt unbeschränkt via `serialize_policy`).
+AUTH_POLICY_WRITABLE_FIELDS = frozenset({
+    "allow_admin_invite",
+    "allow_self_signup_access_code",
+    "allow_self_signup_open",
+    "allow_self_signup_email_domain",
+    "allow_self_signup_qr",
+    "allowed_email_domains",
+    "required_auth_factor_count",
+    "admin_required_auth_factor_count",
+    "signup_qr_expiry_days",
+    "access_code_single_use",
+})
+
+
 class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = None 
@@ -250,8 +269,13 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
 
         serializer = AuthPolicySerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        for field, value in serializer.validated_data.items():
-            setattr(policy, field, value)
+        # S54: explizite Allowlist statt blanket `setattr`. Schützt davor,
+        # dass künftige Serializer-Felder automatisch zu schreibbaren Policy-
+        # Attributen werden — jede neue Policy-Schreib-Erlaubnis muss hier
+        # explizit ergänzt werden.
+        for field in AUTH_POLICY_WRITABLE_FIELDS:
+            if field in serializer.validated_data:
+                setattr(policy, field, serializer.validated_data[field])
         policy.save()
         return Response(serialize_policy(policy))
 
@@ -684,12 +708,18 @@ class RecoveryRequestViewSet(viewsets.ModelViewSet):
         detail=False,
         permission_classes=[AllowAny],
         throttle_classes=[ScopedRateThrottle, AnonRateThrottle],
-        url_path=r"recovery-login/(?P<token>[^/.]+)",
+        url_path="recovery-login",
     )
-    def recovery_login(self, request, token=None):
+    def recovery_login(self, request):
+        # S50: Token wird aus dem Body gelesen statt aus dem URL-Path.
+        # URL-Pfade landen in Referer-Headern, Access-Logs und Browser-History;
+        # bei einem POST-Credentials-Exchange ist der Token im Body sicherer.
+        token = request.data.get("token")
         identifier = request.data.get("email") or request.data.get("identifier")
         password = request.data.get("password")
 
+        if not token:
+            return Response({"code": "Auth.RECOVERY_TOKEN_INVALID"}, status=400)
         if not identifier or not password:
             return Response({"code": "Auth.CREDENTIALS_REQUIRED"}, status=400)
 

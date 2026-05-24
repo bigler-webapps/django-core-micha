@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 
 from django_core_micha.auth.access import can_user_authenticate
-from django_core_micha.auth.recovery import RecoveryRequest
+from django_core_micha.auth.recovery import RecoveryRequest, _compute_token_hmac
 from django_core_micha.auth.security import set_security_level
 from django_core_micha.emails import email_texts
 from django.core.mail import send_mail
@@ -61,13 +61,17 @@ def perform_recovery_login(request, identifier: str, password: str, token: str):
     Validates token and credentials, performs login, and closes the request.
     Raises AuthenticationFailed if anything is wrong.
     """
-    # 1. Validate Token
-    try:
-        rr = RecoveryRequest.objects.select_related("user").get(
-            token=token,
-            status=RecoveryRequest.Status.APPROVED,
-        )
-    except RecoveryRequest.DoesNotExist:
+    # 1. Validate Token via HMAC-Lookup (S51: constant-time, kein plaintext-
+    # Compare in der DB-Engine). Pattern analog `validate_access_code_or_error`
+    # in `invitations/access_codes.py` (S18). Plaintext-Token bleibt im
+    # `token`-Feld erhalten für Admin-Sichtbarkeit + Email-Link-Generierung.
+    token_hmac = _compute_token_hmac(token)
+    rr = (
+        RecoveryRequest.objects.select_related("user")
+        .filter(token_hmac=token_hmac, status=RecoveryRequest.Status.APPROVED)
+        .first()
+    )
+    if rr is None:
         raise AuthenticationFailed(code="Auth.RECOVERY_TOKEN_INVALID")
 
     if not rr.is_active():
