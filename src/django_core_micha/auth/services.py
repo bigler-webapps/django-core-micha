@@ -28,12 +28,15 @@ def send_recovery_link_to_user(rr: RecoveryRequest, recovery_url: str):
 
 # --- Business Logic ---
 
-def approve_recovery_request(request, recovery_request: RecoveryRequest, support_note: str) -> str:
+def approve_recovery_request(request, recovery_request: RecoveryRequest, support_note: str) -> None:
+    """Approve the request, mark it APPROVED, and email the recovery link
+    to the user.
+
+    S164: the link is intentionally NOT returned. The support agent does
+    not need it — only the email recipient does — and any return path
+    would risk re-introducing the token-in-API-response leak.
     """
-    Approves the request, generates the link, and sends the email.
-    Returns the generated recovery_link.
-    """
-    # 1. Build URL
+    # 1. Build the recovery URL for the email body only.
     path = reverse("mfa-recovery-complete", args=[recovery_request.token])
     recovery_url = request.build_absolute_uri(path)
 
@@ -46,8 +49,6 @@ def approve_recovery_request(request, recovery_request: RecoveryRequest, support
 
     # 3. Send Email
     send_recovery_link_to_user(recovery_request, recovery_url)
-    
-    return recovery_url
 
 def reject_recovery_request(request, recovery_request: RecoveryRequest, support_note: str):
     recovery_request.mark_resolved(

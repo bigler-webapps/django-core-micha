@@ -9,7 +9,8 @@ from django_core_micha.auth.views import (
     csrf_token_view,
     auth_methods_view,
     RecoveryRequestViewSet,
-    recovery_complete_view
+    recovery_complete_view,
+    recovery_session_token_view,
 )
 from django_core_micha.health.views import healthz_view
 
@@ -45,6 +46,16 @@ urlpatterns = [
         "mfa/recovery/<str:token>/",
         recovery_complete_view,
         name="mfa-recovery-complete",
+    ),
+
+    # S164: one-shot session handoff. After `recovery_complete_view` parks
+    # the plaintext token in the user's server session and redirects to
+    # `/login#recovery=ok`, the SPA pulls the token back from here and
+    # submits it in the `/recovery-login` POST body. Pops on every read.
+    path(
+        "auth/recovery/session-token/",
+        recovery_session_token_view,
+        name="mfa-recovery-session-token",
     ),
 
     # Password Reset Confirm (User klickt auf E-Mail Link)
