@@ -55,7 +55,7 @@ from .serializers import (
     RegistrationRequestSerializer,
     SignupQrCreateSerializer,
 )
-from .throttles import PerEmailScopedRateThrottle
+from .throttles import PerAccessCodeScopedRateThrottle, PerEmailScopedRateThrottle
 from .permissions import IsSupportAgent, IsAssignedSupportOrAdmin
 
 User = get_user_model()
@@ -186,12 +186,24 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         per_email_scopes = {
             "register_request": "email_register_request",
             "reset_request": "email_password_reset",
+            # S53: per-email cap on mfa_support_help — IP-only throttle
+            # (5/hour) was evadable via proxy rotation, letting attackers
+            # flood RecoveryRequest rows for a known email.
+            "mfa_support_help": "email_mfa_support_help",
         }
         scope = per_email_scopes.get(action)
         if scope is not None:
             per_email = PerEmailScopedRateThrottle()
             per_email.scope = scope
             throttles = list(throttles) + [per_email]
+
+        # S52: per-access-code throttle on register_request. The standalone
+        # /access-codes/validate endpoint gets the same protection in
+        # AccessCodeViewSet.get_throttles().
+        if action == "register_request":
+            per_code = PerAccessCodeScopedRateThrottle()
+            per_code.scope = "access_code_probe"
+            throttles = list(throttles) + [per_code]
 
         return throttles
 
@@ -411,11 +423,37 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # Reject re-confirmation when the user already exists.
+        # S42: do not leak account existence via a 409 response. Return the
+        # same success-shape as a fresh confirm, without creating any row or
+        # consuming the access-code / QR token.
+        #
+        # Why this is safe against probing (the real Q on review): the
+        # pending-registration token is a stateless signed blob whose payload
+        # embeds the issuer's own email (see `create_pending_registration_token`
+        # in invitations/access_codes.py). The signature is verified before we
+        # reach this branch, so the caller cannot swap in a different email to
+        # probe — the only callers who hit this code path for `email` are those
+        # who previously obtained a pending-token for that exact `email`, i.e.
+        # they already know it. External enumeration against arbitrary emails
+        # is therefore impossible; the prior 409 leaked the answer only to
+        # someone who in principle already had it, but it also told them
+        # "this user has not yet completed registration" — a different bit
+        # we don't want to publish either.
+        #
+        # The token itself is NOT consumed server-side here (it is signed-and-
+        # timed, no DB row). A legitimate user clicking an old confirm-link
+        # twice within the token's TTL therefore gets a silent success on the
+        # second click and is redirected to /login by the frontend.
+        #
+        # Residual: timing-side-channel between the user-exists branch (early
+        # return) and the success branch (validate_password + atomic create_user)
+        # is observable to the holder of a valid pending-token for the same
+        # email. Acceptable: the holder already knows the email and can
+        # observe second-click latency via the legitimate flow anyway.
         if User.objects.filter(email__iexact=email).exists():
             return Response(
-                {"code": "Auth.USER_ALREADY_EXISTS"},
-                status=status.HTTP_409_CONFLICT,
+                {"code": "Auth.REGISTRATION_CONFIRMED", "email": email},
+                status=status.HTTP_201_CREATED,
             )
 
         policy_state = get_policy_state(self.get_auth_policy())

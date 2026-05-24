@@ -26,6 +26,7 @@ User = get_user_model()
 
 from django_core_micha.auth.permissions import IsAccessCodeAdminOrSuperuser
 from django_core_micha.auth.signals import registration_completed
+from django_core_micha.auth.throttles import PerAccessCodeScopedRateThrottle
 from .models import AccessCode
 from .serializers import AccessCodeSerializer
 from .conf import ACCESS_CODE_REGISTRATION_ENABLED
@@ -60,7 +61,17 @@ class AccessCodeViewSet(viewsets.ModelViewSet):
             self.throttle_scope = "access_code_validate"
         else:
             self.throttle_scope = None
-        return super().get_throttles()
+        throttles = super().get_throttles()
+
+        # S52: per-access-code throttle on /validate. The per-IP scope
+        # (access_code_validate: 100/hour) leaves a 1-IP attacker 100 probes
+        # per code per hour; with proxy rotation that becomes effectively
+        # unlimited. Hashing on the code itself caps probing per-code.
+        if getattr(self, "action", None) == "validate":
+            per_code = PerAccessCodeScopedRateThrottle()
+            per_code.scope = "access_code_probe"
+            throttles = list(throttles) + [per_code]
+        return throttles
 
     @action(
         detail=False,

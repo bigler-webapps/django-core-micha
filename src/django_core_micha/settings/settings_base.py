@@ -276,6 +276,23 @@ REST_FRAMEWORK = {
         "email_register_request": "4/hour",
         "email_password_reset": "4/hour",
         "email_recovery_login": "4/hour",
+        # S53: per-email cap on mfa_support_help. The per-IP limit
+        # (`mfa_support_help: 5/hour` above) lets a proxy-rotating attacker
+        # flood RecoveryRequest rows for a known target email.
+        "email_mfa_support_help": "4/hour",
+        # S52: per-access-code throttle for register_request and the
+        # standalone /access-codes/validate endpoint
+        # (PerAccessCodeScopedRateThrottle). Closes the gap where
+        # `consume=False` validation lets one attacker probe one code many
+        # times by rotating the target email.
+        #
+        # NB: register_request and /access-codes/validate SHARE this bucket
+        # per-code by design — an attacker who exhausts one endpoint cannot
+        # fall through to the other for fresh quota. The trade-off is that
+        # a legitimate user who retries the same code across both flows
+        # (typo on signup → re-validate → retry) consumes the bucket
+        # combined. 10/hour leaves enough headroom for that.
+        "access_code_probe": "10/hour",
     },
 }
 
