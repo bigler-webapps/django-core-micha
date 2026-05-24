@@ -1,13 +1,29 @@
 # django_core_micha/auth/recovery.py
+import hashlib
+import hmac
+import secrets
 import uuid
 from datetime import timedelta
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
-import secrets
+
 
 def generate_recovery_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+def _compute_token_hmac(token: str) -> str:
+    """HMAC-SHA256 over the recovery token using SECRET_KEY as the key.
+
+    S51: enables constant-time lookup by hash instead of plaintext-token compare.
+    Plaintext token is still stored in `token` for admin visibility / link emit.
+    Pattern analog `invitations.models._compute_code_hmac` (S18).
+    """
+    secret = settings.SECRET_KEY
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    return hmac.new(secret, (token or "").encode("utf-8"), hashlib.sha256).hexdigest()
 
 class RecoveryRequest(models.Model):
     """
@@ -36,6 +52,16 @@ class RecoveryRequest(models.Model):
         unique=True,
         default=generate_recovery_token,
         help_text="One-time token used in the recovery login URL.",
+    )
+
+    # S51: HMAC of `token` for constant-time DB-level equality lookup. Kept
+    # in sync via `save()` override below. See `_compute_token_hmac` docstring
+    # for the rationale (analog to invitations.AccessCode.code_hmac / S18).
+    token_hmac = models.CharField(
+        max_length=64,
+        blank=True,
+        db_index=True,
+        default="",
     )
 
     support_note = models.TextField(
@@ -97,6 +123,21 @@ class RecoveryRequest(models.Model):
         if self.status not in {self.Status.PENDING, self.Status.APPROVED}:
             return False
         return not self.is_expired()
+
+    def save(self, *args, **kwargs):
+        # S51: keep token_hmac in sync with token on every save. Same pattern
+        # as `invitations.models.AccessCode.save`.
+        #
+        # Note on `save(update_fields=[...])` callers (`mark_resolved`,
+        # `mark_completed`): the in-memory `self.token_hmac` is recomputed
+        # but NOT persisted because `token_hmac` isn't in their `update_fields`.
+        # That is safe because those flows don't change `self.token`, so the
+        # already-persisted hmac stays correct. The recomputation is wasted
+        # work but not a desync — if a future flow DOES mutate `self.token`
+        # alongside a partial save, the caller must include `"token_hmac"`
+        # in `update_fields` explicitly.
+        self.token_hmac = _compute_token_hmac(self.token or "")
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"RecoveryRequest({self.user_id}, {self.status})"
