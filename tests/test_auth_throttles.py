@@ -31,8 +31,8 @@ def _fake_request(body: dict | None) -> SimpleNamespace:
     return SimpleNamespace(data=body)
 
 
-def _sha1(value: str) -> str:
-    return hashlib.sha1(value.encode("utf-8")).hexdigest()
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -58,7 +58,7 @@ class TestPerEmailScopedRateThrottle:
         throttle.scope = "email_register_request"
         key = throttle.get_cache_key(_fake_request({"email": "  Alice@Example.COM "}), view=None)
         # Normalisation: strip + lowercase before hashing.
-        expected_digest = _sha1("alice@example.com")
+        expected_digest = _sha256("alice@example.com")
         assert key is not None
         assert expected_digest in key
         # Format follows DRF's `throttle_<scope>_<ident>`.
@@ -101,8 +101,8 @@ class TestPerEmailScopedRateThrottle:
             view=None,
         )
         assert key is not None
-        assert _sha1("real@x.com") in key
-        assert _sha1("decoy@x.com") not in key
+        assert _sha256("real@x.com") in key
+        assert _sha256("decoy@x.com") not in key
 
 
 # --------------------------------------------------------------------------- #
@@ -135,7 +135,7 @@ class TestPerAccessCodeScopedRateThrottle:
             _fake_request({"access_code": "ABC-123"}), view=None
         )
         assert key is not None
-        assert _sha1("abc-123") in key
+        assert _sha256("abc-123") in key
         assert key.startswith("throttle_access_code_probe_")
 
     def test_keys_on_code_field_fallback(self):
@@ -150,7 +150,7 @@ class TestPerAccessCodeScopedRateThrottle:
         # bucket into the same throttle scope, which is intentional: an
         # attacker who probes via /access-codes/validate cannot get a fresh
         # bucket by switching to /users/register-request.
-        assert _sha1("abc-123") in key
+        assert _sha256("abc-123") in key
 
     def test_access_code_wins_over_code_when_both_present(self):
         """`access_code` is the canonical field. `code` is the secondary fallback."""
@@ -160,9 +160,9 @@ class TestPerAccessCodeScopedRateThrottle:
             _fake_request({"access_code": "AAA", "code": "BBB"}), view=None
         )
         assert key is not None
-        assert _sha1("aaa") in key
+        assert _sha256("aaa") in key
         # And not BBB.
-        assert _sha1("bbb") not in key
+        assert _sha256("bbb") not in key
 
     def test_normalisation_strips_and_lowercases(self):
         throttle = PerAccessCodeScopedRateThrottle()

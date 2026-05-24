@@ -22,6 +22,7 @@ HTTP status:
 """
 from __future__ import annotations
 
+import logging
 import time
 
 from django.core.cache import cache
@@ -32,7 +33,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET
 
 
-_ERROR_TRUNCATE = 200
+logger = logging.getLogger(__name__)
 
 
 def _check_db() -> dict:
@@ -41,11 +42,14 @@ def _check_db() -> dict:
         with connection.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
-    except Exception as exc:  # noqa: BLE001 — surface any failure mode
+    except Exception:  # noqa: BLE001 — surface any failure mode
+        # Do not leak driver-level error text (can include credentials, host
+        # names, schema details). Log the full exception server-side instead.
+        logger.exception("healthz: database check failed")
         return {
             "ok": False,
             "duration_ms": round((time.perf_counter() - start) * 1000, 2),
-            "error": str(exc)[:_ERROR_TRUNCATE],
+            "error": "database check failed",
         }
     return {
         "ok": True,
@@ -64,13 +68,14 @@ def _check_cache() -> dict:
             return {
                 "ok": False,
                 "duration_ms": round((time.perf_counter() - start) * 1000, 2),
-                "error": "round-trip mismatch (set value not readable)",
+                "error": "cache round-trip mismatch",
             }
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
+        logger.exception("healthz: cache check failed")
         return {
             "ok": False,
             "duration_ms": round((time.perf_counter() - start) * 1000, 2),
-            "error": str(exc)[:_ERROR_TRUNCATE],
+            "error": "cache check failed",
         }
     return {
         "ok": True,
