@@ -122,7 +122,14 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
+    # S19: Enforce MFA enrollment for Django admin in non-local envs.
+    # Opt-out via `ADMIN_MFA_REQUIRED = False` in the project's settings.
+    # Placed AFTER AccountMiddleware so allauth-session state is available.
+    "django_core_micha.auth.admin_mfa_middleware.AdminMfaRequiredMiddleware",
 ]
+
+# S19: Set to False to disable admin-MFA enforcement (not recommended in prod).
+ADMIN_MFA_REQUIRED = True
 
 # ROOT_URLCONF / WSGI_APPLICATION / ASGI_APPLICATION / SITE_ID
 # bleiben im Projekt (backend/settings.py), nicht im Core.
