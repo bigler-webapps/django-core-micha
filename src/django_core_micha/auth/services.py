@@ -75,8 +75,11 @@ def perform_recovery_login(request, identifier: str, password: str, token: str):
         raise AuthenticationFailed(code="Auth.RECOVERY_TOKEN_INVALID")
 
     if not rr.is_active():
-        if rr.status in {RecoveryRequest.Status.PENDING, RecoveryRequest.Status.APPROVED}:
-            rr.mark_resolved(RecoveryRequest.Status.EXPIRED)
+        # Queryset above already filtered status=APPROVED, so this branch is
+        # only reachable when the approved token has expired by time. No
+        # PENDING handling needed here; if the lookup is ever widened, the
+        # caller must reintroduce the status guard.
+        rr.mark_resolved(RecoveryRequest.Status.EXPIRED)
         raise AuthenticationFailed(code="Auth.RECOVERY_TOKEN_EXPIRED")
 
     # 2. Validate User & Password

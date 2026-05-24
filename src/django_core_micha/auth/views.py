@@ -634,7 +634,12 @@ class PasskeyViewSet(viewsets.ViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class RecoveryRequestViewSet(viewsets.ModelViewSet):
+class RecoveryRequestViewSet(viewsets.ReadOnlyModelViewSet):
+    # ReadOnly + explicit @action routes is the intended surface: lifecycle
+    # writes happen only through `approve`, `reject`, `recovery_login` (each
+    # with its own permission_classes). Switching from ModelViewSet closes the
+    # prior fallthrough where any authenticated user could POST/PATCH/DELETE
+    # arbitrary recovery requests via the default CRUD routes.
     queryset = RecoveryRequest.objects.all().select_related("user", "resolved_by")
     serializer_class = RecoveryRequestSerializer
     throttle_scope = None
@@ -657,8 +662,6 @@ class RecoveryRequestViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action == "recovery_login":
             return [AllowAny()]
-        if self.action == "create_from_mfa":
-            return [IsAuthenticated()]
         if self.action in ("list", "retrieve"):
             return [IsSupportAgent()]
         if self.action in ("approve", "reject"):

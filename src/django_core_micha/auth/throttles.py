@@ -39,7 +39,7 @@ class _BodyKeyedScopedRateThrottle(ScopedRateThrottle):
         if not ident:
             return None
 
-        digest = hashlib.sha1(ident.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(ident.encode("utf-8")).hexdigest()
         return self.cache_format % {
             "scope": self.scope,
             "ident": digest,
@@ -65,7 +65,7 @@ class _BodyKeyedScopedRateThrottle(ScopedRateThrottle):
 
 
 class PerEmailScopedRateThrottle(_BodyKeyedScopedRateThrottle):
-    """Scoped throttle keyed by the lowercased, SHA-1-hashed target email.
+    """Scoped throttle keyed by the lowercased, SHA-256-hashed target email.
 
     Reads both `email` and the `mfa_support_help`-specific `identifier` body
     field — the latter is documented as an alias on that endpoint (see
@@ -96,7 +96,7 @@ class PerEmailScopedRateThrottle(_BodyKeyedScopedRateThrottle):
 
 
 class PerAccessCodeScopedRateThrottle(_BodyKeyedScopedRateThrottle):
-    """Scoped throttle keyed by the lowercased, SHA-1-hashed access code.
+    """Scoped throttle keyed by the lowercased, SHA-256-hashed access code.
 
     S52: prevents per-email-throttle evasion via target-email rotation when
     probing access codes (validate-only path with `consume=False`). Applied
