@@ -48,11 +48,20 @@ The doc note "S111 closed by platform-default bump to 2.12.0" was **wrong** — 
 **Fix:** Replace `str(exc)[:_ERROR_TRUNCATE]` with generic string (e.g. `"database check failed"`); log the full exception server-side at ERROR level.
 
 ### S167 — DCM-NEW-account-email-verification-optional — `ACCOUNT_EMAIL_VERIFICATION = "optional"` platform default
-**Severity:** P2
+**Severity:** P2 → `[~]` accepted with rationale (2026-05-28)
 **File:** `src/django_core_micha/settings/settings_base.py:323`
 **Confidence:** medium
 **Issue:** Allauth's headless login endpoint (`/api/auth/browser/v1/auth/login`) does not gate on `email_verification` for password logins. `"optional"` means an admin-invited user (`EmailAddress.verified=False`) can authenticate via allauth headless without consuming the invite link / completing email-ownership proof. The custom `register_confirm` flow sets `verified=True`, but admin-invite path in `InviteActionsMixin.invite` creates `EmailAddress` with `verified=False`. The `InvitationOnlySocialAdapter` comment references this gap defensively.
-**Fix:** Set `ACCOUNT_EMAIL_VERIFICATION = "mandatory"` platform-wide; ensure invite-flow sets `verified=True` only after the invite link is consumed (already done in `PasswordResetConfirmView.post`).
+
+**Accepted with rationale:** Verified 2026-05-28 — `verified=True` is enforced at three independent layers that gate every realistic signup/login path:
+
+1. **Social signup** — `InvitationOnlySocialAdapter.is_open_for_signup` (adapters.py:27-30) filters `verified=True`; unverified accounts cannot auto-connect.
+2. **Social auto-connect signal** — `signals.py:75-85` checks `verified=True` before linking and warns-logs the skip path.
+3. **Password signup** — `register_confirm` (S13 Pending-Token flow) creates Users only after email confirmation; admin-invite uses `PasswordResetConfirmView` which sets `verified=True` before password-set is possible.
+
+The `"optional"` allauth-default is therefore unreachable on the platform's actual signup paths. Setting it to `"mandatory"` would be cosmetic but not changing behaviour. Re-open if any of the three gates is weakened.
+
+_Closed (accepted) 2026-05-28._
 
 ---
 
