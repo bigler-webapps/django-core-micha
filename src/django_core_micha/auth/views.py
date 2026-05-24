@@ -1,10 +1,14 @@
 # src/django_core_micha/auth/views.py
+import time
+
 from django.shortcuts import get_object_or_404, redirect
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.core import signing
 from django.urls import reverse
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import ensure_csrf_cookie
+from django.views.decorators.http import require_GET
 from django.http import JsonResponse
 
 from rest_framework.response import Response
@@ -62,10 +66,20 @@ User = get_user_model()
 
 # --- Standard Views ---
 
+# S164: token must not be carried in the redirect fragment. The fragment
+# survives in browser history and is readable by any JS on the login origin
+# (analytics, error reporters, third-party scripts). Instead, stash the
+# plaintext token in the server-side session under a short TTL and redirect
+# without the token; the SPA then pulls it back via
+# `recovery_session_token_view` and submits it in the recovery-login POST
+# body (S50 keeps it out of access logs at the credentials-exchange step).
+RECOVERY_SESSION_TOKEN_KEY = "mfa_recovery_token"
+RECOVERY_SESSION_TOKEN_EXPIRES_KEY = "mfa_recovery_token_expires"
+RECOVERY_SESSION_TOKEN_TTL_SECONDS = 120
+
+
 def recovery_complete_view(request, token: str):
-    """
-    Entry point from the email link. Redirects to frontend.
-    """
+    """Entry point from the email link. Redirects to frontend."""
     target_base = f"{settings.PUBLIC_ORIGIN}/login"
     try:
         rr = RecoveryRequest.objects.select_related("user").get(token=token)
@@ -75,7 +89,57 @@ def recovery_complete_view(request, token: str):
     if not rr.is_active():
         return redirect(f"{target_base}#recovery=expired")
 
-    return redirect(f"{target_base}#recovery={rr.token}")
+    # Hand off via session: store the plaintext token + a unix-epoch expiry
+    # (timezone-independent — avoids aware/naive datetime mismatches across
+    # consumer apps that may run with USE_TZ=False).
+    # The redirect itself carries only a sentinel ("ok") so neither the URL
+    # nor the fragment ever contains the token.
+    request.session[RECOVERY_SESSION_TOKEN_KEY] = rr.token
+    request.session[RECOVERY_SESSION_TOKEN_EXPIRES_KEY] = (
+        int(time.time()) + RECOVERY_SESSION_TOKEN_TTL_SECONDS
+    )
+    return redirect(f"{target_base}#recovery=ok")
+
+
+@never_cache
+@require_GET
+def recovery_session_token_view(request):
+    """One-shot handoff endpoint: pops the recovery token from the user's
+    session and returns it to the SPA. Subsequent calls return 404 because
+    the session keys are popped on every access (including the failure
+    path — stale entries are cleared so a partially-completed flow does
+    not leave a usable token sitting around).
+
+    Same-origin protection: when the browser sends `Sec-Fetch-Site`
+    (modern browsers always do), we require exactly `same-origin`. Rejected
+    values:
+    - `cross-site`: attacker-page-initiated top-level nav. Blocks DoS via
+      token consumption (attacker can't read the body, but popping it
+      breaks the legitimate flow).
+    - `same-site`: a different subdomain navigating to this endpoint —
+      blocked because the SPA SHOULD always be same-origin with the API.
+    - `none`: address-bar/bookmark navigation. Rejected because the SPA
+      never reaches this endpoint that way; an in-flight handoff is always
+      driven by the apiClient on the login page. Tightening here also
+      prevents a confused-deputy bookmark from consuming a future user's
+      token.
+
+    Older clients that do not send the header pass through; the response
+    body is unreadable cross-origin anyway via standard CORS + SameSite=Lax.
+    """
+    sec_fetch_site = request.META.get("HTTP_SEC_FETCH_SITE")
+    if sec_fetch_site is not None and sec_fetch_site != "same-origin":
+        return JsonResponse({"code": "Auth.RECOVERY_TOKEN_INVALID"}, status=404)
+
+    token = request.session.pop(RECOVERY_SESSION_TOKEN_KEY, None)
+    expires_at = request.session.pop(RECOVERY_SESSION_TOKEN_EXPIRES_KEY, None)
+    if not token or not isinstance(expires_at, int):
+        return JsonResponse({"code": "Auth.RECOVERY_TOKEN_INVALID"}, status=404)
+
+    if expires_at <= int(time.time()):
+        return JsonResponse({"code": "Auth.RECOVERY_TOKEN_INVALID"}, status=404)
+
+    return JsonResponse({"token": token})
 
 
 @ensure_csrf_cookie
@@ -678,20 +742,21 @@ class RecoveryRequestViewSet(viewsets.ReadOnlyModelViewSet):
     @action(methods=["post"], detail=True)
     def approve(self, request, pk=None):
         rr = self.get_object()
-        # Permission check via get_permissions handles the class check, 
-        # but specific object permission is checked by DRF automatically in many cases.
-        # However, since we use custom logic in permissions.py, calling it explicitly is safer if not using standard DRF flow.
+        # Object-level permission check (defense-in-depth — `get_permissions`
+        # gates the class but custom permissions.py logic is not always
+        # automatically invoked by DRF for detail-actions).
         self.check_object_permissions(request, rr)
 
         support_note = request.data.get("support_note", "")
-        
-        # Call Service
-        recovery_url = services.approve_recovery_request(request, rr, support_note)
+
+        # S164: the service still builds the absolute URL for the user-facing
+        # email; the support agent does not need the plaintext recovery link
+        # back in the API response (it would leak through access logs and
+        # any DevTools history). Discard the return value here.
+        services.approve_recovery_request(request, rr, support_note)
 
         serializer = self.get_serializer(rr)
-        data = serializer.data
-        data["recovery_link"] = recovery_url
-        return Response(data)
+        return Response(serializer.data)
 
     @action(methods=["post"], detail=True)
     def reject(self, request, pk=None):
