@@ -87,7 +87,9 @@ class RecoveryRequest(models.Model):
     # approval TTL window (see `expires_at`) so an approved token is not
     # already expiring when the user opens the recovery email — the previous
     # `created_at + TTL` made tokens unusable for requests that sat in
-    # PENDING close to the TTL. Null for legacy rows; the property falls
+    # PENDING close to the TTL. Set-once by `mark_resolved(APPROVED)`. May
+    # be NULL on rows that reached APPROVED outside that write path (raw
+    # `QuerySet.update`, admin bulk action, fixtures); `expires_at` falls
     # back to `created_at` in that case.
     approved_at = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
@@ -120,7 +122,10 @@ class RecoveryRequest(models.Model):
         self.resolved_by = by
         self.resolved_at = timezone.now()
         update_fields = ["status", "resolved_by", "resolved_at"]
-        if new_status == self.Status.APPROVED:
+        # Set-once: a re-approval on an already-APPROVED row must not reset
+        # the TTL anchor (defense against admin bulk-action or a misuse path
+        # that would silently extend the validity window).
+        if new_status == self.Status.APPROVED and self.approved_at is None:
             self.approved_at = self.resolved_at
             update_fields.append("approved_at")
         if note is not None:

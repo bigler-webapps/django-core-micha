@@ -39,12 +39,14 @@ class RecoveryRequestSerializer(serializers.ModelSerializer):
             "support_note",
             "status",
             "created_at",
+            "approved_at",
             "resolved_at",
         )
         read_only_fields = (
             "user",
             "status",
             "created_at",
+            "approved_at",
             "resolved_at",
         )
 
