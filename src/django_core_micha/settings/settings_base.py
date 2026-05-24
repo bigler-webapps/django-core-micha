@@ -23,8 +23,6 @@ DEBUG = env("DEBUG", default=False)
 # 1) Environment type: local / staging / production / edge / ...
 ENV_TYPE = env("ENV_TYPE", default="local").lower()
 
-SYNC_SHARED_SECRET = env("SYNC_SHARED_SECRET", default=None)
-
 SECRET_KEY = env("DJANGO_SECRET_KEY", default="local-dev-secret-key")
 
 # 2) Origin server id
