@@ -83,6 +83,15 @@ class RecoveryRequest(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
+    # Timestamp of the PENDING → APPROVED transition. Anchor for the post-
+    # approval TTL window (see `expires_at`) so an approved token is not
+    # already expiring when the user opens the recovery email — the previous
+    # `created_at + TTL` made tokens unusable for requests that sat in
+    # PENDING close to the TTL. Set-once by `mark_resolved(APPROVED)`. May
+    # be NULL on rows that reached APPROVED outside that write path (raw
+    # `QuerySet.update`, admin bulk action, fixtures); `expires_at` falls
+    # back to `created_at` in that case.
+    approved_at = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
 
     resolved_by = models.ForeignKey(
@@ -97,7 +106,11 @@ class RecoveryRequest(models.Model):
     def expires_at(self):
         ttl_minutes = int(getattr(settings, "RECOVERY_REQUEST_TTL_MINUTES", 30) or 30)
         ttl_minutes = max(ttl_minutes, 1)
-        return self.created_at + timedelta(minutes=ttl_minutes)
+        if self.status == self.Status.APPROVED and self.approved_at is not None:
+            base = self.approved_at
+        else:
+            base = self.created_at
+        return base + timedelta(minutes=ttl_minutes)
 
     def is_expired(self) -> bool:
         return timezone.now() >= self.expires_at
@@ -109,6 +122,12 @@ class RecoveryRequest(models.Model):
         self.resolved_by = by
         self.resolved_at = timezone.now()
         update_fields = ["status", "resolved_by", "resolved_at"]
+        # Set-once: a re-approval on an already-APPROVED row must not reset
+        # the TTL anchor (defense against admin bulk-action or a misuse path
+        # that would silently extend the validity window).
+        if new_status == self.Status.APPROVED and self.approved_at is None:
+            self.approved_at = self.resolved_at
+            update_fields.append("approved_at")
         if note is not None:
             self.support_note = note
             update_fields.append("support_note")
