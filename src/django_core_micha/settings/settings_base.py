@@ -327,6 +327,20 @@ ACCOUNT_SIGNUP_FIELDS = ['email*']
 ACCOUNT_UNIQUE_EMAIL = True
 ACCOUNT_EMAIL_VERIFICATION = "optional"
 
+# S212 — Brute-Force + Credential-Stuffing-Mitigation via allauth built-in rate limiter.
+# Backed by Django cache (Redis in production). Disabled locally so dev/test flows are
+# not disrupted by a Redis dependency and test isolation is trivial.
+if not IS_LOCAL:
+    ACCOUNT_RATE_LIMITS = {
+        "login_failed":   "5/5m/ip,10/h/user",
+        "login":          "30/m/ip",
+        "signup":         "10/h/ip",
+        "password_reset": "5/h/ip,3/h/user",
+        "reauthenticate": "10/m/user",
+        "confirm_email":  "3/h/user",
+        "manage_email":   "10/h/user",
+    }
+
 LOGIN_REDIRECT_URL = "/"
 ACCOUNT_DEFAULT_HTTP_PROTOCOL = "https"
 
