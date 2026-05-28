@@ -30,7 +30,10 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 from typing import Sequence
+
+logger = logging.getLogger(__name__)
 
 
 class WsPermission:
@@ -53,7 +56,12 @@ class IsAuthenticatedWs(WsPermission):
 class IsSuperuserWs(WsPermission):
     async def has_permission(self, scope: dict, consumer) -> bool:
         user = scope.get("user")
-        return bool(user and getattr(user, "is_superuser", False))
+        # Guard on is_authenticated first — is_superuser alone is not sufficient.
+        return bool(
+            user
+            and getattr(user, "is_authenticated", False)
+            and getattr(user, "is_superuser", False)
+        )
 
 
 class IsObjectOwnerWs(WsPermission):
@@ -87,6 +95,7 @@ class BaseSecureConsumer:
     Close codes:
     - 4401 — not authenticated (anonymous connection on a protected route)
     - 4403 — authenticated but permission denied
+    - 1011 — server error in post_connect() after the connection was accepted
     """
 
     permission_classes_ws: Sequence[type[WsPermission]] = ()
@@ -105,13 +114,25 @@ class BaseSecureConsumer:
             try:
                 ok = await perm.has_permission(self.scope, self)  # type: ignore[attr-defined]
             except Exception:
+                logger.exception(
+                    "WS permission %s raised on %s; treating as deny",
+                    perm_class.__name__,
+                    type(self).__name__,
+                )
                 ok = False
             if not ok:
                 await self.close(code=4403)  # type: ignore[attr-defined]
                 return
 
         await self.accept()  # type: ignore[attr-defined]
-        await self.post_connect()
+        try:
+            await self.post_connect()
+        except Exception:
+            logger.exception(
+                "post_connect() raised on %s; closing accepted connection",
+                type(self).__name__,
+            )
+            await self.close(code=1011)  # type: ignore[attr-defined]
 
     async def post_connect(self) -> None:
         """Override in subclass for setup-after-accept. Default no-op."""
@@ -126,7 +147,8 @@ def assert_all_consumers_secure(module_paths: list[str]) -> list[str]:
 
     For each module, every class whose name ends in 'Consumer' must either:
     1. Inherit from ``BaseSecureConsumer``, OR
-    2. Declare a class-level ``_WS_AUDIT_EXEMPT = "<reason>"`` attribute.
+    2. Declare a class-level ``_WS_AUDIT_EXEMPT = "<non-empty reason string>"``
+       attribute.
 
     Pass the result to ``assert violations == []`` in your test.
     """
@@ -140,7 +162,8 @@ def assert_all_consumers_secure(module_paths: list[str]) -> list[str]:
                 continue  # skip re-exports / imports from other modules
             if issubclass(cls, BaseSecureConsumer):
                 continue
-            if getattr(cls, "_WS_AUDIT_EXEMPT", None) is not None:
+            exempt_reason = getattr(cls, "_WS_AUDIT_EXEMPT", None)
+            if isinstance(exempt_reason, str) and exempt_reason.strip():
                 continue
             violations.append(
                 f"{module_path}.{name}: missing BaseSecureConsumer and no _WS_AUDIT_EXEMPT"

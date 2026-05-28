@@ -100,6 +100,17 @@ async def test_is_superuser_superuser_passes():
     assert await perm.has_permission(_scope(_SuperUser()), None)
 
 
+@pytest.mark.asyncio
+async def test_is_superuser_anon_with_is_superuser_true_fails():
+    """is_superuser=True on an unauthenticated user must not pass (S1 fix)."""
+    class _AnonSuperUser:
+        is_authenticated = False
+        is_superuser = True
+
+    perm = IsSuperuserWs()
+    assert not await perm.has_permission(_scope(_AnonSuperUser()), None)
+
+
 # ---------------------------------------------------------------------------
 # IsObjectOwnerWs
 # ---------------------------------------------------------------------------
@@ -235,6 +246,32 @@ async def test_base_no_perms_auth_user_accepts():
 
 
 @pytest.mark.asyncio
+async def test_base_post_connect_exception_closes_with_1011():
+    """post_connect() raising must close the accepted connection (S2 fix)."""
+    class _BrokenConsumer(BaseSecureConsumer):
+        closed_code: int | None = None
+        accepted: bool = False
+
+        def __init__(self, scope):
+            self.scope = scope
+            self.permission_classes_ws = ()
+
+        async def close(self, code=1000):
+            self.closed_code = code
+
+        async def accept(self):
+            self.accepted = True
+
+        async def post_connect(self):
+            raise RuntimeError("group_add failed")
+
+    c = _BrokenConsumer(_scope(_AuthUser()))
+    await c.connect()
+    assert c.accepted
+    assert c.closed_code == 1011
+
+
+@pytest.mark.asyncio
 async def test_base_chain_first_deny_blocks_second():
     """Second permission should not run if first denied."""
     second_called = []
@@ -289,6 +326,26 @@ def test_inventory_exempt_passes():
         assert not any("_ExemptConsumer" in v for v in violations)
     finally:
         delattr(mod, "_ExemptConsumer")
+
+
+def test_inventory_falsy_exempt_does_not_pass():
+    """_WS_AUDIT_EXEMPT = '' or False must NOT count as exempt (S4 fix)."""
+    from django_core_micha.auth import ws_permissions as mod
+
+    attr_name = "_FalsyExemptTestConsumer"
+    for falsy_val in ("", False, 0, None):
+        class _FalsyExemptTestConsumer:
+            pass
+        _FalsyExemptTestConsumer._WS_AUDIT_EXEMPT = falsy_val
+        _FalsyExemptTestConsumer.__module__ = mod.__name__
+        setattr(mod, attr_name, _FalsyExemptTestConsumer)
+        try:
+            violations = assert_all_consumers_secure([mod.__name__])
+            assert any(attr_name in v for v in violations), (
+                f"falsy _WS_AUDIT_EXEMPT={falsy_val!r} should have produced a violation"
+            )
+        finally:
+            delattr(mod, attr_name)
 
 
 def test_inventory_base_secure_consumer_subclass_passes():
