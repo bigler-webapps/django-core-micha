@@ -104,8 +104,10 @@ class TestUserLoginFailed:
         )
         event = AuditEvent.objects.get(event_type="users.user.login_failed")
         assert email not in str(event.metadata)
-        expected_hash = hashlib.sha256(email.lower().encode()).hexdigest()[:8]
+        # 32 hex chars = 128 bits — safe against offline preimage attacks (S2)
+        expected_hash = hashlib.sha256(email.lower().encode()).hexdigest()[:32]
         assert event.metadata["credential_hash"] == expected_hash
+        assert len(event.metadata["credential_hash"]) == 32
 
     def test_no_plaintext_password_in_metadata(self, db, rf):
         req = _make_request(rf)

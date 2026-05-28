@@ -10,6 +10,8 @@ from rest_framework.response import Response
 from django_core_micha.auditlog.models import AuditEvent
 from django_core_micha.auth.exception_handler import custom_exception_handler
 
+# NotAuthenticated (401) is intentionally NOT logged (S3: unauthenticated DB amplification risk).
+
 User = get_user_model()
 
 
@@ -37,34 +39,17 @@ def _make_context(rf, user=None, path="/api/test/", view_name="TestView", action
 
 
 # ---------------------------------------------------------------------------
-# NotAuthenticated → drf.not_authenticated
+# NotAuthenticated (401) — NOT logged (S3: unauthenticated DB amplification risk)
 # ---------------------------------------------------------------------------
 
 class TestNotAuthenticated:
-    def test_creates_audit_event(self, db, rf):
+    def test_no_audit_event_created(self, db, rf):
         exc = NotAuthenticated()
         context = _make_context(rf)
         custom_exception_handler(exc, context)
-        event = AuditEvent.objects.filter(event_type="drf.not_authenticated").first()
-        assert event is not None
+        assert AuditEvent.objects.filter(event_type="drf.not_authenticated").count() == 0
 
-    def test_actor_is_none_for_anonymous(self, db, rf):
-        exc = NotAuthenticated()
-        context = _make_context(rf)
-        custom_exception_handler(exc, context)
-        event = AuditEvent.objects.get(event_type="drf.not_authenticated")
-        assert event.actor_id is None
-
-    def test_metadata_contains_view_and_path(self, db, rf):
-        exc = NotAuthenticated()
-        context = _make_context(rf, path="/api/secure/", view_name="SecureView")
-        custom_exception_handler(exc, context)
-        event = AuditEvent.objects.get(event_type="drf.not_authenticated")
-        assert event.metadata["view"] == "SecureView"
-        assert event.metadata["path"] == "/api/secure/"
-        assert event.metadata["method"] == "GET"
-
-    def test_response_is_still_correct(self, db, rf):
+    def test_response_is_still_401(self, db, rf):
         exc = NotAuthenticated()
         context = _make_context(rf)
         resp = custom_exception_handler(exc, context)
@@ -98,6 +83,15 @@ class TestPermissionDenied:
         event = AuditEvent.objects.get(event_type="drf.permission_denied")
         assert event.metadata["action"] == "destroy"
         assert event.metadata["view"] == "ItemViewSet"
+
+    def test_error_code_not_detail_string(self, user, db, rf):
+        exc = PermissionDenied("User foo@example.com lacks permission X")
+        context = _make_context(rf, user=user)
+        custom_exception_handler(exc, context)
+        event = AuditEvent.objects.get(event_type="drf.permission_denied")
+        # Full detail string must not be stored — only the error code (S4)
+        assert "foo@example.com" not in str(event.metadata)
+        assert "error_code" in event.metadata
 
     def test_response_is_still_403(self, user, db, rf):
         exc = PermissionDenied()
@@ -148,7 +142,7 @@ class TestUnhandledException:
         context = _make_context(rf)
         custom_exception_handler(exc, context)
         assert AuditEvent.objects.filter(
-            event_type__in=["drf.not_authenticated", "drf.permission_denied", "drf.throttled"]
+            event_type__in=["drf.permission_denied", "drf.throttled"]
         ).count() == 0
 
 

@@ -13,8 +13,10 @@ AUTH_CODE_MAP = {
     "permission_denied": "auth.permission_denied",
 }
 
+# S213: NotAuthenticated (401) is intentionally excluded — anonymous 401s would allow
+# an unauthenticated attacker to drive unlimited AuditEvent INSERTs (DB amplification, S3).
+# 403 and 429 are logged because they always have a resolved actor or bounded throttle rates.
 _AUDIT_EVENT_TYPES = {
-    NotAuthenticated: "drf.not_authenticated",
     PermissionDenied: "drf.permission_denied",
     Throttled: "drf.throttled",
 }
@@ -79,12 +81,17 @@ def _log_authz_audit_event(exc, context) -> None:
     if request and getattr(request, "user", None) and request.user.is_authenticated:
         actor = request.user
 
+    # Store only the error code, not the full detail string — detail may contain
+    # caller-supplied PII (e.g. PermissionDenied("User foo@example.com lacks X")) (S4).
+    error_code = getattr(exc, "default_code", None) or getattr(
+        getattr(exc, "detail", None), "code", None
+    ) or exc.__class__.__name__
     metadata = {
         "view": view.__class__.__name__ if view else None,
         "action": getattr(view, "action", None),
         "method": request.method if request else None,
         "path": request.path if request else None,
-        "detail": str(exc.detail) if hasattr(exc, "detail") else str(exc),
+        "error_code": str(error_code),
     }
     if isinstance(exc, Throttled) and exc.wait is not None:
         metadata["retry_after"] = int(exc.wait)

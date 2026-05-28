@@ -6,11 +6,17 @@ import ipaddress
 def _client_ip(request) -> str | None:
     if not request:
         return None
-    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-    if forwarded_for:
-        raw = forwarded_for.split(",")[0].strip()
-    else:
-        raw = request.META.get("REMOTE_ADDR", "")
+    # Prefer headers that cannot be forged by the client:
+    # CF-Connecting-IP is set exclusively by Cloudflare (platform standard).
+    # X-Real-IP is set by nginx when configured with proxy_set_header X-Real-IP.
+    # REMOTE_ADDR is the immediate peer (nginx/proxy) — correct in local/non-CF envs.
+    # X-Forwarded-For is intentionally NOT used: the leftmost entry is client-supplied
+    # and trivially spoofable (S1).
+    raw = (
+        request.META.get("HTTP_CF_CONNECTING_IP")
+        or request.META.get("HTTP_X_REAL_IP")
+        or request.META.get("REMOTE_ADDR", "")
+    ).strip()
     if not raw:
         return None
     try:
@@ -48,10 +54,15 @@ def _session_key_digest(session_key: str | None) -> str | None:
 
 
 def _credential_hash(credentials: dict | None) -> str | None:
-    """sha256[:8] of the lowercased entered username/email — correlatable but not reversible."""
+    """sha256[:32] of the lowercased entered username/email — correlatable but not reversible.
+
+    32 hex chars = 16 bytes = 128 bits. Short truncations (≤8 chars) are offline-preimage-
+    attackable against a known email address population; 32 chars is the accepted minimum
+    for a stored, queryable pseudonymisation value (S2).
+    """
     if not credentials:
         return None
     value = credentials.get("username") or credentials.get("email") or ""
     if not value:
         return None
-    return hashlib.sha256(value.lower().encode()).hexdigest()[:8]
+    return hashlib.sha256(value.lower().encode()).hexdigest()[:32]
