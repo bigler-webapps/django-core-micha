@@ -21,7 +21,7 @@ env = environ.Env(
 DEBUG = env("DEBUG", default=False)
 
 # 1) Environment type: local / staging / production / edge / ...
-ENV_TYPE = env("ENV_TYPE", default="local").lower()
+ENV_TYPE = env("ENV_TYPE", default="production").lower()
 
 SECRET_KEY = env("DJANGO_SECRET_KEY", default="local-dev-secret-key")
 

@@ -232,7 +232,8 @@ def generate_env(
             lines.append(f"{key}={value}")
             written_keys.add(key)
 
-    add("ENV_TYPE", env_name)
+    if env_name != "local":
+        add("ENV_TYPE", env_name)
     add("PROJECT_NAME", config.get("project_name", "Project"))
     add("COMPOSE_PROJECT_NAME", f"{config.get('project_name')}_{env_name}")
     add("CONTAINER_NAME_PREFIX", ctr_prefix)
