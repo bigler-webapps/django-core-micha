@@ -1,7 +1,11 @@
 # auth/exception_handler.py
+import logging
+
 from rest_framework.views import exception_handler as drf_exception_handler
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotAuthenticated, PermissionDenied, Throttled, ValidationError
 from rest_framework.response import Response
+
+logger = logging.getLogger(__name__)
 
 AUTH_CODE_MAP = {
     "not_authenticated": "auth.not_authenticated",
@@ -9,11 +13,20 @@ AUTH_CODE_MAP = {
     "permission_denied": "auth.permission_denied",
 }
 
+# S213: NotAuthenticated (401) is intentionally excluded — anonymous 401s would allow
+# an unauthenticated attacker to drive unlimited AuditEvent INSERTs (DB amplification, S3).
+# 403 and 429 are logged because they always have a resolved actor or bounded throttle rates.
+_AUDIT_EVENT_TYPES = {
+    PermissionDenied: "drf.permission_denied",
+    Throttled: "drf.throttled",
+}
+
+
 def _is_error_object(d: dict) -> bool:
     if not isinstance(d, dict):
         return False
-    # "leaf error" convention
     return any(k in d for k in ("code", "i18nKey", "message", "params"))
+
 
 def _flatten(detail, field=None):
     out = []
@@ -51,10 +64,56 @@ def _flatten(detail, field=None):
     return out
 
 
+def _log_authz_audit_event(exc, context) -> None:
+    """S213 — persist PermissionDenied / NotAuthenticated / Throttled as AuditEvent."""
+    event_type = next(
+        (et for cls, et in _AUDIT_EVENT_TYPES.items() if isinstance(exc, cls)),
+        None,
+    )
+    if event_type is None:
+        return
+
+    from django_core_micha.auditlog.models import AuditEvent
+
+    request = context.get("request")
+    view = context.get("view")
+    actor = None
+    if request and getattr(request, "user", None) and request.user.is_authenticated:
+        actor = request.user
+
+    # Store only the error code, not the full detail string — detail may contain
+    # caller-supplied PII (e.g. PermissionDenied("User foo@example.com lacks X")) (S4).
+    error_code = getattr(exc, "default_code", None) or getattr(
+        getattr(exc, "detail", None), "code", None
+    ) or exc.__class__.__name__
+    metadata = {
+        "view": view.__class__.__name__ if view else None,
+        "action": getattr(view, "action", None),
+        "method": request.method if request else None,
+        "path": request.path if request else None,
+        "error_code": str(error_code),
+    }
+    if isinstance(exc, Throttled) and exc.wait is not None:
+        metadata["retry_after"] = int(exc.wait)
+
+    try:
+        AuditEvent.objects.create(
+            actor=actor,
+            event_type=event_type,
+            metadata=metadata,
+        )
+    except Exception:
+        # Audit write failure must never abort the response.
+        logger.exception("AuditEvent creation failed in exception_handler for %s", event_type)
+
+
 def custom_exception_handler(exc, context):
     resp = drf_exception_handler(exc, context)
     if resp is None:
         return None
+
+    # S213 — log authz denials before any response mutation
+    _log_authz_audit_event(exc, context)
 
     if isinstance(exc, ValidationError):
         return Response({"errors": _flatten(resp.data)}, status=resp.status_code)
