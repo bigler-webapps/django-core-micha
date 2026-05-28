@@ -3,7 +3,15 @@ SECRET_KEY = "test-secret-not-for-production"
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
+    "django_core_micha.auditlog",
+    "tests.testapp",
 ]
+
+MIGRATION_MODULES = {
+    "testapp": None,
+}
+
+AUDITLOG_RETENTION_DAYS = 730
 
 DATABASES = {
     "default": {

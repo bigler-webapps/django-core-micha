@@ -105,6 +105,7 @@ CORE_APPS = [
     # Core app(s)
     "django_core_micha.invitations",
     "django_core_micha.auth",
+    "django_core_micha.auditlog",
 ]
 
 INSTALLED_APPS = CORE_APPS.copy()
@@ -117,6 +118,9 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # S198: set audit actor + request_id ContextVars for every request.
+    # Must come after AuthenticationMiddleware so request.user is populated.
+    "django_core_micha.auditlog.middleware.AuditlogActorMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
@@ -128,6 +132,9 @@ MIDDLEWARE = [
 
 # S19: Set to False to disable admin-MFA enforcement (not recommended in prod).
 ADMIN_MFA_REQUIRED = True
+
+# S198: Retention window for AuditEvent rows (days). Override per-app via ENV.
+AUDITLOG_RETENTION_DAYS = int(os.getenv("AUDITLOG_RETENTION_DAYS", "730"))
 
 # ROOT_URLCONF / WSGI_APPLICATION / ASGI_APPLICATION / SITE_ID
 # bleiben im Projekt (backend/settings.py), nicht im Core.
