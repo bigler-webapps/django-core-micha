@@ -21,8 +21,9 @@ def register(
     """Register a model for audit logging.
 
     model: a Django Model class or "<app_label>.<ModelName>" string.
-    redact_fields: field attnames whose values are replaced with "***".
+    redact_fields: field attnames whose values are replaced with "***" before DB write.
     context_resolver: optional callable(instance) -> any, stored in metadata["context"].
+        Must NOT return PII — the context key is not covered by redact_fields (S3).
     """
     from django.apps import apps
 

@@ -14,7 +14,9 @@ class AuditlogActorMiddleware:
 
     def __call__(self, request):
         actor_token = set_current_actor(getattr(request, "user", None))
-        request_id = request.headers.get("X-Request-ID") or uuid4().hex
+        raw_request_id = request.headers.get("X-Request-ID", "")
+        # Cap length and strip to printable ASCII to prevent audit-log poisoning (S2).
+        request_id = raw_request_id[:128].strip() or uuid4().hex
         request_token = set_current_request_id(request_id)
 
         try:

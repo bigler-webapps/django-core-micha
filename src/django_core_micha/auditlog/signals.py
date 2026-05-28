@@ -1,9 +1,13 @@
+import logging
+
 from django.db.models.signals import post_delete, post_save, pre_save
 
 from .audit_context import get_current_actor_id, get_current_request_id
 from .registry import get_registry
 from .services.redact import REDACTED_PLACEHOLDER, redact_metadata
 from .services.serialization import serialize
+
+logger = logging.getLogger(__name__)
 
 DIFF_IGNORED_FIELDS = {"updated_at"}
 
@@ -18,6 +22,9 @@ def _instance_state(instance) -> dict:
 
 
 def _resolve_actor_id(instance):
+    # ContextVar set by AuditlogActorMiddleware is authoritative (S1).
+    # Field fallback is a best-effort convenience: apps must ensure those FK
+    # fields are never set from user-controlled input without server-side validation.
     actor_id = get_current_actor_id()
     if actor_id:
         return actor_id
@@ -55,6 +62,12 @@ def _build_metadata(instance, action: str, changes: dict, before: dict, after: d
         try:
             metadata["context"] = entry.context_resolver(instance)
         except Exception:
+            logger.warning(
+                "auditlog: context_resolver raised for %s pk=%s",
+                instance._meta.label_lower,
+                instance.pk,
+                exc_info=True,
+            )
             metadata["context"] = None
     return metadata
 
@@ -66,13 +79,22 @@ def _create_audit_event(instance, action: str, changes: dict, before: dict, afte
     if entry.redact_fields:
         redact_metadata(metadata, entry.redact_fields)
 
-    AuditEvent.objects.create(
-        actor_id=_resolve_actor_id(instance),
-        event_type=f"{instance._meta.label_lower}.{action}",
-        event_code=f"auditlog.{action}",
-        message=f"{instance._meta.object_name} {action}",
-        metadata=metadata,
-    )
+    try:
+        AuditEvent.objects.create(
+            actor_id=_resolve_actor_id(instance),
+            event_type=f"{instance._meta.label_lower}.{action}",
+            event_code=f"auditlog.{action}",
+            message=f"{instance._meta.object_name} {action}",
+            metadata=metadata,
+        )
+    except Exception:
+        # Never let an audit write failure abort the application save (R2).
+        logger.exception(
+            "auditlog: failed to write AuditEvent for %s.%s pk=%s",
+            instance._meta.label_lower,
+            action,
+            instance.pk,
+        )
 
 
 def _capture_previous_state(sender, instance, **kwargs):

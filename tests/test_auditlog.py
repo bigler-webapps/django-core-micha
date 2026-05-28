@@ -16,11 +16,20 @@ User = get_user_model()
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    from django_core_micha.auditlog.registry import _REGISTRY
+    from django.db.models.signals import post_delete, post_save, pre_save
+
     from django_core_micha.auditlog import signals as sig_mod
+    from django_core_micha.auditlog.registry import _REGISTRY
+
     snapshot = dict(_REGISTRY)
     sig_mod._SIGNALS_CONNECTED = False
     yield
+    # Disconnect any signals wired during the test (R4).
+    for label in _REGISTRY:
+        uid = f"auditlog_{label}"
+        pre_save.disconnect(dispatch_uid=f"{uid}_pre_save")
+        post_save.disconnect(dispatch_uid=f"{uid}_post_save")
+        post_delete.disconnect(dispatch_uid=f"{uid}_post_delete")
     _REGISTRY.clear()
     _REGISTRY.update(snapshot)
     sig_mod._SIGNALS_CONNECTED = False
