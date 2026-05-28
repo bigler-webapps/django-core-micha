@@ -49,7 +49,7 @@ class Migration(migrations.Migration):
             model_name="auditevent",
             index=models.Index(
                 fields=["event_type", "created_at"],
-                name="auditlog_event_type_created_idx",
+                name="auditlog_evtype_created_idx",
             ),
         ),
         migrations.AddIndex(
