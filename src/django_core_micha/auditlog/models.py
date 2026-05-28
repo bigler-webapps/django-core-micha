@@ -20,7 +20,9 @@ class AuditEvent(models.Model):
         app_label = "django_core_micha_auditlog"
         ordering = ["-created_at", "-id"]
         indexes = [
-            models.Index(fields=["event_type", "created_at"], name="auditlog_event_type_created_idx"),
+            # Index name kept ≤30 chars to satisfy models.E034 (Django default
+            # max identifier length). "evtype" = short for "event_type".
+            models.Index(fields=["event_type", "created_at"], name="auditlog_evtype_created_idx"),
             models.Index(fields=["actor", "created_at"], name="auditlog_actor_created_idx"),
         ]
 
