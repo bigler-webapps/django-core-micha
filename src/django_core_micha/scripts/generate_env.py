@@ -206,9 +206,24 @@ def generate_env(
         redis_port = None
         java_port = None
 
+    # Global, environment-independent app config (non-secret runtime env vars).
+    # Backward-compatible: absent `app_env` block is a no-op, so existing
+    # project.yaml files without it keep their previous behaviour.
+    #
+    # Precedence among raw inputs: secrets < app_env < env_overrides (per-env wins).
+    # NOTE: platform-computed keys emitted via add() below (PROJECT_NAME,
+    # DJANGO_ALLOWED_HOSTS, CSRF_TRUSTED_URLS, TRAEFIK_ROUTER_RULE, PUBLIC_ORIGIN,
+    # MASTER_BASE_URL, volume names, …) are authoritative and CANNOT be overridden
+    # via app_env/env_overrides (DEBUG is the sole guarded exception). Keys starting
+    # with SSH_/GITHUB_ are filtered out of the runtime .env (see emit loop below).
+    app_env_block = config.get("app_env", {})
+    if app_env_block:
+        print(f"   📦 Applying {len(app_env_block)} app_env vars from project.yaml")
+        inputs.update(app_env_block)
+
     overrides = env_config.get("env_overrides", {})
     if overrides:
-        print(f"   ⚡ Applying {len(overrides)} overrides from project.yml")
+        print(f"   ⚡ Applying {len(overrides)} overrides from project.yaml")
         inputs.update(overrides)
 
     base_prefix = config.get("container_prefix", "app")
