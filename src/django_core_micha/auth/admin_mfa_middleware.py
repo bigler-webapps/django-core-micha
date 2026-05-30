@@ -23,8 +23,8 @@ provisioning a new tenant must enroll MFA in `/api/accounts/mfa/...` before
 attempting admin login.
 
 **Bootstrap flow** (first superuser on fresh deployment):
-1. `/admin/login/` — passes (unauthenticated → middleware skips)
-2. After login, navigating into `/admin/` → 403
+1. `/admin/login/` — passes (unauthenticated middleware skips)
+2. After login, navigating into `/admin/` 403
 3. While still authenticated, visit `/api/accounts/mfa/totp/activate/` to
    enroll TOTP (or the corresponding allauth-mfa URL)
 4. Retry `/admin/` — passes

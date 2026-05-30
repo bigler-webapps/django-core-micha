@@ -83,7 +83,7 @@ class RecoveryRequest(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
-    # Timestamp of the PENDING → APPROVED transition. Anchor for the post-
+    # Timestamp of the PENDING APPROVED transition. Anchor for the post-
     # approval TTL window (see `expires_at`) so an approved token is not
     # already expiring when the user opens the recovery email — the previous
     # `created_at + TTL` made tokens unusable for requests that sat in
