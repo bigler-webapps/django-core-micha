@@ -578,7 +578,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
             )
 
         # Intentionally NO auto-login here. Aligns with the existing
-        # invite/password-reset pattern (PasswordInvitePage → /login) and
+        # invite/password-reset pattern (PasswordInvitePage /login) and
         # preserves the MFA / login-event / audit-trail invariants. The
         # frontend redirects to /login after a successful confirm.
         return Response(

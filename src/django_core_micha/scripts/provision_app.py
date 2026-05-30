@@ -66,7 +66,7 @@ DEFAULT_SYNC_WORKFLOW = "sync-ssh-access.yml"
 
 
 def fail(message):
-    print(f"❌ {message}")
+    print(f"{message}")
     sys.exit(1)
 
 
@@ -366,7 +366,7 @@ def main():
     trigger_ssh_sync(args.sync_workflow, args.management_repo_name, deploy_target, public_key)
 
     print("")
-    print("✅ App provisioning completed.")
+    print("App provisioning completed.")
     print(f"   Key name: {key_name}")
     print(f"   Deploy target: {deploy_target}")
     print(f"   Proton item: {vault}/{item}")

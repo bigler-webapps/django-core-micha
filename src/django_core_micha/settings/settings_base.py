@@ -302,7 +302,7 @@ REST_FRAMEWORK = {
         # per-code by design — an attacker who exhausts one endpoint cannot
         # fall through to the other for fresh quota. The trade-off is that
         # a legitimate user who retries the same code across both flows
-        # (typo on signup → re-validate → retry) consumes the bucket
+        # (typo on signup re-validate retry) consumes the bucket
         # combined. 10/hour leaves enough headroom for that.
         "access_code_probe": "10/hour",
     },

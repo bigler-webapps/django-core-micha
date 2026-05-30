@@ -63,7 +63,7 @@ def send_invite_or_reset_email(*, user, url, is_new_user: bool) -> None:
     email = EmailMessage(
         subject=subject,
         body=body,
-        from_email=from_email,  # None → DEFAULT_FROM_EMAIL
+        from_email=from_email,  # None DEFAULT_FROM_EMAIL
         to=[user.email],
         headers=headers,
     )

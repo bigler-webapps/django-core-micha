@@ -26,7 +26,7 @@ def load_yaml_file(path):
         with file_path.open("r", encoding="utf-8") as handle:
             return yaml.safe_load(handle) or {}
     except yaml.YAMLError as exc:
-        print(f"❌ Error parsing YAML file {path}: {exc}")
+        print(f"Error parsing YAML file {path}: {exc}")
         sys.exit(1)
 
 
@@ -62,7 +62,7 @@ def get_secret_inputs_policy(project_config):
     if policy is None:
         return {}
     if not isinstance(policy, dict):
-        print("❌ Error: project secret_inputs must be a mapping when defined.")
+        print("Error: project secret_inputs must be a mapping when defined.")
         sys.exit(1)
     return policy
 
@@ -72,13 +72,13 @@ def normalize_secret_source(provider, fallback_provider=None):
     if provider is None:
         return None
     if provider not in SECRET_SOURCE_CHOICES:
-        print(f"❌ Error: invalid secret provider '{provider}'.")
+        print(f"Error: invalid secret provider '{provider}'.")
         sys.exit(1)
 
     if fallback_provider is None:
         return provider
     if fallback_provider != "proton":
-        print(f"❌ Error: unsupported fallback_provider '{fallback_provider}'. Only 'proton' is supported.")
+        print(f"Error: unsupported fallback_provider '{fallback_provider}'. Only 'proton' is supported.")
         sys.exit(1)
 
     if provider == "yaml":
@@ -174,7 +174,7 @@ def resolve_source(definition, config, secret_target=None, project_config=None):
 
     target = resolve_secret_target(config, secret_target)
     if not target:
-        print("   ⚠️  Cannot resolve source_template without a secret target.")
+        print("    Cannot resolve source_template without a secret target.")
         return None
 
     substitutions = {"target": target}
@@ -182,7 +182,7 @@ def resolve_source(definition, config, secret_target=None, project_config=None):
         server = resolve_server_from_project(project_config, target)
         if not server:
             print(
-                f"   ⚠️  source_template uses {{server}} but project.yaml has no "
+                f"    source_template uses {{server}} but project.yaml has no "
                 f"environments['{target}'].server entry."
             )
             return None
@@ -191,7 +191,7 @@ def resolve_source(definition, config, secret_target=None, project_config=None):
     try:
         return source_template.format(**substitutions)
     except KeyError as exc:
-        print(f"   ⚠️  Invalid source_template placeholder {exc} in secrets.yaml.")
+        print(f"    Invalid source_template placeholder {exc} in secrets.yaml.")
         return None
 
 
@@ -219,7 +219,7 @@ def get_target_scope(definition, key=None):
     scope = definition.get("target_scope", "env")
     if scope not in VALID_TARGET_SCOPES:
         label = f" for secret '{key}'" if key else ""
-        print(f"❌ Error: invalid target_scope '{scope}'{label} (allowed: env, repo).")
+        print(f"Error: invalid target_scope '{scope}'{label} (allowed: env, repo).")
         sys.exit(1)
     return scope
 
@@ -237,11 +237,11 @@ def get_inventory_target_data(config, secret_target=None):
     target_data = targets.get(target)
 
     if target_data is None:
-        print(f"   ⚠️  Target '{target}' not found in inventory '{inventory_path}'.")
+        print(f"    Target '{target}' not found in inventory '{inventory_path}'.")
         return None
 
     if not isinstance(target_data, dict):
-        print(f"   ⚠️  Target '{target}' in '{inventory_path}' is not a mapping.")
+        print(f"    Target '{target}' in '{inventory_path}' is not a mapping.")
         return None
 
     return target_data
@@ -257,7 +257,7 @@ def resolve_github_environment(config, secret_target=None, github_environment=No
       4. github_environment_template with {target} substitution
       5. static config.github_environment
 
-    Returns None when no source produces an env name → caller falls back to repo-level sync.
+    Returns None when no source produces an env name caller falls back to repo-level sync.
     """
     if github_environment:
         return github_environment
@@ -280,12 +280,12 @@ def resolve_github_environment(config, secret_target=None, github_environment=No
     if environment_template:
         target = resolve_secret_target(config, secret_target)
         if not target:
-            print("   ⚠️  Cannot resolve github_environment_template without a secret target.")
+            print("    Cannot resolve github_environment_template without a secret target.")
             return None
         try:
             return environment_template.format(target=target)
         except KeyError as exc:
-            print(f"   ⚠️  Invalid github_environment_template placeholder {exc} in secrets.yaml.")
+            print(f"    Invalid github_environment_template placeholder {exc} in secrets.yaml.")
             return None
 
     return config.get("github_environment")
@@ -294,7 +294,7 @@ def resolve_github_environment(config, secret_target=None, github_environment=No
 def validate_target_secret_map(target_name, target_values, path_label):
     """Ensure one target in a values YAML file is a flat key/value mapping."""
     if not isinstance(target_values, dict):
-        print(f"❌ Error: target '{target_name}' in {path_label} must be a mapping of secret names to values.")
+        print(f"Error: target '{target_name}' in {path_label} must be a mapping of secret names to values.")
         sys.exit(1)
 
 
@@ -302,20 +302,20 @@ def load_values_file(path):
     """Load a YAML values file that stores secrets per target."""
     values_path = Path(path)
     if not values_path.exists():
-        print(f"❌ Error: values file not found: {values_path}")
+        print(f"Error: values file not found: {values_path}")
         sys.exit(1)
 
     data = load_yaml_file(values_path)
     if not isinstance(data, dict):
-        print(f"❌ Error: values file {values_path} must contain a YAML mapping.")
+        print(f"Error: values file {values_path} must contain a YAML mapping.")
         sys.exit(1)
 
     targets = data.get("targets")
     if targets is None:
-        print(f"❌ Error: values file {values_path} must contain a top-level 'targets' mapping.")
+        print(f"Error: values file {values_path} must contain a top-level 'targets' mapping.")
         sys.exit(1)
     if not isinstance(targets, dict):
-        print(f"❌ Error: values file {values_path} has invalid 'targets'; expected a mapping.")
+        print(f"Error: values file {values_path} has invalid 'targets'; expected a mapping.")
         sys.exit(1)
 
     for target_name, target_values in targets.items():
@@ -327,12 +327,12 @@ def load_values_file(path):
 def check_dependencies(target, secret_source="proton"):
     """Prüft, ob nötige CLIs vorhanden sind."""
     if target == "github" and not shutil.which("gh"):
-        print("❌ Error: 'gh' CLI is required for GitHub sync.")
+        print("Error: 'gh' CLI is required for GitHub sync.")
         sys.exit(1)
 
     has_proton = shutil.which(PROTON_CLI_CMD) is not None
     if secret_source in ("proton", "auto") and not has_proton:
-        print(f"⚠️  Warning: '{PROTON_CLI_CMD}' not found. You can only use defaults or manual input.")
+        print(f" Warning: '{PROTON_CLI_CMD}' not found. You can only use defaults or manual input.")
     return has_proton
 
 
@@ -349,7 +349,7 @@ def get_proton_secret(proton_path):
     parts = clean_path.split("/")
 
     if len(parts) < 3:
-        print(f"   ❌ Invalid path format: {clean_path} (Expected: Vault/Item/Field)")
+        print(f"   Invalid path format: {clean_path} (Expected: Vault/Item/Field)")
         return None
 
     vault = parts[0]
@@ -357,7 +357,7 @@ def get_proton_secret(proton_path):
     field = parts[2]
 
     try:
-        print(f"   🔄 Fetching [{vault}] -> [{item}] -> {field} ...", end="", flush=True)
+        print(f"   Fetching [{vault}] -> [{item}] -> {field} ...", end="", flush=True)
         cmd = [
             PROTON_CLI_CMD,
             "item",
@@ -441,7 +441,7 @@ def normalize_secret_value(key, value, source_label):
     if isinstance(value, (int, float, bool)):
         return str(value)
 
-    print(f"   ❌ Invalid {source_label} value for {key}: expected scalar or string, got {type(value).__name__}.")
+    print(f"   Invalid {source_label} value for {key}: expected scalar or string, got {type(value).__name__}.")
     return None
 
 
@@ -484,16 +484,16 @@ def validate_effective_settings(target, settings):
     secret_target = settings["secret_target"]
 
     if values_file and secret_source == "proton":
-        print("❌ Error: --values-file can only be used with secret source yaml or auto.")
+        print("Error: --values-file can only be used with secret source yaml or auto.")
         sys.exit(1)
 
     if secret_source == "yaml" and not values_file:
-        print("❌ Error: a values file is required when secret source yaml is used.")
+        print("Error: a values file is required when secret source yaml is used.")
         sys.exit(1)
 
     if values_file and secret_source in ("yaml", "auto") and not secret_target:
         print(
-            f"❌ Error: no secret target could be resolved for {target} sync while YAML values are enabled. "
+            f"Error: no secret target could be resolved for {target} sync while YAML values are enabled. "
             "Use --secret-target, project.yaml secret_inputs.target, project.yaml deploy_target, "
             "or secrets.yaml config.default_target."
         )
@@ -511,15 +511,15 @@ def sync_local(
 ):
     target = resolve_secret_target(config, secret_target)
     if target:
-        print(f"📂 Syncing to {LOCAL_ENV_FILE} for target '{target}' ...")
+        print(f"Syncing to {LOCAL_ENV_FILE} for target '{target}' ...")
     else:
-        print(f"📂 Syncing to {LOCAL_ENV_FILE} ...")
+        print(f"Syncing to {LOCAL_ENV_FILE} ...")
 
     output_lines = ["# Auto-generated local secrets from secrets.yaml"]
 
     for key, definition in secrets_def.items():
         if is_excluded_from_env(definition):
-            print(f"   ⏭️  {key}: Skipping (exclude_from_env)")
+            print(f"    {key}: Skipping (exclude_from_env)")
             continue
 
         dev_default = definition.get("dev_default")
@@ -527,7 +527,7 @@ def sync_local(
 
         if dev_default is not None:
             value = str(dev_default)
-            print(f"   ✅ {key}: Using dev_default")
+            print(f"   {key}: Using dev_default")
         else:
             source = resolve_source(definition, config, secret_target=target, project_config=project_config)
             fetched, resolved_from = resolve_secret_value(
@@ -541,10 +541,10 @@ def sync_local(
             if fetched is not None:
                 value = fetched
                 if resolved_from == "yaml":
-                    print(f"   ✅ {key}: Using YAML values file")
+                    print(f"   {key}: Using YAML values file")
 
             if value is None:
-                print(f"   ⚠️  {key}: No default and configured secret lookup failed.")
+                print(f"    {key}: No default and configured secret lookup failed.")
                 value = input(f"      Please enter value for {key}: ").strip()
 
         output_lines.append(f"{key}={value}")
@@ -553,7 +553,7 @@ def sync_local(
         handle.write("\n".join(output_lines))
         handle.write("\n")
 
-    print(f"✅ Successfully wrote {LOCAL_ENV_FILE}")
+    print(f"Successfully wrote {LOCAL_ENV_FILE}")
 
 
 def collect_github_secret_values(config, secrets_def, has_proton, secret_target, secret_source, values_data, project_config=None):
@@ -563,12 +563,12 @@ def collect_github_secret_values(config, secrets_def, has_proton, secret_target,
 
     for key, definition in secrets_def.items():
         if is_excluded_from_github(definition):
-            print(f"   ⏭️  Skipping {key}: exclude_from_github is set.")
+            print(f"    Skipping {key}: exclude_from_github is set.")
             continue
 
         source = resolve_source(definition, config, secret_target=secret_target, project_config=project_config)
         if secret_source == "proton" and not source:
-            print(f"   ⚠️  Skipping {key}: No resolvable source defined in YAML.")
+            print(f"    Skipping {key}: No resolvable source defined in YAML.")
             continue
 
         value, resolved_from = resolve_secret_value(
@@ -582,9 +582,9 @@ def collect_github_secret_values(config, secrets_def, has_proton, secret_target,
 
         if value is None:
             if secret_source == "yaml":
-                print(f"   ❌ Missing {key} in local YAML values for target '{secret_target}'.")
+                print(f"   Missing {key} in local YAML values for target '{secret_target}'.")
             else:
-                print(f"   ❌ Failed to fetch {key} from configured secret sources.")
+                print(f"   Failed to fetch {key} from configured secret sources.")
             missing.append(key)
             continue
 
@@ -605,7 +605,7 @@ def sync_github(
 ):
     target_repo = config.get("target_repo")
     if not target_repo:
-        print("❌ Error: 'config.target_repo' missing in secrets.yaml")
+        print("Error: 'config.target_repo' missing in secrets.yaml")
         sys.exit(1)
 
     environment_name = resolve_github_environment(
@@ -616,9 +616,9 @@ def sync_github(
     )
 
     if environment_name:
-        print(f"☁️  Syncing to GitHub Environment: {target_repo}/{environment_name}")
+        print(f" Syncing to GitHub Environment: {target_repo}/{environment_name}")
     else:
-        print(f"☁️  Syncing to GitHub Repo: {target_repo}")
+        print(f" Syncing to GitHub Repo: {target_repo}")
 
     if secret_source == "proton":
         print("   (Fetching REAL secrets from Proton - ignoring defaults)")
@@ -642,7 +642,7 @@ def sync_github(
         if missing_keys:
             print("")
             print(
-                "❌ Error: unable to resolve all GitHub secrets before writing: "
+                "Error: unable to resolve all GitHub secrets before writing: "
                 + ", ".join(missing_keys)
             )
             sys.exit(1)
@@ -650,12 +650,12 @@ def sync_github(
         planned_values = []
         for key, definition in secrets_def.items():
             if is_excluded_from_github(definition):
-                print(f"   ⏭️  Skipping {key}: exclude_from_github is set.")
+                print(f"    Skipping {key}: exclude_from_github is set.")
                 continue
 
             source = resolve_source(definition, config, secret_target=secret_target, project_config=project_config)
             if secret_source == "proton" and not source:
-                print(f"   ⚠️  Skipping {key}: No resolvable source defined in YAML.")
+                print(f"    Skipping {key}: No resolvable source defined in YAML.")
                 continue
 
             value, resolved_from = resolve_secret_value(
@@ -667,7 +667,7 @@ def sync_github(
                 values_data=values_data,
             )
             if value is None:
-                print(f"   ❌ Failed to fetch {key} from configured secret sources.")
+                print(f"   Failed to fetch {key} from configured secret sources.")
                 continue
             planned_values.append((key, value, resolved_from))
 
@@ -677,7 +677,7 @@ def sync_github(
         use_env = bool(environment_name) and scope == "env"
 
         scope_label = f"env {environment_name}" if use_env else "repo (forced)" if scope == "repo" else "repo"
-        print(f"   🚀 Pushing {key} to GitHub [{scope_label}]...", end="", flush=True)
+        print(f"   Pushing {key} to GitHub [{scope_label}]...", end="", flush=True)
 
         cmd = ["gh", "secret", "set", key, "--repo", target_repo]
         if use_env:
@@ -720,20 +720,20 @@ def main():
     project_config, project_config_path = load_project_config()
 
     if not Path(SECRETS_YAML_PATH).exists():
-        print(f"❌ Error: {SECRETS_YAML_PATH} not found.")
+        print(f"Error: {SECRETS_YAML_PATH} not found.")
         sys.exit(1)
 
     try:
         with open(SECRETS_YAML_PATH, "r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
     except yaml.YAMLError as exc:
-        print(f"❌ Error parsing YAML: {exc}")
+        print(f"Error parsing YAML: {exc}")
         sys.exit(1)
 
     config = data.get("config", {})
     secrets_def = data.get("secrets", {})
     if not secrets_def:
-        print("❌ Error: No 'secrets' block found in YAML.")
+        print("Error: No 'secrets' block found in YAML.")
         sys.exit(1)
 
     effective = resolve_effective_settings(

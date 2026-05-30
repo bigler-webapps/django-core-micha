@@ -31,9 +31,9 @@ def write_env_file(path, lines):
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines))
             handle.write("\n")
-        print(f"✅ Successfully wrote {path}")
+        print(f"Successfully wrote {path}")
     except Exception as exc:
-        print(f"❌ Error writing file: {exc}")
+        print(f"Error writing file: {exc}")
         sys.exit(1)
 
 
@@ -130,11 +130,11 @@ def generate_env(
     secret_source=None,
     values_file=None,
 ):
-    print(f"⚙️  Generating .env for environment: {env_name}")
+    print(f" Generating .env for environment: {env_name}")
 
     resolved_config_path = sync_secrets.resolve_yaml_path(config_path)
     if not resolved_config_path:
-        print(f"❌ Error: Config file '{config_path}' not found.")
+        print(f"Error: Config file '{config_path}' not found.")
         sys.exit(1)
 
     with open(resolved_config_path, "r", encoding="utf-8") as handle:
@@ -157,7 +157,7 @@ def generate_env(
     secrets_json = os.environ.get("SECRETS_CONTEXT")
     if secrets_json:
         try:
-            print("   🔓 Loading SECRETS_CONTEXT from GitHub")
+            print("   Loading SECRETS_CONTEXT from GitHub")
             github_secrets = json.loads(secrets_json)
             allowed_github_secrets = {}
             for key, value in github_secrets.items():
@@ -179,14 +179,14 @@ def generate_env(
                 allowed_github_secrets[key] = value
             inputs.update(allowed_github_secrets)
         except json.JSONDecodeError:
-            print("   ⚠️ Error decoding SECRETS_CONTEXT")
+            print("   Error decoding SECRETS_CONTEXT")
 
     if env_name == "edge" and os.path.exists(".env.edge"):
-        print("   📂 Loading .env.edge (Edge Overrides)")
+        print("   Loading .env.edge (Edge Overrides)")
         inputs.update(parse_env_file(".env.edge"))
 
     if env_name not in config.get("environments", {}):
-        print(f"❌ Error: Environment '{env_name}' not defined in {resolved_config_path}")
+        print(f"Error: Environment '{env_name}' not defined in {resolved_config_path}")
         sys.exit(1)
 
     env_config = config["environments"][env_name]
@@ -218,12 +218,12 @@ def generate_env(
     # with SSH_/GITHUB_ are filtered out of the runtime .env (see emit loop below).
     app_env_block = config.get("app_env", {})
     if app_env_block:
-        print(f"   📦 Applying {len(app_env_block)} app_env vars from project.yaml")
+        print(f"   Applying {len(app_env_block)} app_env vars from project.yaml")
         inputs.update(app_env_block)
 
     overrides = env_config.get("env_overrides", {})
     if overrides:
-        print(f"   ⚡ Applying {len(overrides)} overrides from project.yaml")
+        print(f"   Applying {len(overrides)} overrides from project.yaml")
         inputs.update(overrides)
 
     base_prefix = config.get("container_prefix", "app")
@@ -314,7 +314,7 @@ def generate_env(
     else:
         add("TRAEFIK_ROUTER_RULE", "Host(`localhost`)")
 
-    print(f"   📥 Injecting {len(inputs)} variables from inputs...")
+    print(f"   Injecting {len(inputs)} variables from inputs...")
     local_only_port_keys = {"WEB_PORT", "FRONTEND_PORT", "DB_HOST_PORT", "REDIS_HOST_PORT", "JAVA_PORT"}
 
     for key in sorted(inputs.keys()):

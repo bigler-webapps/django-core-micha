@@ -42,7 +42,7 @@ DEFAULT_PROVISION_WORKFLOW = "provision-server.yml"
 
 
 def fail(message):
-    print(f"❌ {message}")
+    print(f"{message}")
     sys.exit(1)
 
 
@@ -360,7 +360,7 @@ def main():
     )
 
     print("")
-    print("✅ Server access provisioning completed.")
+    print("Server access provisioning completed.")
     print(f"   Target: {args.target}")
     print(f"   Server IP: {args.server_ip}")
     print(f"   Deploy user: {deploy_user}")
