@@ -159,9 +159,15 @@ DATABASES = {
 # Channels / Redis
 # -------------------------------------------------------------------
 
+# Use the pub/sub layer, not the BRPOP-polling RedisChannelLayer: the latter
+# raises a periodic `redis.exceptions.TimeoutError` ("Timeout reading from
+# redis") on idle WS connections with current redis-py / Python 3.14, crashing
+# the consumer (WSDISCONNECT loop). RedisPubSubChannelLayer uses a persistent
+# SUBSCRIBE instead of polling and avoids this. All consumers use only group
+# semantics (group_add/discard/send), which the pub/sub layer fully supports.
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "BACKEND": "channels_redis.pubsub.RedisPubSubChannelLayer",
         "CONFIG": {
             "hosts": [(env("REDIS_HOST", default="redis"), 6379)],
         },

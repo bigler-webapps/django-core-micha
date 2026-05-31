@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.17.3] — 2026-05-31
+
+### Fixed
+
+**WebSocket channel layer — periodic `redis.exceptions.TimeoutError` crashing consumers**
+
+`CHANNEL_LAYERS` used `channels_redis.core.RedisChannelLayer`, whose BRPOP-based receive loop raises `redis.exceptions.TimeoutError` ("Timeout reading from redis:6379") on idle WS connections with current redis-py / Python 3.14. Consumers crashed in a ~5s `WSDISCONNECT` loop, flooding logs and breaking live updates.
+
+Switched to `channels_redis.pubsub.RedisPubSubChannelLayer`, which uses a persistent SUBSCRIBE instead of polling. All consumers across apps use only group semantics (`group_add`/`group_discard`/`group_send`), which the pub/sub layer fully supports — no consumer changes required.
+
+### Migration required
+
+- App bump `django-core-micha` → `==2.17.3` in `backend/requirements.txt`, then redeploy. No data migration.
+
+Behavioural notes for WS-using apps (none of the current apps are affected — all use group-only consumers via standard ASGI dispatch):
+
+- **Fire-and-forget:** no per-channel message capacity/backpressure. Apps relying on `channel_layer.receive()` on individual channels would need review.
+- **No `group_expiry` TTL:** group membership is in-process and cleaned up on `disconnect()` (`group_discard`). A hard process crash leaves stale membership until restart — the old layer's 24h TTL had no equivalent here. Immaterial for short-lived connections.
+- **Strip legacy `CONFIG` keys** from any app-level `CHANNEL_LAYERS` override before bumping: `RedisPubSubChannelLayer` rejects `expiry` / `group_expiry` / `capacity` / `channel_capacity` with a `TypeError` at consumer startup.
+- **`group_add` requires standard ASGI dispatch:** the pub/sub layer registers the channel via `new_channel()` during dispatch; tests that poke the channel layer directly (outside `WebsocketCommunicator`) must call `new_channel()` before `group_add()`.
+
 ## [2.17.2] — 2026-05-31
 
 ### Fixed
