@@ -100,7 +100,7 @@ jobs:
 
       - name: Publish to PyPI
         if: steps.version_check.outputs.should_publish == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
