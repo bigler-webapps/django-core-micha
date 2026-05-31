@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.17.2] — 2026-05-31
+
+### Fixed
+
+**S212 follow-up — `ACCOUNT_RATE_LIMITS` 500 on every login (`ratelimit configured per user but used anonymously`)**
+
+The S212 rate-limit config used the `/user` rate key for actions that allauth evaluates in an anonymous context. allauth consumes the `login_failed` limit inside `pre_authenticate` (before any user is known); a `/user` component there raises `ImproperlyConfigured`, surfacing as **HTTP 500 on every login attempt** in non-local environments. `password_reset` and `confirm_email` were affected the same way (both reachable while logged out).
+
+Changed the anonymous-context limits to key on `/ip` and `/key` (the submitted identifier) instead of `/user`:
+
+- `login_failed`: `5/5m/ip,10/h/user` → `5/5m/ip,10/h/key`
+- `confirm_email`: `3/h/user` → `3/h/key`
+
+Also fixed a latent typo: the reset-password limit was keyed `password_reset`, which is **not** an allauth action name — allauth merges this dict over its defaults and silently ignores unknown keys, so the entry had never taken effect (allauth's own `20/m/ip,5/m/key` applied instead). Renamed to the canonical `reset_password` and made it anonymous-safe: `5/h/ip,3/h/key`.
+
+`reauthenticate` and `manage_email` keep `/user` (only reachable when authenticated). The dict is now exposed as `ACCOUNT_RATE_LIMITS_DEFAULTS`, and the regression test guards both the anonymous-context invariant and that every action name matches an allauth canonical key.
+
+### Migration required
+
+- App bump `django-core-micha` → `==2.17.2` in `backend/requirements.txt`, then redeploy. No data migration.
+
 ## [2.16.0] — 2026-05-28
 
 ### Added

@@ -328,18 +328,30 @@ ACCOUNT_UNIQUE_EMAIL = True
 ACCOUNT_EMAIL_VERIFICATION = "optional"
 
 # S212 — Brute-Force + Credential-Stuffing-Mitigation via allauth built-in rate limiter.
-# Backed by Django cache (Redis in production). Disabled locally so dev/test flows are
-# not disrupted by a Redis dependency and test isolation is trivial.
+# Backed by Django cache. Disabled locally so dev/test flows are not disrupted and
+# test isolation is trivial.
+#
+# IMPORTANT: actions that allauth evaluates in an ANONYMOUS context (login_failed,
+# login, signup, password_reset, confirm_email) must NOT use the `/user` rate key —
+# allauth raises ImproperlyConfigured("ratelimit configured per user but used
+# anonymously") at request time, which surfaces as a 500 on every login. Use `/ip`
+# and/or `/key` (the submitted identifier) for those. `/user` is only valid for
+# actions that require an authenticated user (reauthenticate, manage_email).
+# Action names MUST match allauth's canonical keys (see
+# allauth.account.app_settings.RATE_LIMITS) — allauth merges this dict over its
+# defaults and silently ignores unknown keys, so a typo (e.g. "password_reset"
+# instead of "reset_password") means the custom limit is never applied.
+ACCOUNT_RATE_LIMITS_DEFAULTS = {
+    "login_failed":   "5/5m/ip,10/h/key",
+    "login":          "30/m/ip",
+    "signup":         "10/h/ip",
+    "reset_password": "5/h/ip,3/h/key",
+    "reauthenticate": "10/m/user",
+    "confirm_email":  "3/h/key",
+    "manage_email":   "10/h/user",
+}
 if not IS_LOCAL:
-    ACCOUNT_RATE_LIMITS = {
-        "login_failed":   "5/5m/ip,10/h/user",
-        "login":          "30/m/ip",
-        "signup":         "10/h/ip",
-        "password_reset": "5/h/ip,3/h/user",
-        "reauthenticate": "10/m/user",
-        "confirm_email":  "3/h/user",
-        "manage_email":   "10/h/user",
-    }
+    ACCOUNT_RATE_LIMITS = ACCOUNT_RATE_LIMITS_DEFAULTS
 
 LOGIN_REDIRECT_URL = "/"
 ACCOUNT_DEFAULT_HTTP_PROTOCOL = "https"
