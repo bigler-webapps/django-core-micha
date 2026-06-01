@@ -1,5 +1,6 @@
 import logging
 
+from django.db import transaction
 from django.db.models.signals import post_delete, post_save, pre_save
 
 from .audit_context import get_current_actor_id, get_current_request_id
@@ -80,13 +81,14 @@ def _create_audit_event(instance, action: str, changes: dict, before: dict, afte
         redact_metadata(metadata, entry.redact_fields)
 
     try:
-        AuditEvent.objects.create(
-            actor_id=_resolve_actor_id(instance),
-            event_type=f"{instance._meta.label_lower}.{action}",
-            event_code=f"auditlog.{action}",
-            message=f"{instance._meta.object_name} {action}",
-            metadata=metadata,
-        )
+        with transaction.atomic():
+            AuditEvent.objects.create(
+                actor_id=_resolve_actor_id(instance),
+                event_type=f"{instance._meta.label_lower}.{action}",
+                event_code=f"auditlog.{action}",
+                message=f"{instance._meta.object_name} {action}",
+                metadata=metadata,
+            )
     except Exception:
         # Never let an audit write failure abort the application save (R2).
         logger.exception(

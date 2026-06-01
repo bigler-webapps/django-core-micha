@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.17.4] — 2026-06-02
+
+### Fixed
+
+**Auditlog — `AuditEvent.objects.create()` failure breaks outer DB transaction**
+
+When `metadata` contained a non-JSON-serializable value (e.g. a raw `UUID` from a `context_resolver` that forgot `str()`), the `TypeError` from psycopg2's JSON adapter propagated through Django's `mark_for_rollback_on_error` context manager inside `_save_table`, setting `connection.needs_rollback = True`. The `except Exception` block in `_create_audit_event` then caught the error and logged it, but the outer transaction was already poisoned — every subsequent query in the same test (or request) failed with `TransactionManagementError`.
+
+Fix: wrap `AuditEvent.objects.create()` in `transaction.atomic()`. Inside an existing transaction this creates a savepoint; if the create fails, only the savepoint is rolled back and the outer transaction remains intact.
+
+### Migration required
+
+- App bump `django-core-micha` → `==2.17.4` in `backend/requirements.txt`. No data migration.
+- App `context_resolver` lambdas that return FK IDs should wrap with `str(...) if ... is not None else None` to avoid silent audit-write failures.
+
 ## [2.17.3] — 2026-05-31
 
 ### Fixed
