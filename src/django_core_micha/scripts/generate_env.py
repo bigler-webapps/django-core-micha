@@ -253,6 +253,14 @@ def generate_env(
     add("COMPOSE_PROJECT_NAME", f"{config.get('project_name')}_{env_name}")
     add("CONTAINER_NAME_PREFIX", ctr_prefix)
     add("IMAGE_TAG", "latest")
+    image_name = config.get("image_name", "")
+    if not image_name:
+        print(f"Error: 'image_name' not defined in {resolved_config_path}")
+        sys.exit(1)
+    if any(p in image_name for p in ("your-org", "ihr-user", "<your-org>", "your-app")):
+        print(f"Error: 'image_name' in {resolved_config_path} still contains a placeholder: {image_name}")
+        sys.exit(1)
+    add("IMAGE_NAME", image_name)
 
     if env_name == "local":
         add("WEB_PORT", str(web_port))
