@@ -254,13 +254,12 @@ def generate_env(
     add("CONTAINER_NAME_PREFIX", ctr_prefix)
     add("IMAGE_TAG", "latest")
     image_name = config.get("image_name", "")
-    if not image_name:
-        print(f"Error: 'image_name' not defined in {resolved_config_path}")
-        sys.exit(1)
-    if any(p in image_name for p in ("your-org", "ihr-user", "<your-org>", "your-app")):
-        print(f"Error: 'image_name' in {resolved_config_path} still contains a placeholder: {image_name}")
-        sys.exit(1)
-    add("IMAGE_NAME", image_name)
+    if image_name:
+        if any(p in image_name for p in ("your-org", "ihr-user", "<your-org>", "your-app")):
+            print(f"Error: 'image_name' in {resolved_config_path} still contains a placeholder: {image_name}")
+            sys.exit(1)
+        add("IMAGE_NAME", image_name)
+    # Infra projects (e.g. webapp-management) have no custom image — IMAGE_NAME omitted.
 
     if env_name == "local":
         add("WEB_PORT", str(web_port))
