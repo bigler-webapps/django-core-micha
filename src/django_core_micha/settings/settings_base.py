@@ -180,25 +180,31 @@ PROJECT_NAME = env("PROJECT_NAME", default="Project")
 # -------------------------------------------------------------------
 # Email
 # -------------------------------------------------------------------
+from django_core_micha.settings._email_config import resolve_email_backend
 
-EMAIL_BACKEND = (
-    "django.core.mail.backends.console.EmailBackend"
-    if IS_LOCAL
-    else "django.core.mail.backends.smtp.EmailBackend"
-)
+# smtp | resend | postmark | console | "" (auto: console wenn IS_LOCAL/DEBUG, sonst smtp)
+EMAIL_PROVIDER = env("EMAIL_PROVIDER", default="").lower().strip()
 
 EMAIL_HOST = env("EMAIL_HOST", default="")
-EMAIL_PORT = env("EMAIL_PORT")
-EMAIL_USE_TLS = env("EMAIL_USE_TLS")
+EMAIL_PORT = env.int("EMAIL_PORT", default=587)
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
 EMAIL_HOST_USER = env("EMAIL_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_PASSWORD", default="")
-DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
-if not IS_LOCAL and not (EMAIL_HOST and EMAIL_HOST_PASSWORD):
-    from django.core.exceptions import ImproperlyConfigured
-    raise ImproperlyConfigured(
-        "EMAIL_HOST and EMAIL_PASSWORD must be set in non-local environments."
-    )
+EMAIL_BACKEND, _anymail_cfg = resolve_email_backend(
+    provider=EMAIL_PROVIDER,
+    is_local=IS_LOCAL,
+    debug=DEBUG,
+    host=EMAIL_HOST,
+    password=EMAIL_HOST_PASSWORD,
+    resend_key=env("RESEND_API_KEY", default=""),
+    postmark_token=env("POSTMARK_SERVER_TOKEN", default=""),
+)
+if _anymail_cfg:
+    ANYMAIL = _anymail_cfg
+
+# API-Provider (resend/postmark) haben keinen EMAIL_USER → DEFAULT_FROM_EMAIL explizit setzen.
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default=EMAIL_HOST_USER)
 
 # -------------------------------------------------------------------
 # Templates (Projekt setzt DIRS / BASE_DIR)

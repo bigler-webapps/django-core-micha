@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.18.0] — 2026-06-09
+
+### Added
+
+**Pluggable Mail-Transport — `EMAIL_PROVIDER`**
+
+`settings_base` now selects the email backend via the `EMAIL_PROVIDER` env var:
+
+| `EMAIL_PROVIDER` | Backend | Required env vars |
+|---|---|---|
+| *(empty)* | `console` (IS_LOCAL/DEBUG) · `smtp` (otherwise) | same as before |
+| `console` | Django console backend | — |
+| `smtp` | Django SMTP backend | `EMAIL_HOST`, `EMAIL_PASSWORD` |
+| `resend` | anymail Resend backend | `RESEND_API_KEY` |
+| `postmark` | anymail Postmark backend | `POSTMARK_SERVER_TOKEN` |
+
+**No crash on missing credentials.** When `EMAIL_PROVIDER` is set but the required credential is absent, a `warnings.warn` + `logger.warning` is emitted and the backend falls back to console — the app always boots.
+
+**`EMAIL_PORT` / `EMAIL_USE_TLS`** now carry explicit defaults (`587` / `True`) at the call site; API-transport providers no longer crash when these vars are absent.
+
+**`DEFAULT_FROM_EMAIL`** is now configurable via `env("DEFAULT_FROM_EMAIL", default=EMAIL_HOST_USER)`.
+
+### Migration
+
+- No change required for existing apps (no `EMAIL_PROVIDER` set → identical behavior).
+- API transports (Resend/Postmark): set `DEFAULT_FROM_EMAIL` explicitly to your verified sender address (e.g. `DEFAULT_FROM_EMAIL=noreply@km-h.ch`) — `EMAIL_HOST_USER` will be empty for these providers and would produce an invalid From address.
+- `django-anymail>=10` is now a required dependency; it is included automatically when bumping `django-core-micha`.
+
 ## [2.17.4] — 2026-06-02
 
 ### Fixed
