@@ -376,6 +376,9 @@ MFA_WEBAUTHN_RP_NAME = env("MFA_WEBAUTHN_RP_NAME", default="Project")
 MFA_SUPPORTED_TYPES = ["webauthn", "totp", "recovery_codes"]  # optional, falls du später mehr MFA willst
 
 MFA_PASSKEY_LOGIN_ENABLED = True
+# Allow http://localhost origins in local dev without requiring HTTPS.
+# fido2 normally rejects non-HTTPS origins; this bypasses that check locally.
+MFA_WEBAUTHN_ALLOW_INSECURE_ORIGIN = IS_LOCAL
 
 SOCIALACCOUNT_EMAIL_AUTHENTICATION = True
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True

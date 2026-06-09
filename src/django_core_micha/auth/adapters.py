@@ -1,3 +1,5 @@
+from urllib.parse import urlparse
+
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from django.contrib.auth import get_user_model
 from allauth.account.adapter import DefaultAccountAdapter
@@ -74,6 +76,19 @@ class CoreAccountAdapter(DefaultAccountAdapter):
         return response
 
 class CoreMFAAdapter(DefaultMFAAdapter):
+    def get_public_key_credential_rp_entity(self) -> dict[str, str]:
+        # Derive RP-ID from PUBLIC_ORIGIN so it is stable regardless of how the
+        # Host header arrives (direct, Vite proxy with changeOrigin:true, nginx, …).
+        # allauth's default uses request.get_host() which changes under proxies.
+        name = self._get_site_name()
+        public_origin = getattr(settings, "PUBLIC_ORIGIN", None)
+        if public_origin:
+            rp_id = urlparse(public_origin).hostname or "localhost"
+        else:
+            from allauth.core import context
+            rp_id = context.request.get_host().partition(":")[0]
+        return {"id": rp_id, "name": name}
+
     def on_authentication_success(self, request, user, **kwargs):
         # Successful MFA implies strong session security
         if getattr(request, "user", None) and request.user.is_authenticated:
