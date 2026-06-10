@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.19.0] — 2026-06-10
+
+### Added
+
+**Redis-backed sessions (`cached_db` on Redis db 2)**
+
+`settings_base` now configures `CACHES["default"]` using Django's built-in
+`RedisCache` backend, pointing at `redis://<REDIS_HOST>:6379/2` (db 2 — db 0
+is used by the Channels pubsub layer and Celery broker in consumer apps; db 1
+is commonly used by Celery result backends). `SESSION_ENGINE` is set to
+`django.contrib.sessions.backends.cached_db` so session reads are served from
+Redis while writes still hit Postgres. A Redis flush therefore costs only cache
+misses, never logouts. No new infrastructure is required: all consumer apps
+already declare a hard dependency on Redis via the Channels layer.
+
+### Migration
+
+- **No code change required** in consumer apps — the settings are applied
+  automatically via `settings_base`.
+- The Redis instance of each consumer app will start serving session reads on
+  **db 2**. Apps that pin `maxmemory` on their Redis instance should account for
+  the additional session key space (typically small, proportional to active
+  concurrent sessions).
+- The test settings override `CACHES` to `LocMemCache` so the CI test suite
+  remains green without a Redis instance.
+
 ## [2.18.2] — 2026-06-10
 
 ### Fixed

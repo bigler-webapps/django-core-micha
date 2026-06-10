@@ -174,6 +174,17 @@ CHANNEL_LAYERS = {
     },
 }
 
+# Session reads go to Redis (db 2 — db 0 is used by Channels + Celery broker,
+# db 1 is commonly used by Celery result backends in consumer apps);
+# writes still hit Postgres, so a Redis flush only costs cache misses, never logouts.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": f"redis://{env('REDIS_HOST', default='redis')}:6379/2",
+    }
+}
+SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
+
 PROJECT_NAME = env("PROJECT_NAME", default="Project")
 
 
