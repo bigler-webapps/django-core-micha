@@ -24,7 +24,21 @@ def _admin_policy_satisfied(user, request=None) -> bool:
         return True
     if not is_subject_to_admin_auth_policy(user):
         return True
-    return is_user_security_sufficient(user, request=request)
+    # Per-request memo: this helper is called ~10x per serialization of
+    # BaseUserSerializer (ui_permissions, can_manage_support_agents,
+    # security_state); each uncached call costs one auth-policy DB fetch.
+    cache = getattr(request, '_dcm_admin_policy_cache', None)
+    key = getattr(user, 'pk', None)
+    if cache is not None and key in cache:
+        return cache[key]
+    result = is_user_security_sufficient(user, request=request)
+    if key is None:
+        return result
+    if cache is None:
+        cache = {}
+        request._dcm_admin_policy_cache = cache
+    cache[key] = result
+    return result
 
 
 def has_full_auth_admin_rights(user, request=None) -> bool:

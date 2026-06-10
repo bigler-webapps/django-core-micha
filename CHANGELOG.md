@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.18.2] — 2026-06-10
+
+### Fixed
+
+**Query explosion in `BaseUserSerializer` for admin users**
+
+`_admin_policy_satisfied` re-fetched the auth policy from the DB on every call —
+~10x per `/api/users/current/` serialization (8 ui_permissions helpers +
+`can_manage_support_agents` + `security_state`). Now memoized per request
+(`request._dcm_admin_policy_cache`, invalidated by `set_security_level`).
+`get_user_security_state` now reads all authenticator types in one query
+instead of three `.exists()` calls. Permission semantics unchanged.
+
 ## [2.18.0] — 2026-06-09
 
 ### Added

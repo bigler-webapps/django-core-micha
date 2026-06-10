@@ -32,6 +32,9 @@ def set_security_level(request, level: str) -> None:
         logger.warning("Attempt to set invalid security level: %s", level)
         return
     request.session["auth_level"] = level
+    # Invalidate the per-request admin-policy memo (see permissions._admin_policy_satisfied)
+    if hasattr(request, "_dcm_admin_policy_cache"):
+        del request._dcm_admin_policy_cache
 
 
 def is_level_sufficient(current: str, required: str) -> bool:
@@ -139,10 +142,12 @@ def get_user_security_state(user, request=None) -> dict:
         current_level = "basic"
 
     # 3. Vorhandene MFA-Authenticators (nur Info)
-    authenticators = Authenticator.objects.filter(user=user)
-    has_totp = authenticators.filter(type=Authenticator.Type.TOTP).exists()
-    has_webauthn = authenticators.filter(type=Authenticator.Type.WEBAUTHN).exists()
-    has_recovery = authenticators.filter(type=Authenticator.Type.RECOVERY_CODES).exists()
+    authenticator_types = set(
+        Authenticator.objects.filter(user=user).values_list("type", flat=True)
+    )
+    has_totp = Authenticator.Type.TOTP.value in authenticator_types
+    has_webauthn = Authenticator.Type.WEBAUTHN.value in authenticator_types
+    has_recovery = Authenticator.Type.RECOVERY_CODES.value in authenticator_types
 
     # 4. Mismatch zwischen Policy und Session?
     #    Wenn Policy 'strong' verlangt, Session aber noch nicht strong ist,
