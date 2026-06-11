@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.20.0] — 2026-06-11
+
+### Changed
+
+**`sync-secrets` bare invocation syncs both environments**
+
+`sync-secrets` called with no arguments now runs a full GitHub-secrets sync for
+`staging` and then `production` in sequence (identical code paths to the explicit
+`--server --secret-target <target>` invocations). If the staging pass fails, the
+production pass is skipped and the CLI exits non-zero.
+
+Two new shorthand flags are also available:
+
+| Flag | Equivalent to |
+|---|---|
+| `--staging` | `--server --secret-target staging` |
+| `--production` | `--server --secret-target production` |
+
+Explicit invocations (`--server --secret-target <target>`, `--local`) are
+unchanged. Note: bare `sync-secrets` now mutates both GitHub environments on
+every call — use the explicit flags when you only want to touch one.
+
 ## [2.19.0] — 2026-06-10
 
 ### Added

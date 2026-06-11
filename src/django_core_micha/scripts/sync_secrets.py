@@ -691,11 +691,56 @@ def sync_github(
             print(f" [ERROR]\n     {proc.stderr.strip()}")
 
 
-def main():
+_BARE_SERVER_TARGETS = ("staging", "production")
+
+
+def _do_server_sync(
+    secret_target_name,
+    config,
+    secrets_def,
+    project_config,
+    project_config_path,
+    *,
+    cli_secret_source=None,
+    cli_values_file=None,
+    github_environment=None,
+):
+    """Run one GitHub-secrets sync pass for *secret_target_name*.
+
+    Raises SystemExit on validation or write errors — bare-mode callers catch it
+    to abort the sequence and propagate the exit code.
+    """
+    effective = resolve_effective_settings(
+        config,
+        cli_secret_source=cli_secret_source,
+        cli_values_file=cli_values_file,
+        cli_secret_target=secret_target_name,
+        project_config=project_config,
+        project_config_path=project_config_path,
+    )
+    validate_effective_settings("github", effective)
+    has_proton = check_dependencies("github", secret_source=effective["secret_source"])
+    values_data = None
+    if effective["values_file"] and effective["secret_source"] in ("yaml", "auto"):
+        values_data = load_values_file(effective["values_file"])
+    sync_github(
+        config,
+        secrets_def,
+        has_proton,
+        secret_target=effective["secret_target"],
+        github_environment=github_environment,
+        secret_source=effective["secret_source"],
+        values_data=values_data,
+        project_config=project_config,
+    )
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Sync secrets to a local .env file or to GitHub Environment Secrets."
+        " With no arguments, syncs GitHub secrets for both staging and production in sequence."
     )
-    destination_group = parser.add_mutually_exclusive_group(required=True)
+    destination_group = parser.add_mutually_exclusive_group(required=False)
     destination_group.add_argument(
         "--local",
         action="store_true",
@@ -706,6 +751,16 @@ def main():
         action="store_true",
         help="Push resolved secrets to GitHub Environment Secrets (replaces the old `--target github`).",
     )
+    destination_group.add_argument(
+        "--staging",
+        action="store_true",
+        help="Shorthand for --server --secret-target staging.",
+    )
+    destination_group.add_argument(
+        "--production",
+        action="store_true",
+        help="Shorthand for --server --secret-target production.",
+    )
     parser.add_argument("--secret-target", help="Target placeholder override for target-based secrets")
     parser.add_argument(
         "--secret-source",
@@ -714,8 +769,7 @@ def main():
     )
     parser.add_argument("--values-file", help="Override local YAML file with target-specific secret values")
     parser.add_argument("--github-environment", help="Optional GitHub environment override for GitHub sync")
-    args = parser.parse_args()
-    target = "local" if args.local else "github"
+    args = parser.parse_args(argv)
 
     project_config, project_config_path = load_project_config()
 
@@ -736,42 +790,86 @@ def main():
         print("Error: No 'secrets' block found in YAML.")
         sys.exit(1)
 
+    # Resolve destination and effective CLI secret target from flags.
+    if args.staging:
+        if args.secret_target:
+            parser.error("--staging already implies --secret-target staging; do not combine with --secret-target.")
+        destination = "github"
+        effective_cli_target = "staging"
+    elif args.production:
+        if args.secret_target:
+            parser.error("--production already implies --secret-target production; do not combine with --secret-target.")
+        destination = "github"
+        effective_cli_target = "production"
+    elif args.server:
+        destination = "github"
+        effective_cli_target = args.secret_target
+    elif args.local:
+        destination = "local"
+        effective_cli_target = args.secret_target
+    else:
+        if args.secret_target:
+            parser.error("--secret-target requires a destination flag (--server, --staging, or --production).")
+        destination = None  # bare mode: both targets in sequence
+
+    if destination is None:
+        for target_name in _BARE_SERVER_TARGETS:
+            print(f"\n{'─' * 60}")
+            print(f"  sync-secrets — target: {target_name}")
+            print(f"{'─' * 60}\n")
+            try:
+                _do_server_sync(
+                    target_name,
+                    config,
+                    secrets_def,
+                    project_config,
+                    project_config_path,
+                    cli_secret_source=args.secret_source,
+                    cli_values_file=args.values_file,
+                    github_environment=args.github_environment,
+                )
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else 1
+                print(f"\nError: {target_name} sync failed (exit {code}). Aborting remaining targets.")
+                sys.exit(code)
+        return
+
+    if destination == "github":
+        _do_server_sync(
+            effective_cli_target,
+            config,
+            secrets_def,
+            project_config,
+            project_config_path,
+            cli_secret_source=args.secret_source,
+            cli_values_file=args.values_file,
+            github_environment=args.github_environment,
+        )
+        return
+
+    # local
     effective = resolve_effective_settings(
         config,
         cli_secret_source=args.secret_source,
         cli_values_file=args.values_file,
-        cli_secret_target=args.secret_target,
+        cli_secret_target=effective_cli_target,
         project_config=project_config,
         project_config_path=project_config_path,
     )
-    validate_effective_settings(target, effective)
-
-    has_proton = check_dependencies(target, secret_source=effective["secret_source"])
+    validate_effective_settings("local", effective)
+    has_proton = check_dependencies("local", secret_source=effective["secret_source"])
     values_data = None
     if effective["values_file"] and effective["secret_source"] in ("yaml", "auto"):
         values_data = load_values_file(effective["values_file"])
-
-    if target == "local":
-        sync_local(
-            config,
-            secrets_def,
-            has_proton,
-            secret_target=effective["secret_target"],
-            secret_source=effective["secret_source"],
-            values_data=values_data,
-            project_config=project_config,
-        )
-    else:
-        sync_github(
-            config,
-            secrets_def,
-            has_proton,
-            secret_target=effective["secret_target"],
-            github_environment=args.github_environment,
-            secret_source=effective["secret_source"],
-            values_data=values_data,
-            project_config=project_config,
-        )
+    sync_local(
+        config,
+        secrets_def,
+        has_proton,
+        secret_target=effective["secret_target"],
+        secret_source=effective["secret_source"],
+        values_data=values_data,
+        project_config=project_config,
+    )
 
 
 if __name__ == "__main__":

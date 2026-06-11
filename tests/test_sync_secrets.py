@@ -1,13 +1,32 @@
 """Tests for sync_secrets.py — focused on project.yaml-based env/server resolution."""
 
+import sys
+from unittest.mock import patch
+
 import pytest
 
 from django_core_micha.scripts.sync_secrets import (
     get_target_scope,
+    main,
     resolve_github_environment,
     resolve_server_from_project,
     resolve_source,
 )
+
+_MINIMAL_SECRETS_YAML = (
+    "config:\n"
+    "  target_repo: org/repo\n"
+    "secrets:\n"
+    "  MY_SECRET:\n"
+    "    source: proton://Vault/Item/field\n"
+)
+
+
+@pytest.fixture()
+def secrets_dir(tmp_path, monkeypatch):
+    (tmp_path / "secrets.yaml").write_text(_MINIMAL_SECRETS_YAML, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
 
 
 # ---------------------------------------------------------------------------
@@ -203,3 +222,111 @@ def test_get_target_scope_rejects_invalid_value(capsys):
     assert "invalid target_scope" in captured.out
     assert "MY_SECRET" in captured.out
     assert "allowed: env, repo" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# main() — bare invocation and shorthands
+# ---------------------------------------------------------------------------
+
+
+def test_bare_invocation_syncs_staging_then_production(secrets_dir):
+    """No arguments → sync_github called twice: staging first, production second."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+    ):
+        main([])
+
+    assert mock_sync.call_count == 2
+    targets = [c.kwargs["secret_target"] for c in mock_sync.call_args_list]
+    assert targets == ["staging", "production"]
+
+
+def test_bare_staging_failure_aborts_production(secrets_dir):
+    """Staging failure → production never runs, exit code non-zero."""
+    call_count = 0
+
+    def _fail_on_first(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            sys.exit(1)
+
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github", side_effect=_fail_on_first),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+
+    assert exc_info.value.code != 0
+    assert call_count == 1
+
+
+def test_explicit_server_secret_target_staging_unchanged(secrets_dir):
+    """--server --secret-target staging: single call, target=staging (regression)."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+    ):
+        main(["--server", "--secret-target", "staging"])
+
+    mock_sync.assert_called_once()
+    assert mock_sync.call_args.kwargs["secret_target"] == "staging"
+
+
+def test_explicit_server_secret_target_production_unchanged(secrets_dir):
+    """--server --secret-target production: single call, target=production (regression)."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+    ):
+        main(["--server", "--secret-target", "production"])
+
+    mock_sync.assert_called_once()
+    assert mock_sync.call_args.kwargs["secret_target"] == "production"
+
+
+def test_staging_shorthand(secrets_dir):
+    """--staging: single call equivalent to --server --secret-target staging."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+    ):
+        main(["--staging"])
+
+    mock_sync.assert_called_once()
+    assert mock_sync.call_args.kwargs["secret_target"] == "staging"
+
+
+def test_production_shorthand(secrets_dir):
+    """--production: single call equivalent to --server --secret-target production."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+    ):
+        main(["--production"])
+
+    mock_sync.assert_called_once()
+    assert mock_sync.call_args.kwargs["secret_target"] == "production"
+
+
+def test_bare_with_secret_target_errors(secrets_dir, capsys):
+    """--secret-target without a destination flag must error, not silently drop the override."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--secret-target", "custom"])
+    assert exc_info.value.code != 0
+
+
+def test_staging_shorthand_combined_with_secret_target_errors(secrets_dir):
+    """--staging --secret-target X must error to prevent silent discard of --secret-target."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--staging", "--secret-target", "production"])
+    assert exc_info.value.code != 0
+
+
+def test_production_shorthand_combined_with_secret_target_errors(secrets_dir):
+    """--production --secret-target X must error to prevent silent discard of --secret-target."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--production", "--secret-target", "staging"])
+    assert exc_info.value.code != 0
