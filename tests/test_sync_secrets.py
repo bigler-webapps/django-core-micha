@@ -1,11 +1,13 @@
 """Tests for sync_secrets.py — focused on project.yaml-based env/server resolution."""
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from django_core_micha.scripts.sync_secrets import (
+    get_proton_secret,
     get_target_scope,
     main,
     resolve_github_environment,
@@ -330,3 +332,85 @@ def test_production_shorthand_combined_with_secret_target_errors(secrets_dir):
     with pytest.raises(SystemExit) as exc_info:
         main(["--production", "--secret-target", "staging"])
     assert exc_info.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# get_proton_secret — retry-with-backoff
+# ---------------------------------------------------------------------------
+
+_PROTON_PASS_JSON = '{"item": {"content": {"password": "secret-value"}}}'
+_OK = SimpleNamespace(returncode=0, stdout=_PROTON_PASS_JSON, stderr="")
+_FAIL = SimpleNamespace(returncode=1, stdout="", stderr="error")
+
+
+def test_get_proton_secret_immediate_success():
+    """Single successful fetch → value returned, subprocess called once."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.subprocess.run", return_value=_OK) as mock_run,
+        patch("django_core_micha.scripts.sync_secrets.time.sleep"),
+    ):
+        result = get_proton_secret("proton://Vault/Item/password")
+    assert result == "secret-value"
+    assert mock_run.call_count == 1
+
+
+def test_get_proton_secret_retries_then_succeeds(capsys):
+    """Fail twice, succeed on third attempt → value returned, no [CLI ERROR]."""
+    with (
+        patch(
+            "django_core_micha.scripts.sync_secrets.subprocess.run",
+            side_effect=[_FAIL, _FAIL, _OK],
+        ) as mock_run,
+        patch("django_core_micha.scripts.sync_secrets.time.sleep") as mock_sleep,
+    ):
+        result = get_proton_secret("proton://Vault/Item/password")
+    assert result == "secret-value"
+    assert mock_run.call_count == 3
+    assert mock_sleep.call_count == 2  # sleep between each failed attempt, not after success
+    captured = capsys.readouterr()
+    assert "[CLI ERROR]" not in captured.out
+    assert "[retry 1/3]" in captured.out
+    assert "[retry 2/3]" in captured.out
+    assert "[OK]" in captured.out
+
+
+def test_get_proton_secret_all_retries_fail_returns_none(capsys):
+    """All 3 attempts fail → None returned, [CLI ERROR] printed, skip semantics preserved."""
+    with (
+        patch(
+            "django_core_micha.scripts.sync_secrets.subprocess.run",
+            side_effect=[_FAIL, _FAIL, _FAIL],
+        ) as mock_run,
+        patch("django_core_micha.scripts.sync_secrets.time.sleep"),
+    ):
+        result = get_proton_secret("proton://Vault/Item/password")
+    assert result is None  # clobber guard: never an empty string
+    assert mock_run.call_count == 3
+    captured = capsys.readouterr()
+    assert "[CLI ERROR]" in captured.out
+
+
+def test_get_proton_secret_no_empty_push_on_failure():
+    """Clobber guard: CLI error always returns None, not '' or any falsy non-None."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.subprocess.run", return_value=_FAIL),
+        patch("django_core_micha.scripts.sync_secrets.time.sleep"),
+    ):
+        result = get_proton_secret("proton://Vault/Item/password")
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Bare-mode separator — Unicode / cp1252 safety
+# ---------------------------------------------------------------------------
+
+
+def test_bare_mode_separator_no_unicode_crash(secrets_dir, capsys):
+    """Separator must not contain U+2500 (BOX DRAWINGS LIGHT HORIZONTAL), which crashes cp1252."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=False),
+        patch("django_core_micha.scripts.sync_secrets.sync_github"),
+    ):
+        main([])
+    captured = capsys.readouterr()
+    assert "─" not in captured.out  # ─ was the cp1252 crasher

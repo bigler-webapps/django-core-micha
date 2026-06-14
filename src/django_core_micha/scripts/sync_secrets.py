@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import random
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -13,6 +15,9 @@ SECRETS_YAML_PATH = "secrets.yaml"
 PROJECT_CONFIG_PATH = "project.yaml"
 LOCAL_ENV_FILE = ".env.local"
 PROTON_CLI_CMD = "pass-cli"  # Der Befehl für Proton Pass
+
+_FETCH_MAX_RETRIES = 3
+_FETCH_BACKOFF_BASE = 1.0  # seconds, exponential: 1 / 2 / 4 + jitter
 SECRET_SOURCE_CHOICES = ("proton", "yaml", "auto")
 
 
@@ -369,10 +374,20 @@ def get_proton_secret(proton_path):
             "--output",
             "json",
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
 
-        if result.returncode != 0:
-            print(" [CLI ERROR]")
+        result = None
+        for attempt in range(1, _FETCH_MAX_RETRIES + 1):
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                break
+            if attempt < _FETCH_MAX_RETRIES:
+                delay = _FETCH_BACKOFF_BASE * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                print(f" [retry {attempt}/{_FETCH_MAX_RETRIES}]", end="", flush=True)
+                time.sleep(delay)
+
+        if result is None or result.returncode != 0:
+            stderr_hint = (result.stderr or "").strip() if result is not None else ""
+            print(f" [CLI ERROR]{(': ' + stderr_hint) if stderr_hint else ''}")
             return None
 
         try:
@@ -814,9 +829,9 @@ def main(argv=None):
 
     if destination is None:
         for target_name in _BARE_SERVER_TARGETS:
-            print(f"\n{'─' * 60}")
+            print(f"\n{'-' * 60}")
             print(f"  sync-secrets — target: {target_name}")
-            print(f"{'─' * 60}\n")
+            print(f"{'-' * 60}\n")
             try:
                 _do_server_sync(
                     target_name,
