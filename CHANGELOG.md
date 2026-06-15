@@ -1,5 +1,38 @@
 # Changelog
 
+## [2.22.0] — 2026-06-15
+
+### Added
+
+**`/api/healthz`: three new readiness checks — migrations, config, version**
+
+The health endpoint now covers the deploy-error classes that `db` + `cache`
+cannot see:
+
+| Check | What it catches | 503 on failure |
+|---|---|---|
+| `migrations` | Unapplied migrations — schema stale after deploy | yes |
+| `config` | Missing critical config keys (e.g. `RESEND_API_KEY` when `EMAIL_PROVIDER=resend`) | yes |
+| `version` | `APP_GIT_SHA` env var — stale-image detection for CI | no (info only) |
+
+Implementation notes:
+
+- **migrations**: uses `MigrationExecutor(connection).migration_plan(leaf_nodes)` —
+  read-only, no `call_command('migrate')`, one DB query.
+- **config**: checks key *presence* only; values are never serialised.
+  Which keys are required is derived from live settings (`EMAIL_PROVIDER`,
+  `AUTH_METHODS`), so apps without Resend or social login never produce a
+  false-503.  Response shape: `{"ok": bool, "missing": ["KEY_NAME", …]}`.
+- **version**: `{"version": "<sha>" | null}` at the top level — Kuma/CI can
+  assert "running == pushed" without the endpoint knowing the expected SHA.
+
+Response is backward-compatible: `status`, `checks.db`, and `checks.cache`
+shapes are unchanged; `migrations` and `config` are new entries in `checks`;
+`version` is a new top-level field.
+
+A brief `degraded` window during the migrate-then-up deploy cycle is expected
+and acceptable.
+
 ## [2.20.0] — 2026-06-11
 
 ### Changed
