@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-core-micha"
-version = "2.22.0"
+version = "2.23.0"
 authors = [
   { name="Micha Bigler", email="micha.bigler2@gmail.com" },
 ]
@@ -16,6 +16,7 @@ dependencies = [
     "psycopg2-binary",
     "filetype>=1.2,<2.0",
     "django-anymail>=10",
+    "pywebpush",
 ]
 
 [project.optional-dependencies]
@@ -28,7 +29,7 @@ test = [
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
 python_files = ["test_*.py"]
-testpaths = ["tests"]
+testpaths = ["tests", "src/django_core_micha/notifications/tests", "src/django_core_micha/onboarding/tests"]
 asyncio_mode = "auto"
 
 [project.scripts]

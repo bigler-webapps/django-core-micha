@@ -4,6 +4,8 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
     "django_core_micha.auditlog",
+    "django_core_micha.notifications",
+    "django_core_micha.onboarding",
     "allauth",
     "allauth.account",
     "allauth.mfa",

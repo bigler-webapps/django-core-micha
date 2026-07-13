@@ -5,6 +5,8 @@ from rest_framework.routers import DefaultRouter
 # Views
 from django_core_micha.invitations.views import PasswordResetConfirmView
 from django_core_micha.invitations import urls as invitations_urls
+from django_core_micha.notifications import urls as notifications_urls
+from django_core_micha.onboarding import urls as onboarding_urls
 from django_core_micha.auth.views import (
     csrf_token_view,
     auth_methods_view,
@@ -68,4 +70,6 @@ urlpatterns = [
     # Access-Code-API (Einladungen)
     # Hängt AccessCodeViewSet unter /access-codes/ ein
     path("", include(invitations_urls)),
+    path("notifications/", include(notifications_urls)),
+    path("onboarding/", include(onboarding_urls)),
 ]

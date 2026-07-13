@@ -106,6 +106,8 @@ CORE_APPS = [
     "django_core_micha.invitations",
     "django_core_micha.auth",
     "django_core_micha.auditlog",
+    "django_core_micha.notifications",
+    "django_core_micha.onboarding",
 ]
 
 INSTALLED_APPS = CORE_APPS.copy()
@@ -186,6 +188,14 @@ CACHES = {
 SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
 
 PROJECT_NAME = env("PROJECT_NAME", default="Project")
+
+# Shared notifications / onboarding. Consumer apps provide their own concrete
+# notification model and may append domain-specific onboarding step keys.
+VAPID_PUBLIC_KEY = env("VAPID_PUBLIC_KEY", default="")
+VAPID_PRIVATE_KEY = env("VAPID_PRIVATE_KEY", default="")
+VAPID_CLAIM_EMAIL = env("VAPID_CLAIM_EMAIL", default="")
+NOTIFICATION_MODEL = ""
+ONBOARDING_EXTRA_STEP_KEYS = []
 
 
 # -------------------------------------------------------------------
