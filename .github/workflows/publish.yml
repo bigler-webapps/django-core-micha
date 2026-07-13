@@ -31,10 +31,11 @@ jobs:
         id: version_check
         run: |
           python - << 'PYCODE'
+          import json
           import os
-          import subprocess
           import tomllib
           from pathlib import Path
+          from urllib.request import urlopen
 
           github_event = os.environ.get("GITHUB_EVENT_NAME", "")
           output_path = Path(os.environ["GITHUB_OUTPUT"])
@@ -50,24 +51,24 @@ jobs:
 
           current = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
 
-          try:
-              previous_raw = subprocess.check_output(
-                  ["git", "show", "HEAD^:pyproject.toml"],
-                  text=True,
-              )
-          except subprocess.CalledProcessError:
-              print("No previous pyproject.toml found. Publishing.")
-              write_output("true")
-              raise SystemExit(0)
-
-          previous = tomllib.loads(previous_raw)["project"]["version"]
-          print(f"Previous version: {previous}")
-          print(f"Current version:  {current}")
-
           def parse(version: str):
               return tuple(int(part) for part in version.split("."))
 
-          if parse(current) > parse(previous):
+          try:
+              with urlopen("https://pypi.org/pypi/django-core-micha/json", timeout=10) as response:
+                  if response.status != 200:
+                      raise RuntimeError(f"PyPI returned HTTP {response.status}")
+                  published = json.load(response)["info"]["version"]
+              parse(published)
+          except Exception as exc:
+              print(f"Could not fetch or parse the published PyPI version ({exc}). Publishing.")
+              write_output("true")
+              raise SystemExit(0)
+
+          print(f"Published version: {published}")
+          print(f"Current version:  {current}")
+
+          if parse(current) > parse(published):
               print("Version increased. Publishing.")
               write_output("true")
           else:
@@ -93,6 +94,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install build
+
+      - name: Install and run tests
+        if: steps.version_check.outputs.should_publish == 'true'
+        env:
+          PYTHONPATH: .
+        run: |
+          pip install -e ".[test]"
+          pytest -q
 
       - name: Build package
         if: steps.version_check.outputs.should_publish == 'true'
