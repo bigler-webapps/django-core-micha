@@ -753,7 +753,9 @@ def _do_server_sync(
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Sync secrets to a local .env file or to GitHub Environment Secrets."
-        " With no arguments, syncs GitHub secrets for both staging and production in sequence."
+        " With no arguments, syncs GitHub secrets for each bare-mode target in sequence"
+        " (default staging then production; override with config.bare_server_targets"
+        " in secrets.yaml)."
     )
     destination_group = parser.add_mutually_exclusive_group(required=False)
     destination_group.add_argument(
@@ -828,7 +830,19 @@ def main(argv=None):
         destination = None  # bare mode: both targets in sequence
 
     if destination is None:
-        for target_name in _BARE_SERVER_TARGETS:
+        bare_targets = config.get("bare_server_targets")
+        if bare_targets is None:
+            bare_targets = _BARE_SERVER_TARGETS
+        elif not (
+            isinstance(bare_targets, (list, tuple))
+            and bare_targets
+            and all(isinstance(t, str) and t.strip() for t in bare_targets)
+        ):
+            parser.error(
+                "config.bare_server_targets must be a non-empty list of non-empty"
+                " strings (server target names)."
+            )
+        for target_name in bare_targets:
             print(f"\n{'-' * 60}")
             print(f"  sync-secrets — target: {target_name}")
             print(f"{'-' * 60}\n")

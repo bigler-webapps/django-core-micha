@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.24.0] — 2026-07-13
+
+### Added
+
+**`sync-secrets`: configurable bare-mode server targets**
+
+Bare `sync-secrets` (no arguments) previously always iterated the hardcoded pair
+`(staging, production)`. That fits app repos with one server per environment, but
+not infra repos like `webapp-management` that manage several named servers — there
+the phantom `production` target failed to resolve. `secrets.yaml` may now set
+`config.bare_server_targets` to a non-empty list of server target names; bare mode
+iterates those in order. Absent the key, behaviour is unchanged (`staging` then
+`production`), so app repos are unaffected. Malformed values abort before any sync.
+
 ## [2.22.0] — 2026-06-15
 
 ### Added

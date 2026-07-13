@@ -265,6 +265,58 @@ def test_bare_staging_failure_aborts_production(secrets_dir):
     assert call_count == 1
 
 
+def test_bare_invocation_honours_config_bare_server_targets(secrets_dir):
+    """config.bare_server_targets overrides the default staging/production pair."""
+    (secrets_dir / "secrets.yaml").write_text(
+        "config:\n"
+        "  target_repo: org/repo\n"
+        "  bare_server_targets: [staging, main-prod, contact-prod, innoservice-prod]\n"
+        "secrets:\n"
+        "  MY_SECRET:\n"
+        "    source: proton://Vault/Item/field\n",
+        encoding="utf-8",
+    )
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+    ):
+        main([])
+
+    targets = [c.kwargs["secret_target"] for c in mock_sync.call_args_list]
+    assert targets == ["staging", "main-prod", "contact-prod", "innoservice-prod"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "  bare_server_targets: []\n",  # empty list
+        "  bare_server_targets: staging\n",  # scalar, not a list
+        "  bare_server_targets: ['', main-prod]\n",  # blank entry
+        "  bare_server_targets: [staging, 3]\n",  # non-string entry
+    ],
+)
+def test_bare_invocation_rejects_invalid_bare_server_targets(secrets_dir, value):
+    """Malformed config.bare_server_targets aborts before any sync."""
+    (secrets_dir / "secrets.yaml").write_text(
+        "config:\n"
+        "  target_repo: org/repo\n"
+        f"{value}"
+        "secrets:\n"
+        "  MY_SECRET:\n"
+        "    source: proton://Vault/Item/field\n",
+        encoding="utf-8",
+    )
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+
+    assert exc_info.value.code != 0
+    mock_sync.assert_not_called()
+
+
 def test_explicit_server_secret_target_staging_unchanged(secrets_dir):
     """--server --secret-target staging: single call, target=staging (regression)."""
     with (
