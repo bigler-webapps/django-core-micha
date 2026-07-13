@@ -4,7 +4,7 @@ from rest_framework import generics, status, views
 from rest_framework.response import Response
 
 from .models import NotificationPreference, PushSubscription, get_notification_model
-from .serializers import NotificationPreferenceSerializer, PushSubscriptionSerializer
+from .serializers import NotificationPreferenceSerializer, PushSubscriptionInputSerializer, PushSubscriptionSerializer
 
 
 class NotificationPreferenceView(generics.RetrieveUpdateAPIView):
@@ -32,6 +32,10 @@ class PushSubscriptionView(views.APIView):
         auth = keys.get("auth") if isinstance(keys, dict) else subscription.get("auth")
         if not all(isinstance(value, str) and value for value in (endpoint, p256dh, auth)):
             return Response({"detail": "endpoint, p256dh, and auth are required."}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = PushSubscriptionInputSerializer(data={"endpoint": endpoint})
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
+        endpoint = validated_data["endpoint"]
         push_subscription = PushSubscription.objects.filter(endpoint=endpoint).first()
         if push_subscription is not None and push_subscription.user_id != request.user.id:
             return Response(

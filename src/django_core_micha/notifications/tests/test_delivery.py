@@ -97,10 +97,10 @@ def test_push_subscription_cannot_be_claimed_by_another_user():
     user_model = get_user_model()
     owner = user_model.objects.create_user(username="owner", email="owner@example.test", password="password")
     other = user_model.objects.create_user(username="other", email="other@example.test", password="password")
-    PushSubscription.objects.create(user=owner, endpoint="https://push.test/owned", p256dh="key", auth="auth")
+    PushSubscription.objects.create(user=owner, endpoint="https://fcm.googleapis.com/owned", p256dh="key", auth="auth")
     request = APIRequestFactory().post(
         "/notifications/preferences/push-subscription/",
-        {"subscription": {"endpoint": "https://push.test/owned", "keys": {"p256dh": "new", "auth": "new"}}},
+        {"subscription": {"endpoint": "https://fcm.googleapis.com/owned", "keys": {"p256dh": "new", "auth": "new"}}},
         format="json",
     )
     force_authenticate(request, user=other)
@@ -108,7 +108,29 @@ def test_push_subscription_cannot_be_claimed_by_another_user():
     response = PushSubscriptionView.as_view()(request)
 
     assert response.status_code == 409
-    assert PushSubscription.objects.get(endpoint="https://push.test/owned").user_id == owner.id
+    assert PushSubscription.objects.get(endpoint="https://fcm.googleapis.com/owned").user_id == owner.id
+
+
+@pytest.mark.django_db
+def test_push_subscription_rejects_invalid_endpoint_without_creating_row():
+    user = get_user_model().objects.create_user(username="ssrf", email="ssrf@example.test", password="password")
+    request = APIRequestFactory().post(
+        "/notifications/preferences/push-subscription/",
+        {
+            "subscription": {
+                "endpoint": "https://169.254.169.254/latest/meta-data/",
+                "keys": {"p256dh": "key", "auth": "auth"},
+            }
+        },
+        format="json",
+    )
+    force_authenticate(request, user=user)
+    initial_count = PushSubscription.objects.count()
+
+    response = PushSubscriptionView.as_view()(request)
+
+    assert response.status_code == 400
+    assert PushSubscription.objects.count() == initial_count
 
 
 def test_optional_inbox_returns_501_when_notification_model_is_unset(settings):
