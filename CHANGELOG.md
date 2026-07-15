@@ -14,6 +14,59 @@ the phantom `production` target failed to resolve. `secrets.yaml` may now set
 iterates those in order. Absent the key, behaviour is unchanged (`staging` then
 `production`), so app repos are unaffected. Malformed values abort before any sync.
 
+### Fixed
+
+**Missing hard dependencies caused every published-package install (and the
+publish CI's own test gate) to crash on import**
+
+`settings_base.py` does a top-level `from corsheaders.defaults import
+default_headers` and registers `corsheaders`, `rest_framework`, `channels`,
+`allauth` (+ `.mfa`/`.account`/`.socialaccount`/providers), `whitenoise`
+(`MIDDLEWARE` + `STORAGES`), and — transitively, via allauth's Google social
+provider — `PyJWT` — none of which were declared in `pyproject.toml`'s
+`dependencies`. Every consuming app happened to already install these itself,
+masking the gap, until the publish workflow's own test gate (added in the
+previous commit) installed `django-core-micha` in isolation and failed with
+`ModuleNotFoundError: No module named 'allauth'`.
+
+The first fix pass only added `django-environ`, `django-cors-headers`,
+`djangorestframework`, `channels`, `channels_redis`, and `django-allauth[mfa]`.
+Independent review correctly flagged that the existing test suite never
+actually imports `settings_base.py` (`tests/settings.py` hand-rolls a minimal
+settings module instead — see `test_channel_layer.py`), so passing tests were
+not evidence that `corsheaders`/`whitenoise` were fixed. Added
+`tests/test_settings_base_dependencies.py`, a regression test that imports
+`settings_base` for real in an isolated subprocess and explicitly resolves
+every `MIDDLEWARE`/`STORAGES` backend string (since `django.setup()` alone
+does not import those lazily-referenced paths). Running it against the
+reviewed fix caught `whitenoise` immediately, and after adding that, a second
+gap: `ModuleNotFoundError: No module named 'jwt'` (needed by
+`allauth.socialaccount.providers.google`, registered in `CORE_APPS`
+unconditionally).
+
+A second independent review pass then found a third, still-latent gap:
+`requests` (also required by the Google OAuth2 provider) was only present by
+accident, via `django-anymail`'s own unrelated transitive dependency on it —
+the exact same masking pattern this whole fix exists to eliminate. Rather than
+hand-declaring `requests`/`PyJWT` separately, switched to
+`django-allauth[mfa,socialaccount]` — allauth's own `socialaccount` extra
+already declares `oauthlib`, `requests>=2.0.0`, and `pyjwt[crypto]<3,>=2.0`
+together, which is the exact transitive set `settings_base.py` needs and is
+self-documenting instead of hand-rediscovered.
+
+Verified three times over, each via a real disprove-then-reprove cycle in a
+freshly created virtualenv (uninstall the package, confirm
+`test_settings_base_dependencies.py` fails with the exact expected
+`ModuleNotFoundError`, reinstall, confirm the full suite passes again) — for
+`whitenoise`, `jwt`, and `requests` in turn. Final verification: a completely
+fresh virtualenv, installed purely via `pip install -e ".[test]"` against the
+final `pyproject.toml`, full suite green (295 passed). A full AST-based scan
+of every top-level third-party import across all of `src/django_core_micha`
+(not just `settings_base.py`) found nothing else missing; the one remaining
+unscanned import (`asgiref`, used by `notifications/delivery.py`) is safe —
+it's an unconditional hard dependency of Django itself, already covered by
+`Django>=6.0.5`.
+
 ## [2.22.0] — 2026-06-15
 
 ### Added

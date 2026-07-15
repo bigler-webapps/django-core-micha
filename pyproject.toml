@@ -17,6 +17,13 @@ dependencies = [
     "filetype>=1.2,<2.0",
     "django-anymail>=10",
     "pywebpush",
+    "django-environ",
+    "django-cors-headers",
+    "djangorestframework",
+    "channels",
+    "channels_redis",
+    "django-allauth[mfa,socialaccount]",
+    "whitenoise",
 ]
 
 [project.optional-dependencies]
