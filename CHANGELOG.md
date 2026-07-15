@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.25.0] — 2026-07-15
+
+### Added
+
+**`pwa_install` universal onboarding step (registration only — UI lands in
+`ui-core-micha`)**
+
+Registers `pwa_install` in `UNIVERSAL_STEP_KEYS` alongside `cookie_consent`,
+`complete_name`, and `browser_push`, so it is created with `enabled=True` by
+default and independently toggleable per event via the existing
+`OnboardingStepConfigView` admin PATCH endpoint — full parity with the other
+universal steps. This is a backend registration change only; the actual step
+UI (install prompt, `beforeinstallprompt` capture) is implemented in
+`ui-core-micha`, gated there behind an explicit per-app opt-in prop so it
+does not start appearing in apps that haven't verified their PWA manifest/
+icons are actually installable.
+
 ## [2.24.0] — 2026-07-13
 
 ### Added

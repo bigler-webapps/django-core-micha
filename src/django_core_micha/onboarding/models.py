@@ -2,7 +2,7 @@ from django.conf import settings
 from django.db import models
 
 
-UNIVERSAL_STEP_KEYS = ["cookie_consent", "complete_name", "browser_push"]
+UNIVERSAL_STEP_KEYS = ["cookie_consent", "complete_name", "browser_push", "pwa_install"]
 
 
 class OnboardingStepConfig(models.Model):

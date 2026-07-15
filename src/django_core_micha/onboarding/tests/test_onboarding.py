@@ -14,8 +14,38 @@ def test_step_config_map_creates_universal_and_extra_keys(settings):
 
     config_map = get_step_config_map()
 
-    assert set(config_map) == {*UNIVERSAL_STEP_KEYS, "unread_messages", "custom_step"}
-    assert OnboardingStepConfig.objects.count() == 5
+    expected_keys = {*UNIVERSAL_STEP_KEYS, "unread_messages", "custom_step"}
+    assert set(config_map) == expected_keys
+    assert OnboardingStepConfig.objects.count() == len(expected_keys)
+
+
+@pytest.mark.django_db
+def test_pwa_install_is_a_universal_step_toggleable_per_event(settings):
+    """pwa_install must behave exactly like the other universal steps (cookie_consent,
+    complete_name, browser_push): registered by default, and independently toggleable
+    via the same admin PATCH endpoint — no app opt-in needed at the registry level
+    (per-app opt-in for actually SHOWING the step is a frontend-side concern in ucm)."""
+    assert "pwa_install" in UNIVERSAL_STEP_KEYS
+
+    config_map = get_step_config_map()
+    # Registered alongside its siblings (not merely "any string creates a row
+    # with the model's own enabled=True default" — that would hold for an
+    # unregistered key too and wouldn't prove pwa_install is actually wired
+    # through get_registered_step_keys()).
+    assert {"cookie_consent", "complete_name", "browser_push", "pwa_install"} <= set(config_map)
+    assert config_map["pwa_install"] is True
+
+    settings.ROLE_DEFINITIONS = {"manager": {"level": 2, "label": "Manager"}}
+    user = get_user_model().objects.create_user(username="pwa-admin", email="pwa-admin@example.test", password="password")
+    user.profile = SimpleNamespace(role="manager")
+    request = APIRequestFactory().patch(
+        "/onboarding/step-config/", {"key": "pwa_install", "enabled": False}, format="json"
+    )
+    force_authenticate(request, user=user)
+    response = OnboardingStepConfigView.as_view()(request)
+
+    assert response.status_code == 200
+    assert OnboardingStepConfig.objects.get(key="pwa_install").enabled is False
 
 
 @pytest.mark.django_db
