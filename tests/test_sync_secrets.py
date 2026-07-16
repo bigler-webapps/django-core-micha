@@ -452,6 +452,59 @@ def test_get_proton_secret_no_empty_push_on_failure():
     assert result is None
 
 
+def test_sync_github_push_retries_then_succeeds(capsys):
+    """A transient GitHub CLI failure is retried before marking the push OK."""
+    config = {"target_repo": "org/repo"}
+    secrets_def = {"MY_SECRET": {}}
+    with (
+        patch(
+            "django_core_micha.scripts.sync_secrets.subprocess.run",
+            side_effect=[_FAIL, _FAIL, _OK],
+        ) as mock_run,
+        patch("django_core_micha.scripts.sync_secrets.time.sleep"),
+    ):
+        from django_core_micha.scripts.sync_secrets import sync_github
+
+        sync_github(
+            config,
+            secrets_def,
+            has_proton=False,
+            secret_target="staging",
+            secret_source="yaml",
+            values_data={"targets": {"staging": {"MY_SECRET": "secret-value"}}},
+        )
+
+    assert mock_run.call_count == 3
+    assert "[OK via yaml]" in capsys.readouterr().out
+
+
+def test_sync_github_push_persistent_failure_exits_without_secret_value(capsys):
+    """Persistent push failures expose key names but never secret values."""
+    config = {"target_repo": "org/repo"}
+    secrets_def = {"MY_SECRET": {}}
+    secret_value = "secret-value-must-not-appear"
+    with (
+        patch("django_core_micha.scripts.sync_secrets.subprocess.run", return_value=_FAIL),
+        patch("django_core_micha.scripts.sync_secrets.time.sleep"),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        from django_core_micha.scripts.sync_secrets import sync_github
+
+        sync_github(
+            config,
+            secrets_def,
+            has_proton=False,
+            secret_target="staging",
+            secret_source="yaml",
+            values_data={"targets": {"staging": {"MY_SECRET": secret_value}}},
+        )
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "MY_SECRET" in captured.out
+    assert secret_value not in captured.out
+
+
 # ---------------------------------------------------------------------------
 # Bare-mode separator — Unicode / cp1252 safety
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -41,6 +42,7 @@ def _settings_mock(**overrides):
         "AUTH_METHODS": {"social_login": False},
         "ANYMAIL": {},
         "SOCIALACCOUNT_PROVIDERS": {},
+        "HEALTHZ_CHECK_TIMEOUT_SECONDS": 3.0,
     }
     defaults.update(overrides)
     mock = MagicMock()
@@ -72,6 +74,8 @@ class TestBackwardCompat:
         assert response.status_code == 200
         data = json.loads(response.content)
         assert data["status"] == "ok"
+        assert set(data["checks"]) == {"db", "cache", "migrations", "config"}
+        assert all(set(check) == {"ok", "duration_ms"} for check in data["checks"].values())
 
     @pytest.mark.django_db
     def test_db_shape_unchanged(self, rf):
@@ -103,6 +107,32 @@ class TestBackwardCompat:
         response = _patched_view(rf)
         data = json.loads(response.content)
         assert "version" in data  # present regardless of value
+
+
+@pytest.mark.django_db
+def test_healthz_cache_check_timeout_returns_fast_degraded_response(rf):
+    """A hung cache operation times out without delaying the other checks."""
+    class HangingCache:
+        def set(self, *args, **kwargs):
+            time.sleep(10)
+
+    started = time.monotonic()
+    with (
+        patch("django_core_micha.health.views.MigrationExecutor") as MockExec,
+        patch("django_core_micha.health.views.cache", HangingCache()),
+    ):
+        MockExec.return_value.loader.graph.leaf_nodes.return_value = []
+        MockExec.return_value.migration_plan.return_value = []
+        response = healthz_view(rf.get("/api/healthz"))
+    elapsed = time.monotonic() - started
+
+    payload = json.loads(response.content)
+    assert elapsed < 6
+    assert response.status_code == 503
+    assert "timed out" in payload["checks"]["cache"]["error"]
+    assert payload["checks"]["db"]["ok"] is True
+    assert payload["checks"]["migrations"]["ok"] is True
+    assert payload["checks"]["config"]["ok"] is True
 
 
 # ---------------------------------------------------------------------------

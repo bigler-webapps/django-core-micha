@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.26.0] — 2026-07-16
+
+### Fixed
+
+- Bound each `/api/healthz` dependency check with a shared deadline, returning a fast 503 with per-check timeout attribution when a dependency stalls. During a sustained DB outage, wedged non-daemon healthz worker threads accumulate at roughly one per Kuma poll interval and are joined at interpreter exit; the request timeout does not bound them, so graceful shutdown relies on the process manager's SIGKILL grace period as a backstop.
+- Added app-wide Redis socket/connect timeouts (2s), a Postgres connection timeout (5s), and Postgres TCP keepalives (30s idle, 10s interval, three probes). The keepalives detect a black-holed Postgres peer in roughly 60 seconds, bounding how long a single wedged healthz worker persists; a hard Redis outage now makes cached-db session cache writes fail fast while reads degrade to the database.
+- Retried GitHub secret pushes with exponential backoff and now exit non-zero after reporting failed key names.
+
 ## [2.25.0] — 2026-07-15
 
 ### Added

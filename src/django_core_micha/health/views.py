@@ -33,16 +33,27 @@ plan — catches "DB up but schema stale" (e.g. cockpit schemaless boot).
 provider.  Only key *names* appear in ``missing``; values are never serialised.
 Which keys are required is derived from the live settings, not hard-coded, so
 apps without Resend or social login never get a false-503.
+
+Each check has a shared wall-clock deadline (three seconds by default). A timed
+out check is reported as failed while the response schema remains unchanged.
+Timed-out workers are non-daemon: ``concurrent.futures.thread``'s process-wide
+pre-exit hook joins them regardless of this pool's ``shutdown(wait=False, ...)``,
+so graceful restarts during sustained dependency outages rely on the process
+manager's SIGKILL grace period.  Postgres TCP keepalives bound a black-holed peer
+to roughly one minute, limiting how long a single leaked DB worker can remain
+wedged.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import logging
 import os
 import time
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import connection
+from django.db import connection, connections
 from django.db.migrations.executor import MigrationExecutor
 from django.http import JsonResponse
 from django.views.decorators.cache import never_cache
@@ -51,6 +62,50 @@ from django.views.decorators.http import require_GET
 
 
 logger = logging.getLogger(__name__)
+
+
+HEALTHZ_CHECK_TIMEOUT_SECONDS = 3.0
+
+
+def _bounded_checks(check_map):
+    """Run checks concurrently, each bounded by a shared wall-clock deadline."""
+    def _wrap(func):
+        def inner():
+            try:
+                return func()
+            finally:
+                # Worker threads open their own thread-local DB connections;
+                # close them here or they linger until thread death.
+                connections.close_all()
+        return inner
+
+    timeout_s = getattr(
+        settings, "HEALTHZ_CHECK_TIMEOUT_SECONDS", HEALTHZ_CHECK_TIMEOUT_SECONDS
+    )
+    pool = ThreadPoolExecutor(max_workers=len(check_map))
+    futures = {name: pool.submit(_wrap(func)) for name, func in check_map.items()}
+    deadline = time.monotonic() + timeout_s
+    results = {}
+    for name, fut in futures.items():
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            results[name] = fut.result(timeout=remaining)
+        except FutureTimeoutError:
+            logger.error("healthz: %s check timed out after %.1fs", name, timeout_s)
+            results[name] = {
+                "ok": False,
+                "duration_ms": round(timeout_s * 1000, 2),
+                "error": f"check timed out after {timeout_s}s",
+            }
+        except Exception:  # noqa: BLE001 -- belt-and-braces; checks catch internally
+            logger.exception("healthz: %s check crashed", name)
+            results[name] = {
+                "ok": False,
+                "duration_ms": round(timeout_s * 1000, 2),
+                "error": "check crashed",
+            }
+    pool.shutdown(wait=False, cancel_futures=True)
+    return results
 
 
 def _check_db() -> dict:
@@ -180,12 +235,14 @@ def _get_version_info() -> str | None:
 @require_GET
 def healthz_view(request):
     """Return aggregated health status for the running app."""
-    checks = {
-        "db": _check_db(),
-        "cache": _check_cache(),
-        "migrations": _check_migrations(),
-        "config": _check_config(),
-    }
+    checks = _bounded_checks(
+        {
+            "db": _check_db,
+            "cache": _check_cache,
+            "migrations": _check_migrations,
+            "config": _check_config,
+        }
+    )
     overall_ok = all(c["ok"] for c in checks.values())
     return JsonResponse(
         {

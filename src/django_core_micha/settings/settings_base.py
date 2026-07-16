@@ -154,6 +154,21 @@ DATABASES = {
         "PASSWORD": env("DB_PASSWORD", default="pass_build_dummy"),
         "HOST": env("DB_HOST", default="db"),
         "PORT": env("DB_PORT", default="5432"),
+        "OPTIONS": {
+            "connect_timeout": 5,
+            # TCP keepalives: detect a black-holed/dead peer on an ALREADY-OPEN
+            # connection (connect_timeout only bounds establishing a NEW one). A
+            # hung query on a connection whose peer stopped responding to TCP
+            # probes self-terminates in ~keepalives_idle + keepalives_interval *
+            # keepalives_count seconds instead of the OS-default (often minutes).
+            # This does NOT affect healthy long-running queries (hram engine runs,
+            # migrations) — keepalive probes only matter once the peer stops
+            # answering, not based on query duration. Still not a statement_timeout.
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 3,
+        },
     }
 }
 
@@ -183,6 +198,12 @@ CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": f"redis://{env('REDIS_HOST', default='redis')}:6379/2",
+        # Bound every Redis op app-wide: a stalled Redis must fail fast, not hang
+        # requests until the gateway 504s. LAN Redis answers in <10ms; 2s is generous.
+        "OPTIONS": {
+            "socket_connect_timeout": 2,
+            "socket_timeout": 2,
+        },
     }
 }
 SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"

@@ -686,6 +686,7 @@ def sync_github(
                 continue
             planned_values.append((key, value, resolved_from))
 
+    failed_keys = []
     for key, value, resolved_from in planned_values:
         definition = secrets_def.get(key, {})
         scope = get_target_scope(definition, key=key)
@@ -697,13 +698,30 @@ def sync_github(
         cmd = ["gh", "secret", "set", key, "--repo", target_repo]
         if use_env:
             cmd.extend(["--env", environment_name])
-        proc = subprocess.run(cmd, input=value, text=True, capture_output=True)
+        proc = None
+        for attempt in range(1, _FETCH_MAX_RETRIES + 1):
+            proc = subprocess.run(cmd, input=value, text=True, capture_output=True)
+            if proc.returncode == 0:
+                break
+            if attempt < _FETCH_MAX_RETRIES:
+                delay = _FETCH_BACKOFF_BASE * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                print(f" [retry {attempt}/{_FETCH_MAX_RETRIES}]", end="", flush=True)
+                time.sleep(delay)
 
-        if proc.returncode == 0:
+        if proc is not None and proc.returncode == 0:
             source_suffix = f" via {resolved_from}" if resolved_from else ""
             print(f" [OK{source_suffix}]")
         else:
-            print(f" [ERROR]\n     {proc.stderr.strip()}")
+            failed_keys.append(key)
+            stderr_hint = (proc.stderr or "").strip() if proc is not None else ""
+            print(f" [ERROR]\n     {stderr_hint}")
+
+    if failed_keys:
+        print(
+            f"Error: failed to push {len(failed_keys)} secret(s) after "
+            f"{_FETCH_MAX_RETRIES} attempts: " + ", ".join(failed_keys)
+        )
+        sys.exit(1)
 
 
 _BARE_SERVER_TARGETS = ("staging", "production")
