@@ -30,6 +30,67 @@ class NotificationPreference(models.Model):
     push_opt_in = models.BooleanField(default=False)
 
 
+class NotificationChannelDefault(models.Model):
+    """Per-user channel default; ``set_channel_default`` upserts a default for callers."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    channel = models.CharField(max_length=16)
+    enabled = models.BooleanField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "channel"],
+                name="uniq_notification_channel_default",
+            ),
+        ]
+        indexes = [models.Index(fields=["user", "channel"], name="notif_chdefault_user_channel")]
+
+    @classmethod
+    def set_channel_default(cls, user, channel, enabled):
+        """Create or update ``user``'s default for ``channel``."""
+
+        return cls.objects.update_or_create(
+            user=user,
+            channel=channel,
+            defaults={"enabled": bool(enabled)},
+        )[0]
+
+
+class NotificationCategoryChannelPreference(models.Model):
+    """Per-user category-channel override; ``set_category_channel`` upserts an override."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    category = models.CharField(max_length=32)
+    channel = models.CharField(max_length=16)
+    enabled = models.BooleanField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "category", "channel"],
+                name="uniq_notification_category_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["user", "category", "channel"],
+                name="notif_catpref_user_cat_channel",
+            ),
+        ]
+
+    @classmethod
+    def set_category_channel(cls, user, category, channel, enabled):
+        """Create or update ``user``'s category override for ``channel``."""
+
+        return cls.objects.update_or_create(
+            user=user,
+            category=category,
+            channel=channel,
+            defaults={"enabled": bool(enabled)},
+        )[0]
+
+
 class AbstractNotification(models.Model):
     """Base for a consuming app's concrete notification/inbox model."""
 
