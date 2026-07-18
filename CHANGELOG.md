@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.27.0] — 2026-07-18
+
+### Added
+
+**NOTIF-1 through NOTIF-4 — canonical notifications platform core**
+
+- Added canonical `Notification`, per-user `NotificationRecipient`, and per-channel `NotificationDelivery` records with deduplication, expiry, and category × channel preferences.
+- Added code-first notification type policies, preference-aware routing, and the `notify()` authoring API.
+- Formalized chip, email, web-push, todo, and popup dispatchers behind a registry with a bounded synchronous retry hook for dispatchers that report a transient failure; a channel failure never aborts sibling channels. No dispatcher currently shipped reports a transient failure (the existing transports swallow per-recipient errors internally), so retry is forward-looking scaffolding for now, not an active behavior on any channel.
+- Added `prune_notifications` for expired and retention-aged canonical notifications (90 days by default), including cascading recipient and delivery cleanup.
+
+### Changed
+
+- Replaced the nullable `NotificationDelivery` uniqueness rule with partial constraints so immediate deliveries (`digest_threshold=None`) are race-safe while distinct digest thresholds coexist.
+
 ## [2.26.0] — 2026-07-16
 
 ### Fixed

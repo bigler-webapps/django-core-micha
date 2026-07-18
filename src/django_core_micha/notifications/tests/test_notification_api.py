@@ -7,6 +7,7 @@ from django_core_micha.notifications.api import notify
 from django_core_micha.notifications.models import (
     Notification,
     NotificationDelivery,
+    NotificationRecipient,
     NotificationPreference,
     PushSubscription,
 )
@@ -192,3 +193,43 @@ def test_notify_recovers_from_dedup_integrity_error(monkeypatch):
     assert notification == existing
     assert attempts == 1
     assert Notification.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_notify_recovers_from_null_delivery_integrity_error(monkeypatch):
+    register_notification_type(make_type(defaults=["chip"], eligible=["chip"]))
+    user = make_user("delivery-integrity-retry")
+    notification, _ = Notification.objects.get_or_create_by_dedup(
+        notification_type="test_notice",
+        category="finance",
+        content={"title_key": "Title", "body_key": "Body"},
+    )
+    recipient = NotificationRecipient.objects.create(notification=notification, user=user)
+    existing = NotificationDelivery.objects.create(
+        recipient=recipient,
+        channel="chip",
+        digest_threshold=None,
+    )
+    original = NotificationDelivery.objects.get_or_create
+    attempts = 0
+
+    def raise_once(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise IntegrityError("concurrent delivery insert")
+        return original(**kwargs)
+
+    monkeypatch.setattr(NotificationDelivery.objects, "get_or_create", raise_once)
+    monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: None)
+
+    result = notify(
+        type="test_notice",
+        recipients=user,
+        content={"title_key": "Title", "body_key": "Body"},
+    )
+
+    assert result == notification
+    assert attempts == 1
+    assert NotificationDelivery.objects.get(pk=existing.pk).status == "pending"
+    assert NotificationDelivery.objects.filter(recipient=recipient, channel="chip").count() == 1

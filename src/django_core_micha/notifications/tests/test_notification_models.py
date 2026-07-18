@@ -158,3 +158,23 @@ def test_notification_delivery_is_unique_per_recipient_channel_and_threshold():
 
     with pytest.raises(IntegrityError), transaction.atomic():
         NotificationDelivery.objects.create(recipient=recipient, channel="email", digest_threshold="t1")
+
+
+@pytest.mark.django_db
+def test_notification_delivery_null_threshold_is_unique_and_nonnull_thresholds_coexist():
+    user = create_user("delivery-null-threshold")
+    notification = Notification.objects.create(
+        notification_type="payment_due",
+        category="finance",
+        content={"title_key": "Notif.Payment.TITLE"},
+        dedup_key="delivery-null-threshold",
+    )
+    recipient = NotificationRecipient.objects.create(notification=notification, user=user)
+    NotificationDelivery.objects.create(recipient=recipient, channel="email", digest_threshold=None)
+    NotificationDelivery.objects.create(recipient=recipient, channel="email", digest_threshold="t1")
+    NotificationDelivery.objects.create(recipient=recipient, channel="email", digest_threshold="t2")
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        NotificationDelivery.objects.create(recipient=recipient, channel="email", digest_threshold=None)
+
+    assert NotificationDelivery.objects.filter(recipient=recipient, channel="email").count() == 3

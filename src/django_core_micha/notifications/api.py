@@ -42,6 +42,28 @@ def _get_notification_with_retry(*, notification_type, category, notifiable, con
         return Notification.objects.get(dedup_key=dedup_key)
 
 
+def _get_delivery_with_retry(*, recipient, channel):
+    """Create the immediate-delivery row, recovering a concurrent NULL-threshold insert."""
+
+    try:
+        with transaction.atomic():
+            return NotificationDelivery.objects.get_or_create(
+                recipient=recipient,
+                channel=channel,
+                digest_threshold=None,
+                defaults={"status": "pending"},
+            )
+    except IntegrityError:
+        return (
+            NotificationDelivery.objects.get(
+                recipient=recipient,
+                channel=channel,
+                digest_threshold=None,
+            ),
+            False,
+        )
+
+
 def notify(*, type, recipients, category=None, urgency="normal", content, notifiable=None, channels=None) -> Notification:
     """Create or reuse a logical message, then dispatch it per recipient and channel."""
 
@@ -63,12 +85,7 @@ def notify(*, type, recipients, category=None, urgency="normal", content, notifi
     for user in _normalize_recipients(recipients):
         recipient, _ = NotificationRecipient.objects.get_or_create(notification=notification, user=user)
         for channel in resolve_channels(ntype, user, override=channels):
-            delivery, created = NotificationDelivery.objects.get_or_create(
-                recipient=recipient,
-                channel=channel,
-                digest_threshold=None,
-                defaults={"status": "pending"},
-            )
+            delivery, created = _get_delivery_with_retry(recipient=recipient, channel=channel)
             if not created:
                 continue
             result = dispatch(channel, notification=notification, recipient=recipient)

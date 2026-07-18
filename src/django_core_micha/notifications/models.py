@@ -5,6 +5,7 @@ from django.conf import settings
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
+from django.db.models import Q
 
 
 class PushSubscription(models.Model):
@@ -237,4 +238,15 @@ class NotificationDelivery(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ("recipient", "channel", "digest_threshold")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["recipient", "channel"],
+                condition=Q(digest_threshold__isnull=True),
+                name="uniq_notification_delivery_no_threshold",
+            ),
+            models.UniqueConstraint(
+                fields=["recipient", "channel", "digest_threshold"],
+                condition=Q(digest_threshold__isnull=False),
+                name="uniq_notification_delivery_with_threshold",
+            ),
+        ]
