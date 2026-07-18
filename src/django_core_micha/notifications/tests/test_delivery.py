@@ -72,6 +72,45 @@ def test_send_email_filters_opt_in_and_isolates_failures(monkeypatch):
     assert sent_to == [succeeding.email]
 
 
+@pytest.mark.django_db
+def test_send_email_bypass_preference_check_ignores_opt_out(monkeypatch):
+    user_model = get_user_model()
+    opted_out = user_model.objects.create_user(username="forced", email="forced@example.test", password="password")
+    NotificationPreference.objects.create(user=opted_out, email_opt_in=False)
+    sent_to = []
+
+    class Message:
+        def __init__(self, **kwargs):
+            self.to = kwargs["to"]
+
+        def attach_alternative(self, *args):
+            return None
+
+        def send(self, fail_silently=False):
+            sent_to.extend(self.to)
+
+    monkeypatch.setattr(delivery, "EmailMultiAlternatives", Message)
+    delivery._send_email(
+        title="Title", body="Body", url="/next", users=[opted_out], bypass_preference_check=True
+    )
+
+    assert sent_to == [opted_out.email]
+
+
+@pytest.mark.django_db
+def test_send_push_bypass_preference_check_ignores_opt_out(settings, monkeypatch):
+    settings.VAPID_PRIVATE_KEY = "private"
+    user = get_user_model().objects.create_user(username="forced-push", email="forced-push@example.test", password="password")
+    NotificationPreference.objects.create(user=user, push_opt_in=False)
+    subscription = PushSubscription.objects.create(user=user, endpoint="https://push.test/forced", p256dh="key", auth="auth")
+    sent = []
+    monkeypatch.setattr(delivery, "webpush", lambda **kwargs: sent.append(kwargs))
+
+    delivery._send_push(title="Title", body="Body", url="/next", users=[user], bypass_preference_check=True)
+
+    assert {call["subscription_info"]["endpoint"] for call in sent} == {subscription.endpoint}
+
+
 def test_push_to_users_targets_only_each_users_group(monkeypatch):
     recorded = []
 

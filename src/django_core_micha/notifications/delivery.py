@@ -65,18 +65,27 @@ def _full_url(url):
     return f"{getattr(settings, 'PUBLIC_ORIGIN', '').rstrip('/')}{url}"
 
 
-def _send_email(*, title, body, url, users):
-    """Email only recipients who explicitly opted in; isolate each recipient."""
+def _send_email(*, title, body, url, users, bypass_preference_check=False):
+    """Email recipients who explicitly opted in; isolate each recipient.
+
+    ``bypass_preference_check`` is for callers (the notification router) that have
+    already resolved channel eligibility themselves — it skips the redundant
+    opt-in re-check here, which would otherwise silently drop a recipient the
+    router deliberately forced past their opt-out for a critical notification.
+    """
     recipients = list(users or [])
-    try:
-        opted_in_ids = set(
-            NotificationPreference.objects.filter(
-                user_id__in=[user.id for user in recipients], email_opt_in=True
-            ).values_list("user_id", flat=True)
-        )
-    except Exception as exc:
-        logger.warning("Could not resolve email notification preferences: %s", exc)
-        return
+    if bypass_preference_check:
+        opted_in_ids = {user.id for user in recipients}
+    else:
+        try:
+            opted_in_ids = set(
+                NotificationPreference.objects.filter(
+                    user_id__in=[user.id for user in recipients], email_opt_in=True
+                ).values_list("user_id", flat=True)
+            )
+        except Exception as exc:
+            logger.warning("Could not resolve email notification preferences: %s", exc)
+            return
 
     full_url = _full_url(url)
     text_body = f"{body}\n\n{full_url}".strip() if full_url else body
@@ -101,8 +110,12 @@ def _send_email(*, title, body, url, users):
             logger.warning("Email notification failed for user %s: %s", user.id, exc)
 
 
-def _send_push(*, title, body, url, users):
-    """Send browser push to all opted-in subscriptions; remove expired ones."""
+def _send_push(*, title, body, url, users, bypass_preference_check=False):
+    """Send browser push to opted-in subscriptions; remove expired ones.
+
+    ``bypass_preference_check`` is for callers (the notification router) that have
+    already resolved channel eligibility themselves — see ``_send_email``.
+    """
     vapid_private = getattr(settings, "VAPID_PRIVATE_KEY", "")
     vapid_email = getattr(settings, "VAPID_CLAIM_EMAIL", "")
     if not vapid_private:
@@ -113,12 +126,17 @@ def _send_push(*, title, body, url, users):
 
     recipients = list(users or [])
     try:
-        opted_in_ids = set(
-            NotificationPreference.objects.filter(
-                user_id__in=[user.id for user in recipients], push_opt_in=True
-            ).values_list("user_id", flat=True)
-        )
-        subscriptions = PushSubscription.objects.filter(user_id__in=opted_in_ids)
+        if bypass_preference_check:
+            subscriptions = PushSubscription.objects.filter(
+                user_id__in=[user.id for user in recipients]
+            )
+        else:
+            opted_in_ids = set(
+                NotificationPreference.objects.filter(
+                    user_id__in=[user.id for user in recipients], push_opt_in=True
+                ).values_list("user_id", flat=True)
+            )
+            subscriptions = PushSubscription.objects.filter(user_id__in=opted_in_ids)
     except Exception as exc:
         logger.warning("Could not resolve browser-push subscriptions: %s", exc)
         return
