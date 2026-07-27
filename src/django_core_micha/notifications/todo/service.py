@@ -36,19 +36,21 @@ def _engine_config(config) -> dict:
     }
 
 
-def sync_todos_for_user(user, now=None) -> list[Notification]:
-    """Materialize all currently visible provider todos for one user.
+def derive_todos_for_user(user, now=None) -> list[NotificationRecipient]:
+    """Materialize all currently emitted, visible provider todos for one user.
 
     ``Notification.content`` always carries the freshly materialized payload (raw
     provider content plus the live ``due``/``severity``) so every canonical consumer
     (``feed/``, dispatchers) sees current values without knowing about the todo
     channel. ``get_or_create_by_dedup`` only applies ``content`` on first creation, so
     an existing row is explicitly re-synced below when its stored content has gone
-    stale.
+    stale.  The only writes are idempotent notification and recipient overlay upserts
+    used to retain per-user status; callers must treat the returned rows as a live
+    provider projection, never as a query over all persisted todo rows.
     """
 
     resolved_now = now or timezone.now()
-    active: dict[int, Notification] = {}
+    emitted: dict[int, NotificationRecipient] = {}
     for type_key in iter_registered_todo_types():
         provider_fn = get_todo_provider(type_key)
         config = get_todo_config(type_key)
@@ -85,10 +87,32 @@ def sync_todos_for_user(user, now=None) -> list[Notification]:
                 notification=notification,
                 user=seed.recipient,
             )
-            if recipient.dismissed_at is not None or recipient.done_at is not None:
-                continue
+            # Existing recipients are fetched without a populated forward relation;
+            # retain this run's freshly materialized notification (including its
+            # transient digest due value) for consumers of this live projection.
+            recipient.notification = notification
             notification._todo_due_at = resolve_due_date(
                 effective_engine_config["due"], due_base_resolver, TODO_TIMEZONE
             )
-            active[notification.pk] = notification
-    return sorted(active.values(), key=lambda notification: notification.created_at, reverse=True)
+            emitted[notification.pk] = recipient
+    return sorted(emitted.values(), key=lambda recipient: recipient.notification.created_at, reverse=True)
+
+
+def derive_active_todos(user, now=None) -> list[NotificationRecipient]:
+    """Return the live, actionable todo recipient projection for one user.
+
+    Dismissed and done rows remain in the persistent status overlay but are deliberately
+    omitted from the live feed projection while their provider continues to emit them.
+    """
+
+    return [
+        recipient
+        for recipient in derive_todos_for_user(user, now)
+        if recipient.dismissed_at is None and recipient.done_at is None
+    ]
+
+
+def sync_todos_for_user(user, now=None) -> list[Notification]:
+    """Backward-compatible notification-shaped view of live actionable todos."""
+
+    return [recipient.notification for recipient in derive_active_todos(user, now)]

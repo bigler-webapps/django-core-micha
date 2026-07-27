@@ -20,6 +20,8 @@ from .serializers import (
     PushSubscriptionInputSerializer,
     PushSubscriptionSerializer,
 )
+from .todo.registry import iter_registered_todo_types
+from .todo.service import derive_active_todos, derive_todos_for_user
 
 
 class NotificationPreferenceView(generics.RetrieveUpdateAPIView):
@@ -143,19 +145,44 @@ class CanonicalInboxView(generics.ListAPIView):
     pagination_class = CanonicalInboxPagination
 
     def get_queryset(self):
-        queryset = (
+        event_recipients = (
             NotificationRecipient.objects.filter(user=self.request.user)
+            .exclude(notification__category="todo")
             .select_related("notification", "notification__content_type")
             .order_by("-notification__created_at")
         )
         status_filter = self.request.query_params.get("status")
         if status_filter == "unseen":
-            return queryset.filter(seen_at__isnull=True)
-        if status_filter == "active":
-            return queryset.filter(dismissed_at__isnull=True, done_at__isnull=True)
-        if status_filter == "done":
-            return queryset.filter(done_at__isnull=False)
-        return queryset
+            event_recipients = event_recipients.filter(seen_at__isnull=True)
+        elif status_filter == "active":
+            event_recipients = event_recipients.filter(dismissed_at__isnull=True, done_at__isnull=True)
+        elif status_filter == "done":
+            event_recipients = event_recipients.filter(done_at__isnull=False)
+
+        # No app currently registers a todo provider: skip the per-request provider
+        # derive entirely and keep this queryset lazily DB-paginated (unpacking it
+        # below would force fetching the user's entire notification history on every
+        # request, regardless of page, which only pays off once todos actually exist).
+        if not iter_registered_todo_types():
+            return event_recipients
+
+        # The full emitted set (not just active) so a "done"/unfiltered view has the
+        # same dismissed/done parity with todos that it already has with event rows.
+        live_todos = derive_todos_for_user(self.request.user)
+        if status_filter == "unseen":
+            live_todos = [recipient for recipient in live_todos if recipient.seen_at is None]
+        elif status_filter == "active":
+            live_todos = [
+                recipient for recipient in live_todos
+                if recipient.dismissed_at is None and recipient.done_at is None
+            ]
+        elif status_filter == "done":
+            live_todos = [recipient for recipient in live_todos if recipient.done_at is not None]
+        return sorted(
+            [*event_recipients, *live_todos],
+            key=lambda recipient: recipient.notification.created_at,
+            reverse=True,
+        )
 
 
 class CanonicalUnreadCountView(views.APIView):
@@ -163,12 +190,13 @@ class CanonicalUnreadCountView(views.APIView):
 
     def get(self, request):
         # A dismissed-but-unseen item is no longer actionable and must not inflate a badge.
-        count = NotificationRecipient.objects.filter(
+        event_count = NotificationRecipient.objects.filter(
             user=request.user,
             seen_at__isnull=True,
             dismissed_at__isnull=True,
-        ).count()
-        return Response({"count": count})
+        ).exclude(notification__category="todo").count()
+        todo_count = sum(recipient.seen_at is None for recipient in derive_active_todos(request.user))
+        return Response({"count": event_count + todo_count})
 
 
 class CanonicalMarkView(views.APIView):

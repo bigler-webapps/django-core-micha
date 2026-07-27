@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.utils import timezone
 
-from django_core_micha.notifications.models import NotificationDelivery, NotificationPreference
+from django_core_micha.notifications.models import Notification, NotificationDelivery, NotificationPreference, NotificationRecipient
 from django_core_micha.notifications.todo import digests, registry
 from django_core_micha.notifications.todo.registry import TodoSeed, TodoTypeConfig
 from django_core_micha.notifications.types import NotificationType, _REGISTRY, register_notification_type
@@ -110,6 +110,53 @@ def test_not_opted_in_user_records_nothing_and_later_opt_in_catches_up(monkeypat
     assert caught_up.digests_sent == 1
     assert caught_up.threshold_records_created == 2
     assert len(sent) == 1
+
+
+@pytest.mark.django_db
+def test_digest_reconciles_only_non_emitted_todo_overlays_and_preserves_emitted_statuses():
+    user = get_user_model().objects.create_user(username="reconcile-user", email="reconcile@example.test", password="password")
+    now = timezone.now()
+    widgets = {
+        "stale": Widget.objects.create(name="Stale"),
+        "dismissed": Widget.objects.create(name="Dismissed"),
+        "done": Widget.objects.create(name="Done"),
+    }
+    emissions = {"stale", "dismissed", "done"}
+    register_notification_type(NotificationType(
+        key="demo_todo", category="todo", mode="provider", resolution="state-resolved",
+        default_channels=["todo"], eligible_channels=["todo"],
+    ))
+
+    def provider(user, now):
+        return [TodoSeed("demo_todo", user, {"title": title}, widgets[title]) for title in emissions]
+
+    registry.register_todo_provider(
+        "demo_todo",
+        provider,
+        config=TodoTypeConfig(type_key="demo_todo", always_visible=True),
+        candidate_users_fn=lambda now: [user],
+    )
+    digests.send_todo_digests(now)
+    recipients = {
+        recipient.notification.content["title"]: recipient
+        for recipient in NotificationRecipient.objects.filter(user=user, notification__category="todo").select_related("notification")
+    }
+    NotificationRecipient.objects.filter(pk=recipients["dismissed"].pk).update(dismissed_at=now)
+    NotificationRecipient.objects.filter(pk=recipients["done"].pk).update(done_at=now)
+    dismissed_id = recipients["dismissed"].notification_id
+    done_id = recipients["done"].notification_id
+    stale_id = recipients["stale"].notification_id
+
+    emissions.remove("stale")
+    digests.send_todo_digests(now)
+
+    assert not Notification.objects.filter(pk=stale_id).exists()
+    assert Notification.objects.filter(pk=dismissed_id, category="todo").exists()
+    assert Notification.objects.filter(pk=done_id, category="todo").exists()
+    dismissed = NotificationRecipient.objects.get(notification_id=dismissed_id, user=user)
+    done = NotificationRecipient.objects.get(notification_id=done_id, user=user)
+    assert dismissed.dismissed_at is not None
+    assert done.done_at is not None
 
 
 def test_management_command_reports_digest_summary(monkeypatch, capsys):

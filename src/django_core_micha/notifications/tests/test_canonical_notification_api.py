@@ -8,7 +8,18 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from django_core_micha.notifications import views as notification_views
 from django_core_micha.notifications.models import Notification, NotificationRecipient
 from django_core_micha.notifications.serializers import CanonicalNotificationSerializer
+from django_core_micha.notifications.todo import registry
+from django_core_micha.notifications.todo.registry import TodoSeed, TodoTypeConfig
+from django_core_micha.notifications.types import NotificationType, _REGISTRY, register_notification_type
 from django_core_micha.notifications.views import CanonicalInboxView, CanonicalMarkView, CanonicalUnreadCountView
+from tests.testapp.models import Widget
+
+
+@pytest.fixture(autouse=True)
+def clear_todo_registries():
+    registry._PROVIDERS.clear(); registry._CONFIGS.clear(); registry._CANDIDATE_USERS.clear(); _REGISTRY.clear()
+    yield
+    registry._PROVIDERS.clear(); registry._CONFIGS.clear(); registry._CANDIDATE_USERS.clear(); _REGISTRY.clear()
 
 
 def make_user(username):
@@ -50,6 +61,28 @@ def post_mark(user, data):
     request = APIRequestFactory().post("/notifications/feed/mark/", data, format="json")
     force_authenticate(request, user=user)
     return CanonicalMarkView.as_view()(request)
+
+
+def get_unread_count(user):
+    request = APIRequestFactory().get("/notifications/feed/unread-count/")
+    force_authenticate(request, user=user)
+    return CanonicalUnreadCountView.as_view()(request)
+
+
+def register_toggleable_todo_provider(emissions, widgets):
+    register_notification_type(NotificationType(
+        key="demo_todo", category="todo", mode="provider", resolution="state-resolved",
+        default_channels=["todo"], eligible_channels=["todo"],
+    ))
+
+    def provider(user, now):
+        return [TodoSeed("demo_todo", user, {"title": title}, widgets[title]) for title in emissions]
+
+    registry.register_todo_provider(
+        "demo_todo",
+        provider,
+        config=TodoTypeConfig(type_key="demo_todo", always_visible=True),
+    )
 
 
 @pytest.mark.django_db
@@ -106,6 +139,7 @@ def test_canonical_feed_is_self_scoped_newest_first_and_paginated():
     assert oldest.pk not in [item["id"] for item in response.data["results"]]
     second_page = get_feed(owner, page=2)
     assert [item["id"] for item in second_page.data["results"]] == [oldest.pk]
+    assert get_unread_count(owner).data == {"count": 21}
 
 
 @pytest.mark.django_db
@@ -142,6 +176,76 @@ def test_canonical_unread_count_excludes_dismissed_unseen_rows():
 
     assert response.status_code == 200
     assert response.data == {"count": 1}
+
+
+@pytest.mark.django_db
+def test_canonical_feed_and_unread_count_self_heal_when_provider_stops_emitting():
+    user = make_user("todo-self-heal")
+    emissions = {"Pay invoice"}
+    register_toggleable_todo_provider(emissions, {"Pay invoice": Widget.objects.create(name="Invoice")})
+
+    first_feed = get_feed(user)
+    assert first_feed.status_code == 200
+    assert [item["content"]["title"] for item in first_feed.data["results"]] == ["Pay invoice"]
+    assert get_unread_count(user).data == {"count": 1}
+
+    emissions.clear()
+
+    assert get_feed(user).data["results"] == []
+    assert get_unread_count(user).data == {"count": 0}
+    assert Notification.objects.filter(category="todo").exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("status_field", ["dismissed_at", "done_at"])
+def test_emitted_dismissed_or_done_todo_stays_hidden_on_active_reads(status_field):
+    user = make_user(f"todo-{status_field}")
+    emissions = {"Do work"}
+    register_toggleable_todo_provider(emissions, {"Do work": Widget.objects.create(name="Work")})
+
+    recipient_id = get_feed(user).data["results"][0]["id"]
+    NotificationRecipient.objects.filter(pk=recipient_id).update(**{status_field: timezone.now()})
+
+    # Only status=active hides it (matching event-authored semantics) -- the
+    # unfiltered/done-filtered parity is covered by the test below.
+    assert get_feed(user, status="active").data["results"] == []
+    assert get_unread_count(user).data == {"count": 0}
+    recipient = NotificationRecipient.objects.get(pk=recipient_id)
+    assert getattr(recipient, status_field) is not None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("status_field", ["dismissed_at", "done_at"])
+def test_dismissed_or_done_todo_still_appears_unfiltered_and_under_its_own_status_filter(status_field):
+    # Parity with event-authored notifications: a dismissed/done row still shows up in
+    # the default (unfiltered) view, and a done row still shows up under status=done.
+    user = make_user(f"todo-parity-{status_field}")
+    emissions = {"Do work"}
+    register_toggleable_todo_provider(emissions, {"Do work": Widget.objects.create(name="Work")})
+
+    recipient_id = get_feed(user).data["results"][0]["id"]
+    NotificationRecipient.objects.filter(pk=recipient_id).update(**{status_field: timezone.now()})
+
+    assert [item["id"] for item in get_feed(user).data["results"]] == [recipient_id]
+    if status_field == "done_at":
+        assert [item["id"] for item in get_feed(user, status="done").data["results"]] == [recipient_id]
+
+
+@pytest.mark.django_db
+def test_feed_stays_db_paginated_when_no_todo_provider_is_registered(django_assert_num_queries):
+    # Regression: merging live-derived todos into the feed must not force materializing
+    # the user's entire event-authored notification history on every request when the
+    # todo channel isn't even in use (the only real consumer of this endpoint today).
+    user = make_user("no-todo-consumer")
+    for index in range(30):
+        make_recipient(user, suffix=f"scale-{index}")
+
+    with django_assert_num_queries(2):
+        # 1 COUNT for pagination, 1 SELECT for the page slice -- flat regardless of how
+        # many notifications exist, proving SQL LIMIT/OFFSET is used, not a full fetch.
+        response = get_feed(user)
+    assert response.data["count"] == 30
+    assert len(response.data["results"]) == 20
 
 
 @pytest.mark.django_db

@@ -5,12 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from django.db import IntegrityError, transaction
+from django.db.models import Count
 from django.utils import timezone
 
 from ..delivery import _send_email
-from ..models import NotificationDelivery, NotificationPreference, NotificationRecipient
+from ..models import Notification, NotificationDelivery, NotificationPreference, NotificationRecipient
 from .registry import iter_candidate_users_fns
-from .service import sync_todos_for_user
+from .service import derive_todos_for_user
 
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,22 @@ def _user_opted_into_email(user) -> bool:
     return NotificationPreference.objects.filter(user=user, email_opt_in=True).exists()
 
 
+def _reconcile_todo_overlays(user, emitted_recipients) -> None:
+    """Remove this user's stale todo overlays without affecting another recipient."""
+
+    emitted_notification_ids = {recipient.notification_id for recipient in emitted_recipients}
+    stale_recipients = NotificationRecipient.objects.filter(
+        user=user,
+        notification__category="todo",
+    ).exclude(notification_id__in=emitted_notification_ids)
+    stale_notification_ids = list(stale_recipients.values_list("notification_id", flat=True))
+    stale_recipients.delete()
+    if stale_notification_ids:
+        Notification.objects.filter(pk__in=stale_notification_ids, category="todo").annotate(
+            recipient_count=Count("recipients")
+        ).filter(recipient_count=0).delete()
+
+
 def send_todo_digests(now: datetime | None = None) -> DigestRunSummary:
     """Send one combined email per candidate user for newly crossed todo thresholds.
 
@@ -102,7 +119,13 @@ def send_todo_digests(now: datetime | None = None) -> DigestRunSummary:
     users = _candidate_users(resolved_now)
     for user in users:
         try:
-            notifications = sync_todos_for_user(user, resolved_now)
+            emitted_recipients = derive_todos_for_user(user, resolved_now)
+            _reconcile_todo_overlays(user, emitted_recipients)
+            notifications = [
+                recipient.notification
+                for recipient in emitted_recipients
+                if recipient.dismissed_at is None and recipient.done_at is None
+            ]
             groups = defaultdict(list)
             for notification in notifications:
                 groups[(notification.content_type_id, notification.object_id, notification.notification_type)].append(notification)
