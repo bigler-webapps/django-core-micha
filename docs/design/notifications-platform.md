@@ -251,6 +251,14 @@ the engine **already supports** (`due=None` → always shown, `resolution: state
 risk is **low** and the abstraction is expected to carry. G-P2 stays a real gate: confirm with the
 concrete hram/spesix types before P2a, but it is not expected to block.
 
+**RESOLVED 2026-07-27:** G-P2 is moot AS A 3-SHAPE TEST — hram/spesix are P1 `notify()` (state-only)
+consumers, NOT todo consumers, so they contribute no todo shapes to validate against. jg is the SOLE
+todo consumer; **NOTIF-P2-pre (a1eaac9) normalized jg's providers into ONE clean config/materialize
+interface** — that normalized shape IS the validated interface NOTIF-8 lifts. NOTIF-8 therefore
+proceeds CONSCIOUSLY from a single real shape, with the YAGNI guardrail (generalize only to jg's needs,
+not speculatively) as the accepted mitigation of the rule-of-three risk (operator-approved). Gate
+cleared — NOTIF-8 unblocked.
+
 ## Work orders & sequencing
 
 Register prefix **`NOTIF-*`** (dcm register); app-side WOs live in their own repo registers. Each phase is
