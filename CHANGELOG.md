@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.28.0] — 2026-07-27
+
+### Added
+
+**NOTIF-5 — canonical notification read API and status synchronization**
+
+- Added the canonical `feed/`, `feed/unread-count/`, and `feed/mark/` endpoints over `NotificationRecipient`, including flattened message content, per-user status filtering, and self-scoped seen/dismissed/done marking.
+- Added the stable `notification.status` WebSocket payload contract so status changes synchronize across notification surfaces.
+- Retained the legacy swappable-model `inbox/*` endpoints unchanged during the expand-contract transition.
+
 ## [2.27.0] — 2026-07-18
 
 ### Added
