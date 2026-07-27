@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.29.0] — 2026-07-27
+
+### Added
+
+**NOTIF-8 / NOTIF-8b — shared derived-todo channel**
+
+- Added the generic derived-todo channel: the engine mechanics (due-expression evaluation, windowing, severity, materialization) lifted domain-free into `notifications/todo/`, a code-first provider registry (`register_todo_provider` / `TodoSeed` / `TodoTypeConfig`), and a `TodoOverride` model (per-scope enable + lead-days).
+- Todos are canonical `Notification`s in `mode="derived"`: dismiss/done map onto `NotificationRecipient`, the digest sent-log onto `NotificationDelivery` — no parallel status tables.
+- Self-healing on read (NOTIF-8b): the `feed/` surface derives currently-emitted todos live (excludes stored `category="todo"` rows), so a todo whose provider stops emitting disappears immediately; the digest scan additionally reconciles/deletes stale todo overlays.
+- Added a generic window-scan/digest management command for derived-todo reminders.
+- Dormant until a consumer app registers a todo provider — no behavior change for apps that do not.
+
 ## [2.28.0] — 2026-07-27
 
 ### Added
