@@ -280,7 +280,7 @@ NOTIF-6/7 and P2/P3 shift +1. NOTIF-1..4 (done) are unchanged.
 **P2 — task engine relocation (expand-contract; only after G-P2)**
 | WO | Repo | Scope | Depends on |
 |---|---|---|---|
-| NOTIF-P2-pre | jg | Normalize `build_checklist_tasks` onto the config/materialize path; collapse the triplicated `leadAdjustable` set to one source; audit/clean `profile_complete` orphan rows | G-P2 |
+| NOTIF-P2-pre | jg | Normalize `build_checklist_tasks` onto the config/materialize path; collapse the triplicated `leadAdjustable` set to one source; audit/clean `profile_complete` orphan rows | G-P2 | ✓ landed jg repo: a1eaac9 |
 | NOTIF-8 | dcm | Land relocated+generalized engine (todo channel): windowing/dismissal/override/digest on generic `notifiable`+type-key; reconcile the 3 kind-vocabularies into one taxonomy; absorb `TaskReminderSent` into `NotificationDelivery` | G-P2 |
 | NOTIF-9 | jg | Adopt: register jg providers as plugins; **data-migrate** overlays (ref_id 4-type reparse with documented loss-tolerance; clean FK moves for override/sent) **while old path still runs** (P2b) | NOTIF-8, NOTIF-P2-pre |
 | NOTIF-10 | jg | Remove old task models/engine **only after** NOTIF-9 verified (P2c; no in-place rename) | NOTIF-9 |
