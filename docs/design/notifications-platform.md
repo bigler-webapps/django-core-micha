@@ -257,15 +257,23 @@ Register prefix **`NOTIF-*`** (dcm register); app-side WOs live in their own rep
 a release train **dcm → ucm → app pin-bumps** (publish-from-main, no staging → registry live-check before
 pinning). `[approval]` = schema migration on a production model, approval-gated.
 
+Re-sequenced 2026-07-18 (ucm measurement): the canonical READ side (inbox/unread/mark over
+`NotificationRecipient` + WS status-change broadcast) was never a WO — the existing inbox views serve
+the retiring swappable model (`get_notification_model`, `read_at`, direct user FK), NOT the canonical
+`Notification`/`NotificationRecipient` split. It is a prerequisite for BOTH the ucm surface and the
+cockpit migration, so it is interposed as the new **NOTIF-5**; the former ucm/cockpit WOs shift to
+NOTIF-6/7 and P2/P3 shift +1. NOTIF-1..4 (done) are unchanged.
+
 **P1 — canonical core (fixes the cross-surface nag; no jg task-engine work yet)**
 | WO | Repo | Scope | Depends on | Gate |
 |---|---|---|---|---|
-| NOTIF-1 | dcm | Concrete `Notification` + `NotificationRecipient` + `NotificationDelivery` (dedup_key first-class, notifiable GenericFK indexed, retention fields). Additive new tables — existing consumers untouched. `[approval]` | D3 ratified | — |
-| NOTIF-2 | dcm | Router (D2) + `notify()` authoring API + code-first type-registry loader | NOTIF-1 | — |
-| NOTIF-3 | dcm | Extend `NotificationPreference` with `category` (through-table user×category×channel) + seed migration from existing email/push booleans (opt-out default = today's behaviour) `[approval]` | NOTIF-1 | — |
-| NOTIF-4 | dcm | Formalize Email/Web-Push/Chip as router dispatchers (`deliver_push_email` → dispatcher); retention/TTL janitor as a `scheduled_command` | NOTIF-2 | dcm release |
-| NOTIF-5 | ucm | `NotificationsContext` single-owner + chip/bell on the canonical API; Prefs-UI may lag | dcm release | ucm release |
-| NOTIF-6 | cockpit | **Swappable-exit migration** (`notify.Notification` → dcm canonical, cross-app table move, expand-contract, data-preserving) + status-stream remodel to event-authored types with resolver + pin bumps `[approval]` | NOTIF-5 | P1 done |
+| NOTIF-1 | dcm | Concrete `Notification` + `NotificationRecipient` + `NotificationDelivery` (dedup_key, notifiable GenericFK, `seen_at`/`dismissed_at`/`done_at`). Additive. | D3 ratified | ✓ landed 1044f70 |
+| NOTIF-2 | dcm | Router (D2) + `notify()` + code-first type-registry loader | NOTIF-1 | ✓ landed 1e7a0dd |
+| NOTIF-3 | dcm | Category×channel prefs: `NotificationChannelDefault` + `NotificationCategoryChannelPreference` (defaults + per-category overrides). **NO seed** — `is_channel_enabled` falls back to the LIVE legacy `email_opt_in`/`push_opt_in` (tier 3), preserving today with no staleness. `[approval]` | NOTIF-1 | ✓ landed c1797a0 |
+| NOTIF-4 | dcm | Formal dispatchers (Email/Push/Chip + todo/popup stubs), R2 delivery-race fix, retention janitor | NOTIF-2 | ✓ landed b7c97d6, published 2.27.0 |
+| NOTIF-5 | dcm | **Canonical READ API (NEW):** serializer for `NotificationRecipient`+content; `inbox/` (list), `inbox/unread-count/` (`seen_at IS NULL`), `inbox/mark/` (seen/dismissed/**done** — the one status all surfaces project); **WS status-change broadcast** (mark on one surface → others clear live, the actual cross-surface-nag fix); expand-contract retire-path for the old `get_notification_model` inbox. **No migration** (recipient status fields already exist). | NOTIF-1..4 | dcm publish 2.28.0 |
+| NOTIF-6 | ucm | `NotificationsContext` single-owner (WS + inbox + unread) reading the NOTIF-5 canonical API + generic chip/bell; additive exports (no breaking change). Prefs-UI may lag | NOTIF-5 | ucm release |
+| NOTIF-7 | cockpit | **Swappable-exit migration** (`notify.Notification` → dcm canonical, cross-app table move, expand-contract, data-preserving) + status-stream remodel to event-authored types with resolver + retire old inbox + pin bumps `[approval]` | NOTIF-6 | P1 done |
 
 **Gate G-P2 (paper-test)** — must pass before the P2 rows below are cut.
 
@@ -273,11 +281,11 @@ pinning). `[approval]` = schema migration on a production model, approval-gated.
 | WO | Repo | Scope | Depends on |
 |---|---|---|---|
 | NOTIF-P2-pre | jg | Normalize `build_checklist_tasks` onto the config/materialize path; collapse the triplicated `leadAdjustable` set to one source; audit/clean `profile_complete` orphan rows | G-P2 |
-| NOTIF-7 | dcm | Land relocated+generalized engine (todo channel): windowing/dismissal/override/digest on generic `notifiable`+type-key; reconcile the 3 kind-vocabularies into one taxonomy; absorb `TaskReminderSent` into `NotificationDelivery` | G-P2 |
-| NOTIF-8 | jg | Adopt: register jg providers as plugins; **data-migrate** overlays (ref_id 4-type reparse with documented loss-tolerance; clean FK moves for override/sent) **while old path still runs** (P2b) | NOTIF-7, NOTIF-P2-pre |
-| NOTIF-9 | jg | Remove old task models/engine **only after** NOTIF-8 verified (P2c; no in-place rename) | NOTIF-8 |
+| NOTIF-8 | dcm | Land relocated+generalized engine (todo channel): windowing/dismissal/override/digest on generic `notifiable`+type-key; reconcile the 3 kind-vocabularies into one taxonomy; absorb `TaskReminderSent` into `NotificationDelivery` | G-P2 |
+| NOTIF-9 | jg | Adopt: register jg providers as plugins; **data-migrate** overlays (ref_id 4-type reparse with documented loss-tolerance; clean FK moves for override/sent) **while old path still runs** (P2b) | NOTIF-8, NOTIF-P2-pre |
+| NOTIF-10 | jg | Remove old task models/engine **only after** NOTIF-9 verified (P2c; no in-place rename) | NOTIF-9 |
 
-**P3 — popup channel** (uncritical): NOTIF-10 (ucm) hook the wizard renderer as the popup channel;
+**P3 — popup channel** (uncritical): NOTIF-11 (ucm) hook the wizard renderer as the popup channel;
 seen-status on `NotificationRecipient`, not the onboarding-progress store.
 
 hram/spesix consume from P1 onward as their **first** notification implementation (they never diverge —
