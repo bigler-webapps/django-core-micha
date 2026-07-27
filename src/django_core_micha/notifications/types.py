@@ -2,6 +2,9 @@
 from dataclasses import dataclass
 
 
+VALID_NOTIFICATION_MODES = frozenset({"event", "provider"})
+
+
 @dataclass
 class NotificationType:
     """Policy that determines how one notification type is routed and resolved."""
@@ -15,6 +18,10 @@ class NotificationType:
     persist_until_done: bool = False
     critical: bool = False
     window: dict | None = None
+
+    def __post_init__(self):
+        if self.mode not in VALID_NOTIFICATION_MODES:
+            raise ValueError(f"Unknown notification mode: {self.mode}")
 
 
 _REGISTRY: dict[str, NotificationType] = {}

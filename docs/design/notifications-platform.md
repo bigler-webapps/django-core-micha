@@ -289,9 +289,39 @@ NOTIF-6/7 and P2/P3 shift +1. NOTIF-1..4 (done) are unchanged.
 | WO | Repo | Scope | Depends on |
 |---|---|---|---|
 | NOTIF-P2-pre | jg | Normalize `build_checklist_tasks` onto the config/materialize path; collapse the triplicated `leadAdjustable` set to one source; audit/clean `profile_complete` orphan rows | G-P2 | ✓ landed jg repo: a1eaac9 |
-| NOTIF-8 | dcm | Land relocated+generalized engine (todo channel): windowing/dismissal/override/digest on generic `notifiable`+type-key; reconcile the 3 kind-vocabularies into one taxonomy; absorb `TaskReminderSent` into `NotificationDelivery` | G-P2 |
+| NOTIF-8 | dcm | Land relocated+generalized engine (todo channel): windowing/dismissal/override/digest on generic `notifiable`+type-key; reconcile the 3 kind-vocabularies into one taxonomy; absorb `TaskReminderSent` into `NotificationDelivery` | G-P2 | ✓ landed |
 | NOTIF-9 | jg | Adopt: register jg providers as plugins; **data-migrate** overlays (ref_id 4-type reparse with documented loss-tolerance; clean FK moves for override/sent) **while old path still runs** (P2b) | NOTIF-8, NOTIF-P2-pre |
 | NOTIF-10 | jg | Remove old task models/engine **only after** NOTIF-9 verified (P2c; no in-place rename) | NOTIF-9 |
+
+## Todo channel
+
+NOTIF-8 provides the provider-derived todo channel. A consuming app registers one
+`TodoTypeConfig` and seed provider with `register_todo_provider()` and separately
+registers the matching `NotificationType` with `mode="provider"` and category
+`"todo"`. The provider receives `(user, now)` and yields `TodoSeed` instances. A
+seed's `notifiable` identifies one concrete occurrence for canonical notification
+deduplication, while its optional `scope` identifies the (often broader) object to
+which a `TodoOverride` applies; `scope` defaults to `notifiable`. A provider that
+ever emits more than one seed of the same `type_key` with `notifiable=None` for one
+user will collapse into a single `Notification` row (dedup keys only on type +
+notifiable) — pass a real `notifiable` whenever a type can recur per user.
+
+Call `sync_todos_for_user(user, now=None)` wherever a consumer needs a current todo
+projection. It materializes only currently visible seeds into canonical
+`Notification`/`NotificationRecipient` rows, honours `TodoOverride`, and never
+resurfaces recipient rows already marked dismissed or done through `feed/mark/`.
+`Notification.content` always carries the fully materialized payload (provider
+content plus current `due`/`severity`) — kept fresh on every sync, since
+`get_or_create_by_dedup` only applies its `content` default on first creation — so
+`feed/` and every dispatcher see current values with no todo-channel awareness.
+Providers that want digest scanning additionally supply `candidate_users_fn`; the
+`send_todo_digests` command uses those candidates and only emails users actually
+opted into the email channel. It claims each threshold as `pending` before sending
+(the DB's partial unique constraint on `NotificationDelivery` is the real
+concurrency guard, so concurrent runs cannot double-send), then flips it to `sent`
+or `failed` after the real send attempt — mirroring `notify()`'s own
+pending-then-resolved delivery pattern, so a send failure stays distinguishable
+from a real success instead of being recorded as delivered either way.
 
 **P3 — popup channel** (uncritical): NOTIF-11 (ucm) hook the wizard renderer as the popup channel;
 seen-status on `NotificationRecipient`, not the onboarding-progress store.
