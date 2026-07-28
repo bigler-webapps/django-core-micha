@@ -244,6 +244,140 @@ def test_bare_invocation_syncs_staging_then_production(secrets_dir):
     assert targets == ["staging", "production"]
 
 
+def _write_local_project(tmp_path):
+    (tmp_path / "project.yaml").write_text(
+        "project_name: matrix-app\n"
+        "app_env:\n"
+        "  APP_SETTING: from-project\n"
+        "environments:\n"
+        "  local:\n"
+        "    use_traefik: true\n"
+        "    domains: [local.example.test]\n"
+        "    server: local-dev\n"
+        "    web_port: 8123\n"
+        "  staging: {}\n"
+        "  production: {}\n",
+        encoding="utf-8",
+    )
+
+
+def test_bare_invocation_writes_composed_local_env_then_syncs_all_github_targets(secrets_dir):
+    """No flags writes full local composition before the all-target GitHub loop."""
+    _write_local_project(secrets_dir)
+    with patch("django_core_micha.scripts.sync_secrets._do_server_sync") as mock_server_sync:
+        main([])
+
+    local_env = (secrets_dir / ".env").read_text(encoding="utf-8")
+    assert "PROJECT_NAME=matrix-app" in local_env
+    assert "TRAEFIK_ROUTER_RULE=Host(`local.example.test`)" in local_env
+    assert "APP_SETTING=from-project" in local_env
+    assert not (secrets_dir / ".env.local").exists()
+    assert [call.args[0] for call in mock_server_sync.call_args_list] == ["staging", "production"]
+
+
+def test_local_writes_only_full_composed_env_and_never_env_local(secrets_dir):
+    """--local delegates to generate-env and makes no GitHub call."""
+    _write_local_project(secrets_dir)
+    with patch("django_core_micha.scripts.sync_secrets._do_server_sync") as mock_server_sync:
+        main(["--local"])
+
+    local_env = (secrets_dir / ".env").read_text(encoding="utf-8")
+    assert "PROJECT_NAME=matrix-app" in local_env
+    assert "WEB_PORT=8123" in local_env
+    assert "TRAEFIK_ROUTER_RULE=Host(`local.example.test`)" in local_env
+    assert not (secrets_dir / ".env.local").exists()
+    mock_server_sync.assert_not_called()
+
+
+@pytest.mark.parametrize("flag", ["--github", "--remote"])
+def test_github_all_spellings_sync_all_targets_without_touching_local_env(secrets_dir, flag):
+    """--github and --remote preserve a pre-existing local .env untouched."""
+    _write_local_project(secrets_dir)
+    (secrets_dir / ".env").write_text("SENTINEL=unchanged\n", encoding="utf-8")
+    with patch("django_core_micha.scripts.sync_secrets._do_server_sync") as mock_server_sync:
+        main([flag])
+
+    assert (secrets_dir / ".env").read_text(encoding="utf-8") == "SENTINEL=unchanged\n"
+    assert not (secrets_dir / ".env.local").exists()
+    assert [call.args[0] for call in mock_server_sync.call_args_list] == ["staging", "production"]
+
+
+def test_bare_mode_without_local_environment_skips_local_and_still_syncs(secrets_dir, capsys):
+    """No flags remains non-fatal for GitHub-only projects without local config."""
+    (secrets_dir / "project.yaml").write_text("environments:\n  staging: {}\n", encoding="utf-8")
+    with patch("django_core_micha.scripts.sync_secrets._do_server_sync") as mock_server_sync:
+        main([])
+
+    assert "skipping local .env write" in capsys.readouterr().out
+    assert [call.args[0] for call in mock_server_sync.call_args_list] == ["staging", "production"]
+
+
+def test_local_without_local_environment_is_fatal(secrets_dir, capsys):
+    """Explicit --local reports a clear error when project.yaml lacks local."""
+    (secrets_dir / "project.yaml").write_text("environments:\n  staging: {}\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--local"])
+
+    assert exc_info.value.code == 1
+    assert "no 'local' environment" in capsys.readouterr().out
+
+
+def test_local_without_proton_uses_dev_default(secrets_dir, monkeypatch):
+    """The generate-env local path degrades cleanly when Proton is unavailable."""
+    _write_local_project(secrets_dir)
+    (secrets_dir / "secrets.yaml").write_text(
+        "config:\n"
+        "  target_repo: org/repo\n"
+        "secrets:\n"
+        "  MY_SECRET:\n"
+        "    source: proton://Vault/Item/field\n"
+        "    dev_default: local-default\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("django_core_micha.scripts.sync_secrets.shutil.which", lambda _cmd: None)
+
+    main(["--local"])
+
+    assert "MY_SECRET=local-default" in (secrets_dir / ".env").read_text(encoding="utf-8")
+    assert not (secrets_dir / ".env.local").exists()
+
+
+def test_local_without_proton_and_without_default_degrades_to_empty_value(secrets_dir, monkeypatch):
+    """A missing local Proton value warns and writes a regenerable empty value."""
+    _write_local_project(secrets_dir)
+    monkeypatch.setattr("django_core_micha.scripts.sync_secrets.shutil.which", lambda _cmd: None)
+
+    main(["--local"])
+
+    assert "MY_SECRET=" in (secrets_dir / ".env").read_text(encoding="utf-8")
+    assert not (secrets_dir / ".env.local").exists()
+
+
+def test_local_resolves_server_template_using_project_config(secrets_dir):
+    """The delegated local generator retains {server} source-template resolution."""
+    _write_local_project(secrets_dir)
+    (secrets_dir / "secrets.yaml").write_text(
+        "config:\n"
+        "  target_repo: org/repo\n"
+        "secrets:\n"
+        "  MY_SECRET:\n"
+        "    source_template: proton://Vault/Item-{server}/field\n",
+        encoding="utf-8",
+    )
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.get_proton_secret", return_value="from-proton") as mock_get,
+    ):
+        # {server} resolves via environments[<secret_target>].server — secret_target
+        # is orthogonal to env_name="local" and must be requested explicitly, exactly
+        # as it always did for the pre-existing GitHub/local secret paths.
+        main(["--local", "--secret-target", "local"])
+
+    mock_get.assert_called_once_with("proton://Vault/Item-local-dev/field")
+    assert "MY_SECRET=from-proton" in (secrets_dir / ".env").read_text(encoding="utf-8")
+
+
 def test_bare_staging_failure_aborts_production(secrets_dir):
     """Staging failure → production never runs, exit code non-zero."""
     call_count = 0
@@ -383,6 +517,14 @@ def test_production_shorthand_combined_with_secret_target_errors(secrets_dir):
     """--production --secret-target X must error to prevent silent discard of --secret-target."""
     with pytest.raises(SystemExit) as exc_info:
         main(["--production", "--secret-target", "staging"])
+    assert exc_info.value.code != 0
+
+
+@pytest.mark.parametrize("flag", ["--github", "--remote"])
+def test_github_all_combined_with_secret_target_errors(secrets_dir, flag):
+    """--github/--remote sync every bare target; combining with --secret-target is ambiguous."""
+    with pytest.raises(SystemExit) as exc_info:
+        main([flag, "--secret-target", "staging"])
     assert exc_info.value.code != 0
 
 

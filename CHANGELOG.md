@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.30.0] — 2026-07-28
+
+### Changed
+
+**`sync-secrets` now has an explicit local/GitHub destination matrix and retires `.env.local`**
+
+- No flags now writes the full, regenerable local `.env` first when `project.yaml` defines a `local` environment, then syncs every `config.bare_server_targets` GitHub environment. This is a behaviour change for existing automation: a bare invocation in a project with a local environment now also overwrites `.env`.
+- `--local` writes only that full composed `.env`; `--github` and its alias `--remote` sync all configured GitHub targets without touching `.env`; `--staging`, `--production`, and legacy `--server --secret-target` retain their single-GitHub-target behaviour.
+- Local generation now delegates to `generate-env --env local`, so `.env` includes platform and project composition such as ports, `PROJECT_NAME`, `TRAEFIK_ROUTER_RULE`, `app_env`, and resolved secrets. `.env.local` is no longer created.
+- When a project has no `local` environment, bare mode reports a skip and continues its GitHub sync; explicit `--local` remains a fatal configuration error.
+
 ## [2.29.0] — 2026-07-27
 
 ### Added

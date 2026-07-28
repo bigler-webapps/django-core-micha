@@ -103,7 +103,12 @@ def load_inputs_from_secrets_yaml(
         if dev_default is not None:
             value = dev_default
         else:
-            source = sync_secrets.resolve_source(definition, secrets_config, secret_target=target)
+            source = sync_secrets.resolve_source(
+                definition,
+                secrets_config,
+                secret_target=target,
+                project_config=project_config,
+            )
             value, _ = sync_secrets.resolve_secret_value(
                 key,
                 source,

@@ -13,7 +13,6 @@ import yaml
 # --- Configuration ---
 SECRETS_YAML_PATH = "secrets.yaml"
 PROJECT_CONFIG_PATH = "project.yaml"
-LOCAL_ENV_FILE = ".env.local"
 PROTON_CLI_CMD = "pass-cli"  # Der Befehl für Proton Pass
 
 _FETCH_MAX_RETRIES = 3
@@ -515,62 +514,6 @@ def validate_effective_settings(target, settings):
         sys.exit(1)
 
 
-def sync_local(
-    config,
-    secrets_def,
-    has_proton,
-    secret_target=None,
-    secret_source="proton",
-    values_data=None,
-    project_config=None,
-):
-    target = resolve_secret_target(config, secret_target)
-    if target:
-        print(f"Syncing to {LOCAL_ENV_FILE} for target '{target}' ...")
-    else:
-        print(f"Syncing to {LOCAL_ENV_FILE} ...")
-
-    output_lines = ["# Auto-generated local secrets from secrets.yaml"]
-
-    for key, definition in secrets_def.items():
-        if is_excluded_from_env(definition):
-            print(f"    {key}: Skipping (exclude_from_env)")
-            continue
-
-        dev_default = definition.get("dev_default")
-        value = None
-
-        if dev_default is not None:
-            value = str(dev_default)
-            print(f"   {key}: Using dev_default")
-        else:
-            source = resolve_source(definition, config, secret_target=target, project_config=project_config)
-            fetched, resolved_from = resolve_secret_value(
-                key,
-                source,
-                has_proton,
-                secret_source,
-                secret_target=target,
-                values_data=values_data,
-            )
-            if fetched is not None:
-                value = fetched
-                if resolved_from == "yaml":
-                    print(f"   {key}: Using YAML values file")
-
-            if value is None:
-                print(f"    {key}: No default and configured secret lookup failed.")
-                value = input(f"      Please enter value for {key}: ").strip()
-
-        output_lines.append(f"{key}={value}")
-
-    with open(LOCAL_ENV_FILE, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(output_lines))
-        handle.write("\n")
-
-    print(f"Successfully wrote {LOCAL_ENV_FILE}")
-
-
 def collect_github_secret_values(config, secrets_def, has_proton, secret_target, secret_source, values_data, project_config=None):
     """Resolve all GitHub secret values before any write when yaml input is active."""
     planned = []
@@ -768,12 +711,73 @@ def _do_server_sync(
     )
 
 
+def _write_local_env(secret_target, secret_source, values_file, project_config):
+    """Write the full local ``.env`` via the generate-env composition.
+
+    Returns False when project.yaml has no local environment, so callers can
+    decide whether that is fatal or a graceful no-op.
+    """
+    if "local" not in (project_config or {}).get("environments", {}):
+        return False
+
+    # Keep .env a pure, Proton-regenerable derivative: generate-env overwrites
+    # it from project.yaml plus secret inputs instead of preserving hand edits,
+    # so no secret can live only in an uncommitted local .env file.
+    # This lazy import avoids generate_env.py's module-level sync_secrets import.
+    from django_core_micha.scripts import generate_env as generate_env_module
+
+    generate_env_module.generate_env(
+        "local",
+        config_path=PROJECT_CONFIG_PATH,
+        output_path=".env",
+        secret_target=secret_target,
+        secret_source=secret_source,
+        values_file=values_file,
+    )
+    return True
+
+
+def _sync_all_github_targets(parser, config, secrets_def, project_config, project_config_path, args):
+    """Sync every configured bare-mode GitHub target in sequence."""
+    bare_targets = config.get("bare_server_targets")
+    if bare_targets is None:
+        bare_targets = _BARE_SERVER_TARGETS
+    elif not (
+        isinstance(bare_targets, (list, tuple))
+        and bare_targets
+        and all(isinstance(t, str) and t.strip() for t in bare_targets)
+    ):
+        parser.error(
+            "config.bare_server_targets must be a non-empty list of non-empty"
+            " strings (server target names)."
+        )
+    for target_name in bare_targets:
+        print(f"\n{'-' * 60}")
+        print(f"  sync-secrets — target: {target_name}")
+        print(f"{'-' * 60}\n")
+        try:
+            _do_server_sync(
+                target_name,
+                config,
+                secrets_def,
+                project_config,
+                project_config_path,
+                cli_secret_source=args.secret_source,
+                cli_values_file=args.values_file,
+                github_environment=args.github_environment,
+            )
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+            print(f"\nError: {target_name} sync failed (exit {code}). Aborting remaining targets.")
+            sys.exit(code)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Sync secrets to a local .env file or to GitHub Environment Secrets."
-        " With no arguments, syncs GitHub secrets for each bare-mode target in sequence"
-        " (default staging then production; override with config.bare_server_targets"
-        " in secrets.yaml)."
+        " With no arguments, writes local .env when configured and syncs GitHub secrets"
+        " for each bare-mode target in sequence (default staging then production;"
+        " override with config.bare_server_targets in secrets.yaml)."
     )
     destination_group = parser.add_mutually_exclusive_group(required=False)
     destination_group.add_argument(
@@ -784,7 +788,17 @@ def main(argv=None):
     destination_group.add_argument(
         "--server",
         action="store_true",
-        help="Push resolved secrets to GitHub Environment Secrets (replaces the old `--target github`).",
+        help="Push resolved secrets only to the GitHub target named by --secret-target.",
+    )
+    destination_group.add_argument(
+        "--github",
+        "--remote",
+        action="store_true",
+        dest="github_all",
+        help=(
+            "Sync GitHub secrets for every config.bare_server_targets environment (no local write). "
+            "Same GitHub-only behaviour as a bare invocation, minus the local .env write."
+        ),
     )
     destination_group.add_argument(
         "--staging",
@@ -839,6 +853,11 @@ def main(argv=None):
     elif args.server:
         destination = "github"
         effective_cli_target = args.secret_target
+    elif args.github_all:
+        if args.secret_target:
+            parser.error("--github/--remote already syncs all bare_server_targets; do not combine with --secret-target.")
+        destination = "github_all"
+        effective_cli_target = None
     elif args.local:
         destination = "local"
         effective_cli_target = args.secret_target
@@ -848,37 +867,14 @@ def main(argv=None):
         destination = None  # bare mode: both targets in sequence
 
     if destination is None:
-        bare_targets = config.get("bare_server_targets")
-        if bare_targets is None:
-            bare_targets = _BARE_SERVER_TARGETS
-        elif not (
-            isinstance(bare_targets, (list, tuple))
-            and bare_targets
-            and all(isinstance(t, str) and t.strip() for t in bare_targets)
-        ):
-            parser.error(
-                "config.bare_server_targets must be a non-empty list of non-empty"
-                " strings (server target names)."
-            )
-        for target_name in bare_targets:
-            print(f"\n{'-' * 60}")
-            print(f"  sync-secrets — target: {target_name}")
-            print(f"{'-' * 60}\n")
-            try:
-                _do_server_sync(
-                    target_name,
-                    config,
-                    secrets_def,
-                    project_config,
-                    project_config_path,
-                    cli_secret_source=args.secret_source,
-                    cli_values_file=args.values_file,
-                    github_environment=args.github_environment,
-                )
-            except SystemExit as exc:
-                code = exc.code if isinstance(exc.code, int) else 1
-                print(f"\nError: {target_name} sync failed (exit {code}). Aborting remaining targets.")
-                sys.exit(code)
+        wrote = _write_local_env(None, args.secret_source, args.values_file, project_config)
+        if not wrote:
+            print(f"   (No 'local' environment in {PROJECT_CONFIG_PATH} — skipping local .env write.)")
+        _sync_all_github_targets(parser, config, secrets_def, project_config, project_config_path, args)
+        return
+
+    if destination == "github_all":
+        _sync_all_github_targets(parser, config, secrets_def, project_config, project_config_path, args)
         return
 
     if destination == "github":
@@ -894,29 +890,10 @@ def main(argv=None):
         )
         return
 
-    # local
-    effective = resolve_effective_settings(
-        config,
-        cli_secret_source=args.secret_source,
-        cli_values_file=args.values_file,
-        cli_secret_target=effective_cli_target,
-        project_config=project_config,
-        project_config_path=project_config_path,
-    )
-    validate_effective_settings("local", effective)
-    has_proton = check_dependencies("local", secret_source=effective["secret_source"])
-    values_data = None
-    if effective["values_file"] and effective["secret_source"] in ("yaml", "auto"):
-        values_data = load_values_file(effective["values_file"])
-    sync_local(
-        config,
-        secrets_def,
-        has_proton,
-        secret_target=effective["secret_target"],
-        secret_source=effective["secret_source"],
-        values_data=values_data,
-        project_config=project_config,
-    )
+    wrote = _write_local_env(effective_cli_target, args.secret_source, args.values_file, project_config)
+    if not wrote:
+        print(f"Error: no 'local' environment defined in {PROJECT_CONFIG_PATH} — cannot write .env.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
