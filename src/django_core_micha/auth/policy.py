@@ -264,7 +264,7 @@ def is_allowed_email_domain(email: str, allowed_domains: list[str]) -> bool:
 
 def build_public_auth_config(policy=None) -> dict[str, Any]:
     state = get_policy_state(policy)
-    return {
+    config = {
         "signup": bool(state.signup_modes),
         "signup_modes": list(state.signup_modes),
         "required_auth_factor_count": int(state.required_auth_factor_count),
@@ -275,6 +275,9 @@ def build_public_auth_config(policy=None) -> dict[str, Any]:
         "email_domain_hint": ", ".join(state.allowed_email_domains),
         "signup_qr_expiry_days": int(state.signup_qr_expiry_days),
     }
+    if getattr(settings, "TURNSTILE_SECRET_KEY", ""):
+        config["turnstile_site_key"] = settings.TURNSTILE_SITE_KEY
+    return config
 
 
 def serialize_policy(policy=None) -> dict[str, Any]:

@@ -17,13 +17,17 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from django.apps import apps
 from django.test import RequestFactory, override_settings
 
 # ---------------------------------------------------------------------------
 # Inject fake recovery module so security.py / permissions.py can be imported
 # without django_core_micha being in INSTALLED_APPS.
 # ---------------------------------------------------------------------------
-if "django_core_micha.auth.recovery" not in sys.modules:
+if (
+    not apps.is_installed("django_core_micha.auth")
+    and "django_core_micha.auth.recovery" not in sys.modules
+):
     _fake_recovery = ModuleType("django_core_micha.auth.recovery")
     _fake_recovery.RecoveryRequest = type("RecoveryRequest", (), {})
     sys.modules["django_core_micha.auth.recovery"] = _fake_recovery

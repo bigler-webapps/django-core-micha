@@ -102,6 +102,7 @@ class RegistrationRequestSerializer(serializers.Serializer):
     mode = serializers.ChoiceField(choices=list(SELF_SIGNUP_MODES))
     access_code = serializers.CharField(required=False, allow_blank=False)
     registration_context_token = serializers.CharField(required=False, allow_blank=False)
+    turnstile_token = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, attrs):
         attrs = super().validate(attrs)

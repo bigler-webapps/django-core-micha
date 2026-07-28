@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.31.0] — 2026-07-28
+
+### Added
+
+**Cloudflare Turnstile bot-check for fully-open self-signup (SEC-2)**
+
+- New `TURNSTILE_SITE_KEY`/`TURNSTILE_SECRET_KEY` settings (`env(default="")`) and `auth/turnstile.py` (stdlib `urllib` Cloudflare siteverify call, fail-closed on any missing/invalid token, network error, or hostname mismatch against `ALLOWED_HOSTS`).
+- Enforced only inside `register_request` when `TURNSTILE_SECRET_KEY` is set AND the signup mode is `self_signup_open` or `self_signup_email_domain` — every other mode, and every consumer that has not configured the secret, is completely unaffected (pure no-op on this bump).
+- `build_public_auth_config()` exposes `turnstile_site_key` only when the secret is configured — this is the single signal the frontend (ucm) uses to decide whether to render the widget at all.
+- No new dependency (stdlib only); no `AuthPolicy` schema change.
+
 ## [2.30.0] — 2026-07-28
 
 ### Changed

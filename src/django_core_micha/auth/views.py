@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.core import signing
 from django.urls import reverse
+from django.utils.translation import gettext as _
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET
@@ -37,6 +38,8 @@ from django_core_micha.auth.permissions import (
     can_write_auth_policy,
 )
 from django_core_micha.auth.policy import (
+    SIGNUP_MODE_EMAIL_DOMAIN,
+    SIGNUP_MODE_OPEN,
     SIGNUP_MODE_QR,
     consume_signup_context_token,
     create_pending_registration_token,
@@ -51,6 +54,7 @@ from django_core_micha.auth.policy import (
     mode_requires_qr_token,
     serialize_policy,
 )
+from django_core_micha.auth.turnstile import verify_turnstile_token
 from .recovery import RecoveryRequest
 from .serializers import (
     AuthPolicySerializer,
@@ -362,6 +366,25 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         data = serializer.validated_data
         email = data["email"].lower()
         mode = data["mode"]
+
+        if getattr(settings, "TURNSTILE_SECRET_KEY", "") and mode in (
+            SIGNUP_MODE_OPEN,
+            SIGNUP_MODE_EMAIL_DOMAIN,
+        ):
+            allowed_hostnames = tuple(
+                host.lower()
+                for host in settings.ALLOWED_HOSTS
+                if host and "*" not in host and not host.startswith(".")
+            )
+            if not allowed_hostnames:
+                raise ValidationError({"turnstile_token": _("Bot verification failed.")})
+            ok, _reason = verify_turnstile_token(
+                data.get("turnstile_token", ""),
+                allowed_hostnames=allowed_hostnames,
+            )
+            if not ok:
+                raise ValidationError({"turnstile_token": _("Bot verification failed.")})
+
         policy_state = get_policy_state(self.get_auth_policy())
 
         if mode not in policy_state.signup_modes:

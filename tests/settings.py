@@ -3,7 +3,9 @@ SECRET_KEY = "test-secret-not-for-production"
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
+    "django_core_micha.auth",
     "django_core_micha.auditlog",
+    "django_core_micha.invitations",
     "django_core_micha.notifications",
     "django_core_micha.onboarding",
     "allauth",
