@@ -334,6 +334,7 @@ def test_canonical_mark_broadcasts_one_full_status_payload_per_notification(monk
                 "type": "notification.status",
                 "notification_id": seen.notification_id,
                 "status": {"seen": True, "dismissed": False, "done": True},
+                "envelope": "notification",
             },
         ),
         (
@@ -342,6 +343,7 @@ def test_canonical_mark_broadcasts_one_full_status_payload_per_notification(monk
                 "type": "notification.status",
                 "notification_id": dismissed.notification_id,
                 "status": {"seen": False, "dismissed": True, "done": True},
+                "envelope": "notification",
             },
         ),
     ]

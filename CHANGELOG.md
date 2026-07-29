@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.33.0] — 2026-07-30
+
+### Added
+
+**NOTIF-13 — realtime envelope discriminator**
+
+- Every WS payload `push_to_users` sends for this app now additionally carries `"envelope": "notification"`, via a new `delivery.notification_envelope()` authoring helper — additive only, all existing fields (`type`, `notification_id`, `status`, `content`, etc.) are unchanged.
+- Lets a consumer's Layer-1 realtime primitive (ucm 2.13.0's `subscribe(envelope, handler)`) route this domain's messages without misreading a second stream (e.g. messaging) as a notification. A payload with no `envelope` field (older dcm) is still treated as a notification by that primitive's default, so this is fully backward-compatible in both directions.
+- `push_to_users`'s own signature is unchanged; only the two existing producers (`views.py`'s status-change broadcast, `dispatch.py`'s `ChipDispatcher`) now wrap their payload through the helper before sending.
+
+## [2.32.0] — 2026-07-29
+
+### Added
+
+**`TodoOverride.created_by` audit field**
+
+- Added `created_by` (nullable FK, `SET_NULL`, `related_name="+"`) to `TodoOverride`, migration `0006_todooverride_created_by` — additive, no default touching existing rows, no unique-constraint change.
+- Restores audit attribution (which user set an override) that jg-ferien's NOTIF-10 cutover onto canonical `TodoOverride` would otherwise have silently dropped versus the legacy `EventTaskOverride.created_by` it replaced. Never exposed via any API response.
+
 ## [2.31.0] — 2026-07-28
 
 ### Added

@@ -17,6 +17,23 @@ except ImportError:  # pragma: no cover - dependency is optional at import time
 
 logger = logging.getLogger(__name__)
 
+# NOTIF-13 envelope discriminator: identifies this domain's WS payloads so a
+# Layer-1 realtime primitive (ucm's subscribe(envelope, handler)) can route a
+# second stream (e.g. messaging) without misreading it as a notification.
+# Additive only — existing fields (`type`, etc.) are unchanged, so a client
+# that predates this contract keeps working exactly as before.
+NOTIFICATION_ENVELOPE = "notification"
+
+
+def notification_envelope(payload):
+    """Wrap a notification WS payload with the shared `envelope` discriminator.
+
+    Producers should build their payload dict as before and pass it through
+    this helper instead of hand-rolling the envelope field, so the contract
+    stays in one place.
+    """
+    return {**payload, "envelope": NOTIFICATION_ENVELOPE}
+
 
 def push_to_users(users, payload):
     """Send a payload to every recipient's isolated notification WS group."""

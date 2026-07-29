@@ -6,7 +6,7 @@ from typing import ClassVar, Protocol
 from django.utils import translation
 from django.utils.translation import gettext
 
-from .delivery import _send_email, _send_push, push_to_users
+from .delivery import _send_email, _send_push, notification_envelope, push_to_users
 
 
 logger = logging.getLogger(__name__)
@@ -67,11 +67,11 @@ class ChipDispatcher:
     def deliver(self, notification, recipient, ctx=None) -> DeliveryResult:
         push_to_users(
             [recipient.user],
-            {
+            notification_envelope({
                 "type": notification.notification_type,
                 "content": notification.content,
                 "notification_id": notification.pk,
-            },
+            }),
         )
         return DeliveryResult(ok=True)
 

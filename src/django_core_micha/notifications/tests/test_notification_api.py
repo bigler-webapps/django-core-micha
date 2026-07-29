@@ -125,7 +125,12 @@ def test_notify_creates_canonical_rows_dispatches_and_deduplicates(monkeypatch):
         "email": 2,
         "push": 2,
     }
-    assert calls["chip"][0][1] == {"type": "test_notice", "content": content, "notification_id": first.pk}
+    assert calls["chip"][0][1] == {
+        "type": "test_notice",
+        "content": content,
+        "notification_id": first.pk,
+        "envelope": "notification",
+    }
 
 
 @pytest.mark.django_db

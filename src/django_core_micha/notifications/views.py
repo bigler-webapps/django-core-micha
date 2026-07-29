@@ -3,6 +3,14 @@
 Canonical status-change WebSocket contract: ``{"type": "notification.status",
 "notification_id": <id>, "status": {"seen": bool, "dismissed": bool,
 "done": bool}}``. Consumers use this stable payload to synchronize projections.
+
+NOTIF-13: every WS payload this app sends also carries ``"envelope":
+"notification"`` (see ``delivery.notification_envelope``), additive alongside
+the fields above. It lets ucm's Layer-1 realtime primitive
+(``subscribe(envelope, handler)``) route this domain's messages without
+misreading a second stream (e.g. messaging) as a notification. A payload with
+no ``envelope`` field (pre-NOTIF-13 producers) is still treated as this
+domain by that primitive's default, so older dcm releases remain compatible.
 """
 
 from django.conf import settings
@@ -11,7 +19,7 @@ from rest_framework import generics, status, views
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from .delivery import push_to_users
+from .delivery import notification_envelope, push_to_users
 from .models import NotificationPreference, NotificationRecipient, PushSubscription, get_notification_model
 from .serializers import (
     CanonicalMarkInputSerializer,
@@ -231,7 +239,7 @@ class CanonicalMarkView(views.APIView):
                 sent_notification_ids.add(recipient.notification_id)
                 push_to_users(
                     [request.user],
-                    {
+                    notification_envelope({
                         "type": "notification.status",
                         "notification_id": recipient.notification_id,
                         "status": {
@@ -239,7 +247,7 @@ class CanonicalMarkView(views.APIView):
                             "dismissed": recipient.dismissed_at is not None,
                             "done": recipient.done_at is not None,
                         },
-                    },
+                    }),
                 )
 
         return Response({"updated": updated})
