@@ -89,7 +89,7 @@ Layer 1. Nothing in Layer 1 depends on 2 or 3.
 
 | Domain | Central (dcm/ucm) | Local in jg | Verdict |
 |---|---|---|---|
-| System notifications | dcm 2.35.0: canonical model, `notify()` router, prefs matrix, 5 dispatchers (popup now real), `feed/*`, `NotificationConsumer`, `transient=` + `feed_visible`. ucm 2.14.0: provider/bell/settings/sw.js/popup surface | **NOTIF-14 landed (`37ea0a7`):** the message-notify producer is on `notify()` with a registered type rendered per recipient language; all six messaging WS payloads tagged `envelope: "messaging"` | central; jg has **no** legacy producer left except the unscheduled one in NOTIF-18 |
+| System notifications | dcm 2.35.0: canonical model, `notify()` router, prefs matrix, 5 dispatchers (popup now real), `feed/*`, `NotificationConsumer`, `transient=` + `feed_visible`. ucm 2.14.0: provider/bell/settings/sw.js/popup surface | **NOTIF-14 landed (`37ea0a7`):** the message-notify producer is on `notify()` with a registered type rendered per recipient language; all six messaging WS payloads tagged `envelope: "messaging"` | central; **jg has no legacy notification producer left at all** (the last one went with NOTIF-18, `cbb14e3`) |
 | Onboarding | dcm `onboarding` + ucm provider/wizard (dialog shell now shared with the popup channel) | — | fully central |
 | Task/todo engine | dcm todo channel (NOTIF-8/8b/8c, 2.32.0) | **NOTIF-10 landed (`e8d5d76`):** all live reads+writes cut over to canonical, dual-write shims retired. The 3 overlay tables still exist but are unread | cutover complete; only the drop (NOTIF-11) remains, gated on the jg promotion |
 | Messaging | none | 100% local: 9 models, 25 REST endpoints, event-chat-sync signals, ~2400-LOC `Thread.jsx`, encrypted-at-rest | greenfield centrally — unchanged, this is Phase B |
@@ -129,7 +129,7 @@ named here must have a register row in dcm `WORK_ORDERS.md` at the moment it is 
 | NOTIF-15 | jg | **jg bell/feed adoption:** ucm provider + bell; delete jg's local `NotificationsContext` | NOTIF-13 **and NOTIF-14** | ✓ done (`5148677`) |
 | NOTIF-16 | hram | hram `notify()` adoption (state-only "job done") | Layer 2 stable | planned — **backlog, no demand recorded** |
 | NOTIF-17 | spesix | spesix `notify()` adoption (state-only "job done") | Layer 2 stable | planned — **backlog, no demand recorded** |
-| NOTIF-18 | jg | retire the **unscheduled** legacy task-digest producer (a deletion, not a migration) | — | planned |
+| NOTIF-18 | jg | retire the **unscheduled** legacy task-digest producer (a deletion, not a migration) | — | ✓ done (`cbb14e3`) — last legacy `deliver_push_email` producer in jg is gone |
 | NOTIF-19 | dcm | `notify(transient=…)` + `NotificationType.feed_visible` | raised by NOTIF-14 | ✓ done (`bea6ad0`, 2.35.0) |
 | NOTIF-20 | jg+cockpit | schedule the `prune_notifications` janitor | — | **dropped** 2026-07-30 — no benefit at these volumes; surfaced the `scheduled_commands` role gap instead (→ `CI-5`) |
 | NOTIF-21 | dcm+jg | per-type retention: expose `expires_at` on `notify()` | NOTIF-20 | **dropped** 2026-07-30 — moot without NOTIF-20; the API gap itself is real and recorded |
@@ -142,8 +142,9 @@ first would have poured the entire chat stream into the notification feed. The t
 NOTIF-14, and **NOTIF-15 depends on it**. The rest holds: NOTIF-13 precedes NOTIF-15; NOTIF-16/17 are
 parallelizable per-app tracks.
 
-**What actually remains to call Phase A closed: NOTIF-18 and NOTIF-11** (the latter waits on the jg
-`develop → main` promotion). NOTIF-16/17 are backlog — nothing is broken in hram or spesix without them.
+**What remains to call Phase A closed: NOTIF-11 alone** — the drop of jg's three legacy overlay tables,
+which waits on the jg `develop → main` promotion (NOTIF-10 must reach prod first). Everything else in the
+phase has landed. NOTIF-16/17 are backlog — nothing is broken in hram or spesix without them.
 NOTIF-20/21 were dropped on 2026-07-30: retention is not worth turning on at these volumes.
 
 **One thing left the workstream, deliberately.** Investigating NOTIF-20 revealed that the platform's
