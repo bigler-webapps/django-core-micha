@@ -31,20 +31,32 @@ A session picking up this workstream should read these before touching code:
    router, todo channel, phases P1→P3).
 6. Registers: **dcm `WORK_ORDERS.md` is the canonical `NOTIF-*` platform register**; app-side execution
    rows live in each app's own `WORK_ORDERS.md` (jg-ferien especially).
-7. Workspace memory: `project_shared_notifications_platform.md`, `project_messaging_centralization.md`.
+7. ~~Workspace memory: `project_shared_notifications_platform.md`, `project_messaging_centralization.md`.~~
+   **Dead reference, removed 2026-07-30** — neither file exists anywhere (not in the workspace, not in the
+   agent memory store, no matching index entry), and the per-repo `MEMORY.md` files in dcm and jg contain
+   nothing about notifications either. There is no memory layer for this workstream: the registers and
+   these two design docs are the whole record. Do not go looking for a third source.
 
 **Code entry points**
 8. dcm notifications: `src/django_core_micha/notifications/` — `api.py` (`notify()`), `router.py`,
    `types.py` (code-first registry), `dispatch.py` (chip/email/push/todo/popup), `todo/`
    (`registry.py`/`service.py`/`digests.py`), `consumers.py` (S112 `NotificationConsumer`), `urls.py`
    (`feed/*`).
-9. ucm surfaces: `src/notifications/` — `NotificationsProvider.jsx` (single-WS owner), `NotificationBell.jsx`,
-   `feedApi.js`, `serviceWorker/sw.js`.
-10. jg todo adoption: `backend/events/todo_channel.py` (providers + digest), `backend/events/views.py`
-    (`/api/tasks/` adapter + the 4 dismiss/override endpoints), `backend/events/task_engine.py` (legacy
-    engine, being retired). jg messaging: `backend/messaging/` (models/services/signals),
-    `frontend/src/context/{NotificationsContext,MessagingContext}.jsx`,
+9. ucm surfaces: `src/notifications/` — `realtime.jsx` (**the Layer-1 core**: single socket +
+   `subscribe(envelope, handler)`), `NotificationsProvider.jsx` (sole mount point, owns the socket and the
+   feed state), `NotificationBell.jsx`, `PopupSurface.jsx`, `feedApi.js`, `serviceWorker/sw.js`.
+10. jg todo adoption: `backend/events/todo_channel.py` (providers + digest + `build_tasks_from_canonical`),
+    `backend/events/views.py` (`/api/tasks/` adapter + the 4 dismiss/override endpoints),
+    `backend/events/task_engine.py` — **read this correctly: it is no longer a legacy engine.** Its
+    assembly wrapper was deleted (NOTIF-22); what remains is the **live per-task-type rule library**
+    (`_payment_items`, `_duty_items`, `_build_task_context`, …) that `todo_channel.py` imports and runs in
+    production.
+11. jg messaging: `backend/messaging/` (models/services/signals), `messaging/envelope.py`
+    (`MESSAGING_ENVELOPE`), `messaging/notifications.py` (the registered new-message type),
+    `frontend/src/context/MessagingContext.jsx`, `frontend/src/context/realtimeEnvelopes.js`,
     `frontend/src/components/Messaging/` (`Thread.jsx`, `ConversationList.jsx`, …).
+    **`frontend/src/context/NotificationsContext.jsx` no longer exists** — jg's local socket owner was
+    deleted in NOTIF-15; do not reintroduce it.
 
 ---
 
