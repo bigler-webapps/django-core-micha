@@ -152,9 +152,29 @@ Fernet-`EncryptedTextField` chat bodies into the unencrypted `content` column, b
 privileged-read path. **Rule of thumb: if the value is encrypted at rest, user-authored, or unique per
 message, it belongs in `transient=`, not `content`.**
 
-**Still missing (NOTIF-21):** `notify()` does not accept `expires_at`, although `Notification.expires_at`
-exists and `prune_notifications` honours it. Until then every type shares the global
-`NOTIFICATIONS_RETENTION_DAYS` (default 90) — too long for high-volume types like chat.
+**Still missing (NOTIF-21, dropped):** `notify()` does not accept `expires_at`, although
+`Notification.expires_at` exists and `prune_notifications` honours it. Every type therefore shares the
+global `NOTIFICATIONS_RETENTION_DAYS` (default 90). NOTIF-20/21 were dropped on 2026-07-30 — retention is
+deliberately not scheduled anywhere; see the roadmap §3.
+
+## A third trap: `title_key`/`body_key` are only as translatable as you make them
+
+`_render_content` runs `gettext(title_key).format(**params, **transient)`. Two consequences that bit in
+practice and are easy to repeat:
+
+**1. A msgid with no prose translates to nothing.** jg's new-message type uses bare format strings as its
+keys — `"{sender}"`, `"{group}: {sender}"`, `"{excerpt}"` — with `msgid == msgstr` in de/en/fr. That is a
+legitimate choice (the notification is pure data: a name and an excerpt, nothing to translate) and it
+preserves the pre-cutover behaviour exactly. But **it means "rendered in the recipient's language" is a
+no-op for that type.** Do not claim per-recipient localization for a type whose keys carry no words —
+the mechanism runs, the output is identical in every language.
+
+**2. A placeholder-only msgid is a latent break.** Because the msgid *is* the format string, a translator
+who edits one and mistypes a placeholder makes `.format()` raise. `_render_content` catches that and falls
+back to the **raw key**, so the user receives an email whose subject is literally `{group}: {sender}` and
+the only trace is a log warning. There are 15 such entries today (5 keys × 3 languages). If you add more,
+consider either non-placeholder msgids or a test asserting that every registered type's keys still format
+against its expected param set.
 
 ## Infra
 - **Daily window-scan / digest** = a generic dcm **management command**; apps declare it in

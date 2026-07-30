@@ -90,11 +90,11 @@ Layer 1. Nothing in Layer 1 depends on 2 or 3.
 
 | Domain | Central (dcm/ucm) | Local in jg | Verdict |
 |---|---|---|---|
-| System notifications | dcm 2.35.0: canonical model, `notify()` router, prefs matrix, 5 dispatchers (popup now real), `feed/*`, `NotificationConsumer`, `transient=` + `feed_visible`. ucm 2.14.0: provider/bell/settings/sw.js/popup surface | **NOTIF-14 landed (`37ea0a7`):** the message-notify producer is on `notify()` with a registered type rendered per recipient language; all six messaging WS payloads tagged `envelope: "messaging"` | central; **jg has no legacy notification producer left at all** (the last one went with NOTIF-18, `cbb14e3`) |
+| System notifications | dcm 2.35.0: canonical model, `notify()` router, prefs matrix, 5 dispatchers (popup now real), `feed/*`, `NotificationConsumer`, `transient=` + `feed_visible`. ucm 2.14.0: provider/bell/settings/sw.js/popup surface | **NOTIF-14 landed (`37ea0a7`):** the message-notify producer is on `notify()` with a registered type; all six messaging WS payloads tagged `envelope: "messaging"`. **Correction 2026-07-30:** this row previously claimed the type is "rendered per recipient language". The *mechanism* does that, but for this type the effect is nil — its title/body msgids are bare format strings (`"{sender}"`, `"{group}: {sender}"`, `"{excerpt}"`) with `msgid == msgstr` in de/en/fr, so all three languages render identically. Behaviour parity with the pre-cutover code is preserved, which was the actual requirement; there is simply no prose to translate | central; **jg has no legacy notification producer left at all** (the last one went with NOTIF-18, `cbb14e3`) |
 | Onboarding | dcm `onboarding` + ucm provider/wizard (dialog shell now shared with the popup channel) | — | fully central |
 | Task/todo engine | dcm todo channel (NOTIF-8/8b/8c, 2.32.0) | **NOTIF-10 landed (`e8d5d76`):** all live reads+writes cut over to canonical, dual-write shims retired. The 3 overlay tables still exist but are unread | cutover complete; only the drop (NOTIF-11) remains, gated on the jg promotion |
 | Messaging | none | 100% local: 9 models, 25 REST endpoints, event-chat-sync signals, ~2400-LOC `Thread.jsx`, encrypted-at-rest | greenfield centrally — unchanged, this is Phase B |
-| Realtime transport | **✓ extracted (NOTIF-13):** ucm `useRealtime()`/`subscribe(envelope, handler)`, one socket, unknown envelopes ignored | **NOTIF-15 landed (`5148677`):** local `NotificationsContext` deleted; `MessagingContext` **and** `Thread.jsx` re-subscribe via Layer 1 | done |
+| Realtime transport | **✓ extracted (NOTIF-13):** ucm `useRealtime()`/`subscribe(envelope, handler)`, unknown envelopes ignored. **One socket for the notifications stream** — verified on staging. Note the invariant is scoped to `/ws/notifications/`, not to the app: jg also runs `/ws/cook/events/…/checklist/` (`BuyChecklistConsumer`, S112-compliant), a separate pre-existing feature and the natural next candidate to ride Layer 1 | **NOTIF-15 landed (`5148677`):** local `NotificationsContext` deleted; `MessagingContext` **and** `Thread.jsx` re-subscribe via Layer 1 | done |
 | Retention | `prune_notifications` exists (NOTIF-4) | — | **deliberately not scheduled** (NOTIF-20/21 dropped 2026-07-30) — no benefit at these volumes, and `transient=` already keeps chat text out of `content`. Reactivatable if a consumer ever produces high volume |
 | Scheduled commands | role `scheduled_commands` is carried by **`staging` only** — CI-3's documented staging-first gate | jg declares `send_todo_digests`, the estate's only scheduled command | so **no app command has ever run in production**; the completion step is `webapp-management/work-orders/CI-5.md` |
 
@@ -180,11 +180,19 @@ full feature set) + spesix (first live consumer).
 - **Messaging encryption key-management (multi-app).** Full-parity + hard at-rest requirement means the
   shared service must own an encryption scheme that works across tenants/apps without a single shared key
   that widens blast radius. Resolve in MSG-1 before any model lands.
-- ~~**Transport extraction backward-compat (NOTIF-13).**~~ **Resolved.** The primitive carries both stream
-  types, an envelope-less payload still defaults to the notification envelope, and jg's chat re-subscribed
-  without loss. Residual: end-to-end chat over the socket was never browser-verified (no local
-  events/conversations, no seed command) — it rests on unit coverage of all nine handler paths and an exact
-  envelope match on both sides. Exercise chat once on staging before the jg promotion.
+- ~~**Transport extraction backward-compat (NOTIF-13).**~~ **Resolved, and since 2026-07-30 verified live
+  on staging — no residual left.** A cross-repo review drove the deployed staging app in a browser and
+  exercised chat in **both** directions on real (prod-synced) data:
+  - exactly **one** socket, `wss://…/ws/notifications/`, observed on the wire (not just unit-tested);
+  - outbound and inbound messages both arrived as `{"envelope": "messaging", "type": "message", …}` and
+    rendered live in the thread with no reload;
+  - **as the recipient** — i.e. with `notify()` genuinely firing — the bell stayed at `0`,
+    `feed/unread-count/` returned `{"count": 0}` and `feed/` was empty. That is the direct proof of
+    `feed_visible=False` and of the "bell = system notifications, chat badge = human messages" split;
+  - the deployed bundle contains the Layer-1 router verbatim (`t.envelope ?? DEFAULT`, subscriber lookup,
+    ignore when nobody subscribes) and no longer contains `registerMessageCallback`;
+  - the onboarding wizard still renders correctly (step counter, and the single-step "Einrichtung" variant),
+    confirming NOTIF-12's dialog-shell extraction did not regress it across the ucm 2.12 → 2.14 jump.
 - **Cross-repo release chains discovered mid-implementation** — the biggest real cost driver so far, not a
   hypothetical. Three times in four days an app-level WO turned out to need a dcm capability that did not
   exist (`transient=`/`feed_visible` in NOTIF-19; `created_by` in NOTIF-8c; `expires_at`, still open as
