@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.34.0] — 2026-07-30
+
+### Added
+
+**NOTIF-12 — popup channel delivery**
+
+- `PopupDispatcher.deliver` now actually delivers instead of logging a "pending" stub: it sends the same `push_to_users(notification_envelope({...}))` shape as `ChipDispatcher`, with a new `"channel": "popup"` field inside the payload so a client can tell the two apart (the envelope itself stays the NOTIF-13 domain-level `"notification"` discriminator — no second envelope value was introduced).
+- `ChipDispatcher` gains the same `"channel": "chip"` field for symmetry. Both dispatchers also now include `"recipient_id"` (the `NotificationRecipient` pk) — `feed/mark/` resolves ids against that model, not `Notification`, and only the recipient pk lets a WS-pushed notification be marked seen/dismissed correctly before the next REST feed refresh.
+- Backward compatible: a payload with no `channel` field (an app pinned to an older dcm) keeps behaving exactly as before (feed entry + unread increment) on the ucm side.
+- **The popup channel ships with zero producers.** No notification type in dcm, jg-ferien, cockpit, hram, spesix, or survey_app declares `eligible_channels: ["popup"]`, so `resolve_channels()` will not route anything to it until an app opts a type in — this release only wires the dispatcher and is inactive until then. Proven end-to-end by a test-local notification type only (`test_dispatch.py`).
+- `prefs.py`, `router.py`, and `resolve_channels` are unchanged — popup was already a valid channel there.
+
 ## [2.33.0] — 2026-07-30
 
 ### Added

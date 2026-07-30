@@ -3,7 +3,11 @@ from django.contrib.auth import get_user_model
 
 from django_core_micha.notifications import dispatch as dispatch_module
 from django_core_micha.notifications.api import notify
-from django_core_micha.notifications.models import NotificationDelivery, NotificationPreference
+from django_core_micha.notifications.models import (
+    NotificationDelivery,
+    NotificationPreference,
+    NotificationRecipient,
+)
 from django_core_micha.notifications.types import NotificationType, _REGISTRY, register_notification_type
 
 
@@ -112,3 +116,109 @@ def test_dispatch_exception_fails_only_its_channel_and_keeps_sibling_delivery(mo
     )
     assert statuses == {"chip": "failed", "email": "sent"}
     assert len(email_calls) == 1
+
+
+@pytest.mark.django_db
+def test_popup_dispatcher_delivers_with_channel_discriminator_on_the_wire(monkeypatch):
+    register_notification_type(
+        NotificationType(
+            key="popup-scaffolding-e2e",
+            category="system",
+            mode="event",
+            resolution="user-done",
+            default_channels=["popup"],
+            eligible_channels=["popup"],
+        )
+    )
+    user = get_user_model().objects.create_user(
+        username="popup-e2e",
+        email="popup-e2e@example.test",
+        password="password",
+    )
+    sent = []
+    monkeypatch.setattr(
+        dispatch_module, "push_to_users", lambda users, payload: sent.append((list(users), payload))
+    )
+
+    notification = notify(
+        type="popup-scaffolding-e2e",
+        recipients=user,
+        content={"title_key": "Title", "body_key": "Body"},
+    )
+
+    statuses = dict(
+        NotificationDelivery.objects.filter(recipient__notification=notification).values_list("channel", "status")
+    )
+    assert statuses == {"popup": "sent"}
+    assert len(sent) == 1
+    delivered_users, payload = sent[0]
+    assert [u.pk for u in delivered_users] == [user.pk]
+    assert payload["envelope"] == "notification"
+    assert payload["channel"] == "popup"
+    assert payload["notification_id"] == notification.pk
+    recipient = NotificationRecipient.objects.get(notification=notification, user=user)
+    # feed/mark/ (CanonicalMarkView) resolves ids against NotificationRecipient,
+    # not Notification — the wire payload must carry the recipient pk, or every
+    # markSeen/markDismissed a client sends for this push either no-ops or (worse)
+    # mutates an unrelated NotificationRecipient row that shares the same pk.
+    assert payload["recipient_id"] == recipient.pk
+
+
+@pytest.mark.django_db
+def test_chip_dispatcher_carries_channel_field_with_no_other_regression(monkeypatch):
+    register_notification_type(
+        NotificationType(
+            key="chip-channel-field",
+            category="system",
+            mode="event",
+            resolution="user-done",
+            default_channels=["chip"],
+            eligible_channels=["chip"],
+        )
+    )
+    user = get_user_model().objects.create_user(
+        username="chip-channel",
+        email="chip-channel@example.test",
+        password="password",
+    )
+    sent = []
+    monkeypatch.setattr(
+        dispatch_module, "push_to_users", lambda users, payload: sent.append(payload)
+    )
+
+    notification = notify(
+        type="chip-channel-field",
+        recipients=user,
+        content={"title_key": "Title", "body_key": "Body"},
+    )
+
+    assert len(sent) == 1
+    payload = sent[0]
+    assert payload["envelope"] == "notification"
+    assert payload["channel"] == "chip"
+    assert payload["type"] == "chip-channel-field"
+    assert payload["notification_id"] == notification.pk
+    assert payload["content"] == notification.content
+    recipient = NotificationRecipient.objects.get(notification=notification, user=user)
+    assert payload["recipient_id"] == recipient.pk
+
+
+@pytest.mark.django_db
+def test_resolve_channels_still_excludes_popup_for_types_that_do_not_declare_it():
+    from django_core_micha.notifications.router import resolve_channels
+
+    ntype = NotificationType(
+        key="no-popup",
+        category="system",
+        mode="event",
+        resolution="user-done",
+        default_channels=["chip", "popup"],
+        eligible_channels=["chip"],
+    )
+    user = get_user_model().objects.create_user(
+        username="no-popup", email="no-popup@example.test", password="password"
+    )
+
+    effective = resolve_channels(ntype, user)
+
+    assert "popup" not in effective

@@ -71,6 +71,8 @@ class ChipDispatcher:
                 "type": notification.notification_type,
                 "content": notification.content,
                 "notification_id": notification.pk,
+                "recipient_id": recipient.pk,
+                "channel": self.channel,
             }),
         )
         return DeliveryResult(ok=True)
@@ -118,8 +120,17 @@ class PopupDispatcher:
     channel = "popup"
 
     def deliver(self, notification, recipient, ctx=None) -> DeliveryResult:
-        logger.info("Notification %s queued for unimplemented popup channel", notification.pk)
-        return DeliveryResult(ok=None, error="pending")
+        push_to_users(
+            [recipient.user],
+            notification_envelope({
+                "type": notification.notification_type,
+                "content": notification.content,
+                "notification_id": notification.pk,
+                "recipient_id": recipient.pk,
+                "channel": self.channel,
+            }),
+        )
+        return DeliveryResult(ok=True)
 
 
 _DISPATCHERS: dict[str, Dispatcher] = {
