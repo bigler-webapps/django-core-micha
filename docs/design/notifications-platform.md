@@ -1,7 +1,77 @@
 # Notifications Platform — Design
 
-Status: **Approved design** (2026-07-17). Home of the canonical base; consumed by all apps
-(jg-ferien, cockpit, …). Phased P1 → P2a/b/c → P3.
+Status: **Approved design** (2026-07-17), **fully built as of 2026-07-30** (P1, P2a/b/c and P3 all
+landed). Home of the canonical base; consumed by all apps (jg-ferien, cockpit, …).
+
+> **Read this first — this document is the approved *design*, not a description of what runs.**
+> The sections below record what was decided in July 2026 and are kept as the decision trail. Where the
+> shipped system deviates, the deviation is listed in "As-built" immediately below, verified against the
+> code on 2026-07-30. On any conflict, **As-built wins** and the design text is history.
+
+## As-built — where the shipped system differs from this design (verified 2026-07-30)
+
+Each item was checked against the code, not inferred from work orders.
+
+**1. The dispatcher table is inverted.** The design says "Email, Web-Push, Chip exist; Todo (P2); Popup
+(P3)". Reality: Chip, Email, Push **and Popup** all deliver (`DeliveryResult(ok=True)`); **`TodoDispatcher`
+is still the stub** (`dispatch.py:114-119`, logs "unimplemented todo channel", returns `ok=None`). The todo
+channel is nonetheless fully live — it just does not run through a dispatcher. It works through the
+provider registry, live derivation in `todo/service.py`, and the `send_todo_digests` command. The `todo`
+channel entry exists so the router can resolve it; delivery happens elsewhere.
+
+**2. Preferences were not "extended + migrated" — two new models were added.**
+`NotificationPreference` is **untouched** (still just `email_opt_in` / `push_opt_in`). NOTIF-3 added
+`NotificationChannelDefault` (user × channel) and `NotificationCategoryChannelPreference`
+(user × category × channel) alongside it, and the planned one-time seed migration was **deliberately
+dropped** (it would have frozen every existing user's behaviour against later toggles of the still-live
+`NotificationPreferenceView`).
+
+**3. The category × channel matrix is built, consulted — and empty.** `is_channel_enabled` resolves four
+tiers, but **nothing writes tiers 1 and 2**: there is no preferences UI, and
+`NotificationChannelDefault.set_channel_default` has no caller outside tests. Every user therefore
+resolves through **tier 3** (the legacy `email_opt_in`/`push_opt_in` booleans) or **tier 4** (built-in
+defaults: email/push opt-in `False`, chip/todo/popup `True`). D2's "∩ prefs" leg is, in practice, still
+the legacy two-boolean opt-in. This is correct and intentional — but it means the matrix delivers no
+behaviour until a UI exists.
+
+**4. `dedup_key` is `(type, notifiable)`, not `(type, notifiable, recipient)`.** See
+`Notification.build_dedup_key(notification_type, notifiable)`. One `Notification` is **shared** across
+recipients, each with their own `NotificationRecipient` row. D1's phrasing is wrong on this point, and it
+matters: anything recipient-specific cannot live on the notification.
+
+**5. `resolution` is not validated.** Only `mode` is checked against `VALID_NOTIFICATION_MODES`
+(`{"event", "provider"}`). The `user-done | state-resolved | expired` vocabulary is convention, enforced
+nowhere.
+
+**6. ucm never got the generic Todo renderer.** `src/notifications/` contains the provider, bell,
+settings, popup surface, feed API and realtime core — no todo renderer. jg renders its own todos from
+`/api/tasks/`.
+
+**7. There is no preferences UI.** `NotificationSettings.jsx` exists but is not the category × channel
+matrix (see item 3).
+
+**8. "Only the bell badge aggregation is unified" was reversed.** See the corrected "Chip vs Messaging"
+section below — the shipped decision is the opposite of what the design states.
+
+**9. Retention exists but runs nowhere.** The janitor shipped in P1 as designed; scheduling it was
+dropped on 2026-07-30 (NOTIF-20/21) because it brings no benefit at current volumes.
+
+**10. The window-scan/digest mechanism is real but has never run in production.** Apps do declare
+commands in `project.yaml infra.scheduled_commands` (CI-3) — but the `scheduled_commands` **role** was
+granted to `staging` only, by design, as CI-3's staging-first gate. Completing that gate is `CI-5`.
+
+**11. Orphan cleanup and `GenericPrefetch` were never implemented.** The GenericFK index
+(`content_type`, `object_id`) **does** exist. The orphan sweep was deferred at NOTIF-4 and remains open.
+
+**12. The single-socket invariant is scoped to `/ws/notifications/`,** not to an app. jg additionally
+runs `/ws/cook/events/…/checklist/` (`BuyChecklistConsumer`, S112-compliant) — a separate pre-existing
+feature, and the natural next candidate to ride the Layer-1 primitive.
+
+**13. cockpit has opted in.** The rollout note below says cockpit "must be unaffected until they opt in";
+it opted in at NOTIF-7 and runs the canonical model in production (pinned dcm 2.28.0 / ucm 2.11.0;
+catching up to 2.35.0 / 2.14.0 is `NOTIF-23`). hram is still uninvolved, as stated.
+
+---
 
 ## Principle
 
@@ -97,6 +167,7 @@ payment_due:
   resolution: state-resolved   # user-done | state-resolved | expired
   default_channels:  [todo, push, email]
   eligible_channels: [todo, push, email, chip]   # popup NOT allowed for this type
+  feed_visible: true       # NOTIF-19; set False to keep a type out of feed/ entirely
   persistUntilDone: true
   window: { base: zahlungsfrist, remindBefore: P7D }
   critical: false
@@ -126,6 +197,55 @@ notify(
 5. Prefs: user turns finance→push off → next time todo only. Derived types self-heal (payment lands
    → provider stops emitting → `state-resolved`).
 
+## Two things `notify()` does NOT decide for you (NOTIF-19, dcm 2.35.0)
+
+Both were added after a real near-miss in jg's NOTIF-14 and are easy to get wrong, because the obvious
+assumption about each is false.
+
+**1. `feed_visible` — channel selection does NOT control feed visibility.**
+The canonical feed (`CanonicalInboxView` / `CanonicalUnreadCountView`) reads a user's
+`NotificationRecipient` rows **directly**. It does not look at which channels were dispatched. So omitting
+`chip` does **not** keep a type out of the bell — the row is created by `notify()` and the feed shows it
+anyway. To keep a type out of `feed/` and `feed/unread-count/`, set `feed_visible=False` on the registered
+type. jg's new-message type does exactly this: it delivers via email/push, but human chat messages never
+appear in the bell (bell = system notifications, chat badge = human messages).
+*Does not apply to provider-derived todo rows, which the feed handles on their own path.*
+
+**2. `transient=` — everything in `content` is persisted forever, and feeds the `dedup_key`.**
+`notify(content=…)` writes into a plain `JSONField` that survives for the retention window and
+participates in deduplication. That is wrong for anything sensitive or per-instance volatile. Pass such
+values as `transient=` instead: they are rendered into email/push (via the previously unused `ctx` on
+`Dispatcher.deliver`) but are **never** persisted into `Notification.content` and **never** enter the
+`dedup_key`.
+This exists because jg's first NOTIF-14 design would have copied cleartext excerpts of
+Fernet-`EncryptedTextField` chat bodies into the unencrypted `content` column, bypassing the audited
+privileged-read path. **Rule of thumb: if the value is encrypted at rest, user-authored, or unique per
+message, it belongs in `transient=`, not `content`.**
+
+**Still missing (NOTIF-21, dropped):** `notify()` does not accept `expires_at`, although
+`Notification.expires_at` exists and `prune_notifications` honours it. Every type therefore shares the
+global `NOTIFICATIONS_RETENTION_DAYS` (default 90). NOTIF-20/21 were dropped on 2026-07-30 — retention is
+deliberately not scheduled anywhere; see the roadmap §3.
+
+## A third trap: `title_key`/`body_key` are only as translatable as you make them
+
+`_render_content` runs `gettext(title_key).format(**params, **transient)`. Two consequences that bit in
+practice and are easy to repeat:
+
+**1. A msgid with no prose translates to nothing.** jg's new-message type uses bare format strings as its
+keys — `"{sender}"`, `"{group}: {sender}"`, `"{excerpt}"` — with `msgid == msgstr` in de/en/fr. That is a
+legitimate choice (the notification is pure data: a name and an excerpt, nothing to translate) and it
+preserves the pre-cutover behaviour exactly. But **it means "rendered in the recipient's language" is a
+no-op for that type.** Do not claim per-recipient localization for a type whose keys carry no words —
+the mechanism runs, the output is identical in every language.
+
+**2. A placeholder-only msgid is a latent break.** Because the msgid *is* the format string, a translator
+who edits one and mistypes a placeholder makes `.format()` raise. `_render_content` catches that and falls
+back to the **raw key**, so the user receives an email whose subject is literally `{group}: {sender}` and
+the only trace is a log warning. There are 15 such entries today (5 keys × 3 languages). If you add more,
+consider either non-placeholder msgids or a test asserting that every registered type's keys still format
+against its expected param set.
+
 ## Infra
 - **Daily window-scan / digest** = a generic dcm **management command**; apps declare it in
   `project.yaml infra.scheduled_commands` (reuses **CI-3**, the same mechanism TE-3 uses). One scan
@@ -138,8 +258,20 @@ notify(
   domain-object delete (no FK constraint); **GenericPrefetch** in list endpoints.
 
 ## Chip vs Messaging
-jg messaging (user↔user chat) **stays its own domain**. Only the **bell badge aggregation** is
-unified. Out of scope for the notifications base.
+jg messaging (user↔user chat) **stays its own domain** — that part held, and Phase B (`MSG-*`) will
+centralize the domain itself, not merge it into notifications.
+
+> **CORRECTED 2026-07-30 — the badge sentence was reversed in practice.** This section used to say
+> "Only the **bell badge aggregation** is unified." The shipped decision is the **opposite**
+> (operator, 2026-07-30): **bell = system notifications, chat badge = human messages.** jg's
+> new-message type is registered with `email` + `push` and explicitly **without `chip`**, plus
+> `feed_visible=False`, so a chat message never reaches the bell or its unread count. Verified live on
+> staging: as the recipient of a real chat message — with `notify()` genuinely firing — the bell stayed
+> at `0`, `feed/unread-count/` returned `{"count": 0}` and `feed/` was empty.
+>
+> Note that the channel list alone would **not** have achieved this: the canonical feed reads
+> `NotificationRecipient` rows directly and ignores which channels were dispatched. Keeping a type out of
+> the bell requires `feed_visible=False` (NOTIF-19), not merely omitting `chip`.
 
 ## Phases
 - **P1** — canonical `Notification` + `NotificationRecipient` + `NotificationDelivery` + Router +
@@ -324,9 +456,16 @@ or `failed` after the real send attempt — mirroring `notify()`'s own
 pending-then-resolved delivery pattern, so a send failure stays distinguishable
 from a real success instead of being recorded as delivered either way.
 
-**P3 — popup channel** (uncritical): NOTIF-12 (ucm, was NOTIF-11 — renumbered for the jg cutover/drop
-split) hook the wizard renderer as the popup channel; seen-status on `NotificationRecipient`, not the
-onboarding-progress store.
+**P3 — popup channel: ✓ done** (NOTIF-12, ucm `c8e222f` / dcm `1612429`; was NOTIF-11, renumbered for the
+jg cutover/drop split). The presentational dialog shell was extracted out of `OnboardingWizard` and is now
+shared; seen/dismissed status lives on `NotificationRecipient`, not the onboarding-progress store (D-F7
+holds). A blocking onboarding step takes precedence, and the two surfaces never stack two dialogs.
+
+**It ships with zero producers, deliberately.** No notification type in any app declares `popup` in
+`eligible_channels`, so `resolve_channels()` routes nothing to it — the channel is wired and inactive until
+an app opts a type in. This was an explicit operator decision made with that evidence in hand; the path is
+proven end-to-end only by a test-local type. Do not describe the popup channel as "available" to users
+without first checking that a producer exists.
 
 hram/spesix consume from P1 onward as their **first** notification implementation (they never diverge —
 the reason for building the contract now).

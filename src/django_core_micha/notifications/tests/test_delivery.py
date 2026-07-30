@@ -131,6 +131,15 @@ def test_push_to_users_targets_only_each_users_group(monkeypatch):
     ]
 
 
+def test_notification_envelope_is_additive_and_does_not_mutate_input():
+    payload = {"type": "notification.status", "notification_id": 1}
+
+    wrapped = delivery.notification_envelope(payload)
+
+    assert wrapped == {"type": "notification.status", "notification_id": 1, "envelope": "notification"}
+    assert payload == {"type": "notification.status", "notification_id": 1}
+
+
 @pytest.mark.django_db
 def test_push_subscription_cannot_be_claimed_by_another_user():
     user_model = get_user_model()

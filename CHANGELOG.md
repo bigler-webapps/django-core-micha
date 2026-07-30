@@ -1,5 +1,51 @@
 # Changelog
 
+## [2.35.0] — 2026-07-30
+
+### Added
+
+**NOTIF-19 — transient dispatch params + feed-visibility policy**
+
+- `notify()` accepts a new keyword-only `transient=` mapping. Its values reach the email and push dispatchers for rendering but are **never** written to `Notification.content` and never enter the `dedup_key`. This makes "deliver it, but do not persist it" expressible for the first time: a consuming app whose source field is encrypted at rest (jg-ferien's `Message.body`/`title` are Fernet `EncryptedTextField`s with an audited privileged-read path) can now render an excerpt into an email or push without leaving a cleartext copy in an unencrypted table.
+- The values travel through the `ctx` parameter that `Dispatcher.deliver` has always declared but that `dispatch()` never populated — no dispatcher signature changed; the seam was already there.
+- **`ChipDispatcher` and `PopupDispatcher` deliberately ignore `ctx`.** They broadcast `notification.content` over the WebSocket, so keeping them clean is the point of the feature; a transient value must never reach the wire. Covered by a negative test.
+- `_render_content` merges `transient` over `content["params"]` (transient wins on a key collision) into a new dict, leaving the persisted content untouched.
+- `_render_content` now logs a warning when a `.format()` call fails and it falls back to the raw source key. The fallback behaviour itself is unchanged — it previously happened silently, which with transient params would ship a literal `{excerpt}` as an email body with no signal.
+- `NotificationType` gains `feed_visible: bool = True`, plus an `iter_feed_hidden_type_keys()` accessor. `CanonicalInboxView` and `CanonicalUnreadCountView` now additionally exclude registered types that set it `False`, alongside the existing `category="todo"` exclusion. This lets a type be delivery-only (email/push) without appearing in the canonical bell feed — previously omitting the `chip` channel suppressed only the realtime push, while the REST feed still listed every recipient row.
+- **Exclusion is by explicit registration, never by absence.** A `Notification` whose `notification_type` is no longer registered stays visible, so historical rows are unaffected.
+- Fully backward compatible: both features default to today's behaviour. A caller passing neither argument produces a byte-identical persisted row, the same dispatch calls (`ctx=None`), and identical feed contents. Verified additionally that `exclude(field__in=<empty set>)` emits no `WHERE` clause at all, so the 13 consumer repos that register no hidden type see no query change.
+
+## [2.34.0] — 2026-07-30
+
+### Added
+
+**NOTIF-12 — popup channel delivery**
+
+- `PopupDispatcher.deliver` now actually delivers instead of logging a "pending" stub: it sends the same `push_to_users(notification_envelope({...}))` shape as `ChipDispatcher`, with a new `"channel": "popup"` field inside the payload so a client can tell the two apart (the envelope itself stays the NOTIF-13 domain-level `"notification"` discriminator — no second envelope value was introduced).
+- `ChipDispatcher` gains the same `"channel": "chip"` field for symmetry. Both dispatchers also now include `"recipient_id"` (the `NotificationRecipient` pk) — `feed/mark/` resolves ids against that model, not `Notification`, and only the recipient pk lets a WS-pushed notification be marked seen/dismissed correctly before the next REST feed refresh.
+- Backward compatible: a payload with no `channel` field (an app pinned to an older dcm) keeps behaving exactly as before (feed entry + unread increment) on the ucm side.
+- **The popup channel ships with zero producers.** No notification type in dcm, jg-ferien, cockpit, hram, spesix, or survey_app declares `eligible_channels: ["popup"]`, so `resolve_channels()` will not route anything to it until an app opts a type in — this release only wires the dispatcher and is inactive until then. Proven end-to-end by a test-local notification type only (`test_dispatch.py`).
+- `prefs.py`, `router.py`, and `resolve_channels` are unchanged — popup was already a valid channel there.
+
+## [2.33.0] — 2026-07-30
+
+### Added
+
+**NOTIF-13 — realtime envelope discriminator**
+
+- Every WS payload `push_to_users` sends for this app now additionally carries `"envelope": "notification"`, via a new `delivery.notification_envelope()` authoring helper — additive only, all existing fields (`type`, `notification_id`, `status`, `content`, etc.) are unchanged.
+- Lets a consumer's Layer-1 realtime primitive (ucm 2.13.0's `subscribe(envelope, handler)`) route this domain's messages without misreading a second stream (e.g. messaging) as a notification. A payload with no `envelope` field (older dcm) is still treated as a notification by that primitive's default, so this is fully backward-compatible in both directions.
+- `push_to_users`'s own signature is unchanged; only the two existing producers (`views.py`'s status-change broadcast, `dispatch.py`'s `ChipDispatcher`) now wrap their payload through the helper before sending.
+
+## [2.32.0] — 2026-07-29
+
+### Added
+
+**`TodoOverride.created_by` audit field**
+
+- Added `created_by` (nullable FK, `SET_NULL`, `related_name="+"`) to `TodoOverride`, migration `0006_todooverride_created_by` — additive, no default touching existing rows, no unique-constraint change.
+- Restores audit attribution (which user set an override) that jg-ferien's NOTIF-10 cutover onto canonical `TodoOverride` would otherwise have silently dropped versus the legacy `EventTaskOverride.created_by` it replaced. Never exposed via any API response.
+
 ## [2.31.0] — 2026-07-28
 
 ### Added

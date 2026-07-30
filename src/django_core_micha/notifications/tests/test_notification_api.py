@@ -57,6 +57,21 @@ def test_render_content_falls_back_to_empty_string_for_missing_keys():
     assert link == ""
 
 
+def test_render_content_transient_values_win_and_missing_params_log_a_warning(caplog):
+    content = {
+        "title_key": "Title {name}",
+        "body_key": "Body {missing}",
+        "params": {"name": "persisted"},
+    }
+
+    with caplog.at_level("WARNING", logger="django_core_micha.notifications.dispatch"):
+        title, body, _ = dispatch._render_content(content, user=None, transient={"name": "transient"})
+
+    assert title == "Title transient"
+    assert body == "Body {missing}"
+    assert "Notification body rendering failed" in caplog.text
+
+
 def test_notification_type_registry_returns_registered_policy_and_rejects_unknown():
     notification_type = make_type()
     register_notification_type(notification_type)
@@ -125,7 +140,72 @@ def test_notify_creates_canonical_rows_dispatches_and_deduplicates(monkeypatch):
         "email": 2,
         "push": 2,
     }
-    assert calls["chip"][0][1] == {"type": "test_notice", "content": content, "notification_id": first.pk}
+    chip_recipient = NotificationRecipient.objects.get(notification=first, user=calls["chip"][0][0][0])
+    assert calls["chip"][0][1] == {
+        "type": "test_notice",
+        "content": content,
+        "notification_id": first.pk,
+        "recipient_id": chip_recipient.pk,
+        "envelope": "notification",
+        "channel": "chip",
+    }
+
+
+@pytest.mark.django_db
+def test_notify_transient_values_render_only_for_email_and_push_without_affecting_persistence(monkeypatch):
+    register_notification_type(make_type())
+    user = make_user("transient-delivery")
+    NotificationPreference.objects.create(user=user, email_opt_in=True, push_opt_in=True)
+    PushSubscription.objects.create(
+        user=user,
+        endpoint="https://push.test/transient-delivery",
+        p256dh="key",
+        auth="auth",
+    )
+    emails = []
+    pushes = []
+    monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: None)
+    monkeypatch.setattr(dispatch, "_send_email", lambda **kwargs: emails.append(kwargs))
+    monkeypatch.setattr(dispatch, "_send_push", lambda **kwargs: pushes.append(kwargs))
+    content = {
+        "title_key": "Title {name}",
+        "body_key": "Body {excerpt}",
+        "params": {"name": "persisted"},
+        "link": "/next",
+    }
+
+    notification = notify(
+        type="test_notice",
+        recipients=user,
+        content=content,
+        transient={"name": "transient", "excerpt": "confidential excerpt"},
+    )
+
+    assert notification.content == content
+    assert notification.dedup_key == Notification.build_dedup_key("test_notice", None)
+    assert emails == [{"title": "Title transient", "body": "Body confidential excerpt", "url": "/next", "users": [user], "bypass_preference_check": True}]
+    assert pushes == [{"title": "Title transient", "body": "Body confidential excerpt", "url": "/next", "users": [user], "bypass_preference_check": True}]
+
+
+@pytest.mark.django_db
+def test_notify_without_transient_passes_none_to_dispatch_and_preserves_existing_behavior(monkeypatch):
+    register_notification_type(make_type(defaults=["chip"], eligible=["chip"]))
+    user = make_user("no-transient")
+    calls = []
+    monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: None)
+    original_dispatch = dispatch.dispatch
+
+    def capture_dispatch(channel, *, notification, recipient, ctx=None):
+        calls.append(ctx)
+        return original_dispatch(channel, notification=notification, recipient=recipient, ctx=ctx)
+
+    monkeypatch.setattr("django_core_micha.notifications.api.dispatch", capture_dispatch)
+    content = {"title_key": "Title", "body_key": "Body", "params": {"stored": "value"}}
+
+    notification = notify(type="test_notice", recipients=user, content=content)
+
+    assert calls == [None]
+    assert notification.content == content
 
 
 @pytest.mark.django_db

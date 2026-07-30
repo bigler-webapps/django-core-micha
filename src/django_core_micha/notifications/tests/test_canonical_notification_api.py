@@ -30,9 +30,12 @@ def make_user(username):
     )
 
 
-def make_recipient(user, *, suffix, created_at=None, seen_at=None, dismissed_at=None, done_at=None, notifiable=None):
+def make_recipient(
+    user, *, suffix, notification_type="test_notice", created_at=None, seen_at=None, dismissed_at=None,
+    done_at=None, notifiable=None,
+):
     notification = Notification.objects.create(
-        notification_type="test_notice",
+        notification_type=notification_type,
         category="system",
         urgency="normal",
         content={"title_key": "Notification.Title", "body_key": "Notification.Body", "params": {"key": suffix}},
@@ -176,6 +179,30 @@ def test_canonical_unread_count_excludes_dismissed_unseen_rows():
 
     assert response.status_code == 200
     assert response.data == {"count": 1}
+
+
+@pytest.mark.django_db
+def test_feed_visible_policy_hides_only_explicitly_hidden_registered_types():
+    user = make_user("feed-visibility")
+    register_notification_type(NotificationType(
+        key="hidden-delivery-only", category="system", mode="event", resolution="user-done",
+        default_channels=["email"], eligible_channels=["email"], feed_visible=False,
+    ))
+    visible_type = NotificationType(
+        key="visible-default", category="system", mode="event", resolution="user-done",
+        default_channels=["chip"], eligible_channels=["chip"],
+    )
+    register_notification_type(visible_type)
+    hidden = make_recipient(user, suffix="hidden", notification_type="hidden-delivery-only")
+    visible = make_recipient(user, suffix="visible", notification_type="visible-default")
+    historical = make_recipient(user, suffix="historical", notification_type="removed-registration")
+
+    response = get_feed(user)
+
+    assert visible_type.feed_visible is True
+    assert {item["id"] for item in response.data["results"]} == {visible.pk, historical.pk}
+    assert hidden.pk not in {item["id"] for item in response.data["results"]}
+    assert get_unread_count(user).data == {"count": 2}
 
 
 @pytest.mark.django_db
@@ -334,6 +361,7 @@ def test_canonical_mark_broadcasts_one_full_status_payload_per_notification(monk
                 "type": "notification.status",
                 "notification_id": seen.notification_id,
                 "status": {"seen": True, "dismissed": False, "done": True},
+                "envelope": "notification",
             },
         ),
         (
@@ -342,6 +370,7 @@ def test_canonical_mark_broadcasts_one_full_status_payload_per_notification(monk
                 "type": "notification.status",
                 "notification_id": dismissed.notification_id,
                 "status": {"seen": False, "dismissed": True, "done": True},
+                "envelope": "notification",
             },
         ),
     ]
