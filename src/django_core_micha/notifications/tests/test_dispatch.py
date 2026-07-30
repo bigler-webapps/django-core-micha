@@ -70,6 +70,38 @@ def test_retryable_delivery_is_retried_but_permanent_failure_is_not(monkeypatch)
 
 
 @pytest.mark.django_db
+def test_transient_context_never_leaks_to_chip_or_popup_wire_payloads(monkeypatch):
+    register_notification_type(
+        NotificationType(
+            key="transient-websocket",
+            category="system",
+            mode="event",
+            resolution="user-done",
+            default_channels=["chip", "popup"],
+            eligible_channels=["chip", "popup"],
+        )
+    )
+    user = get_user_model().objects.create_user(
+        username="transient-websocket", email="transient-websocket@example.test", password="password"
+    )
+    payloads = []
+    monkeypatch.setattr(dispatch_module, "push_to_users", lambda users, payload: payloads.append(payload))
+    content = {"title_key": "Title", "body_key": "Body", "params": {"stored": "value"}}
+
+    notification = notify(
+        type="transient-websocket",
+        recipients=user,
+        content=content,
+        transient={"excerpt": "confidential excerpt"},
+    )
+
+    assert {payload["channel"] for payload in payloads} == {"chip", "popup"}
+    assert all(payload["content"] == content for payload in payloads)
+    assert all("confidential excerpt" not in str(payload) for payload in payloads)
+    assert notification.content == content
+
+
+@pytest.mark.django_db
 def test_dispatch_exception_fails_only_its_channel_and_keeps_sibling_delivery(monkeypatch):
     register_notification_type(
         NotificationType(

@@ -30,6 +30,7 @@ from .serializers import (
 )
 from .todo.registry import iter_registered_todo_types
 from .todo.service import derive_active_todos, derive_todos_for_user
+from .types import iter_feed_hidden_type_keys
 
 
 class NotificationPreferenceView(generics.RetrieveUpdateAPIView):
@@ -156,6 +157,7 @@ class CanonicalInboxView(generics.ListAPIView):
         event_recipients = (
             NotificationRecipient.objects.filter(user=self.request.user)
             .exclude(notification__category="todo")
+            .exclude(notification__notification_type__in=iter_feed_hidden_type_keys())
             .select_related("notification", "notification__content_type")
             .order_by("-notification__created_at")
         )
@@ -202,7 +204,11 @@ class CanonicalUnreadCountView(views.APIView):
             user=request.user,
             seen_at__isnull=True,
             dismissed_at__isnull=True,
-        ).exclude(notification__category="todo").count()
+        ).exclude(
+            notification__category="todo"
+        ).exclude(
+            notification__notification_type__in=iter_feed_hidden_type_keys()
+        ).count()
         todo_count = sum(recipient.seen_at is None for recipient in derive_active_todos(request.user))
         return Response({"count": event_count + todo_count})
 

@@ -18,6 +18,10 @@ class NotificationType:
     persist_until_done: bool = False
     critical: bool = False
     window: dict | None = None
+    # Applies to persisted, event-authored rows only. The canonical feed derives todo
+    # entries live from the todo registry, which never consults this flag, so setting it
+    # False on a mode="provider" type has no effect.
+    feed_visible: bool = True
 
     def __post_init__(self):
         if self.mode not in VALID_NOTIFICATION_MODES:
@@ -40,3 +44,9 @@ def get_notification_type(key: str) -> NotificationType:
         return _REGISTRY[key]
     except KeyError as exc:
         raise LookupError(f"Unknown notification type: {key}") from exc
+
+
+def iter_feed_hidden_type_keys() -> set[str]:
+    """Return registered notification types explicitly excluded from the canonical feed."""
+
+    return {key for key, notification_type in _REGISTRY.items() if not notification_type.feed_visible}

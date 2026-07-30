@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.35.0] — 2026-07-30
+
+### Added
+
+**NOTIF-19 — transient dispatch params + feed-visibility policy**
+
+- `notify()` accepts a new keyword-only `transient=` mapping. Its values reach the email and push dispatchers for rendering but are **never** written to `Notification.content` and never enter the `dedup_key`. This makes "deliver it, but do not persist it" expressible for the first time: a consuming app whose source field is encrypted at rest (jg-ferien's `Message.body`/`title` are Fernet `EncryptedTextField`s with an audited privileged-read path) can now render an excerpt into an email or push without leaving a cleartext copy in an unencrypted table.
+- The values travel through the `ctx` parameter that `Dispatcher.deliver` has always declared but that `dispatch()` never populated — no dispatcher signature changed; the seam was already there.
+- **`ChipDispatcher` and `PopupDispatcher` deliberately ignore `ctx`.** They broadcast `notification.content` over the WebSocket, so keeping them clean is the point of the feature; a transient value must never reach the wire. Covered by a negative test.
+- `_render_content` merges `transient` over `content["params"]` (transient wins on a key collision) into a new dict, leaving the persisted content untouched.
+- `_render_content` now logs a warning when a `.format()` call fails and it falls back to the raw source key. The fallback behaviour itself is unchanged — it previously happened silently, which with transient params would ship a literal `{excerpt}` as an email body with no signal.
+- `NotificationType` gains `feed_visible: bool = True`, plus an `iter_feed_hidden_type_keys()` accessor. `CanonicalInboxView` and `CanonicalUnreadCountView` now additionally exclude registered types that set it `False`, alongside the existing `category="todo"` exclusion. This lets a type be delivery-only (email/push) without appearing in the canonical bell feed — previously omitting the `chip` channel suppressed only the realtime push, while the REST feed still listed every recipient row.
+- **Exclusion is by explicit registration, never by absence.** A `Notification` whose `notification_type` is no longer registered stays visible, so historical rows are unaffected.
+- Fully backward compatible: both features default to today's behaviour. A caller passing neither argument produces a byte-identical persisted row, the same dispatch calls (`ctx=None`), and identical feed contents. Verified additionally that `exclude(field__in=<empty set>)` emits no `WHERE` clause at all, so the 13 consumer repos that register no hidden type see no query change.
+
 ## [2.34.0] — 2026-07-30
 
 ### Added

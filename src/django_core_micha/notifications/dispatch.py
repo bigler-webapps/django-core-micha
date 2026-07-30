@@ -41,21 +41,24 @@ def _recipient_language(user) -> str:
     return language if language in {"de", "en", "fr"} else "de"
 
 
-def _render_content(content: dict, user) -> tuple[str, str, str]:
+def _render_content(content: dict, user, transient=None) -> tuple[str, str, str]:
     """Render text for a recipient, falling back to source keys on bad translations."""
 
     title_key = str(content.get("title_key", ""))
     body_key = str(content.get("body_key", ""))
     params = content.get("params", {})
     params = params if isinstance(params, dict) else {}
+    params = {**params, **(transient or {})}
     with translation.override(_recipient_language(user)):
         try:
             title = gettext(title_key).format(**params) if title_key else ""
         except Exception:
+            logger.warning("Notification title rendering failed; falling back to source key", exc_info=True)
             title = title_key
         try:
             body = gettext(body_key).format(**params) if body_key else ""
         except Exception:
+            logger.warning("Notification body rendering failed; falling back to source key", exc_info=True)
             body = body_key
     link = content.get("link", "")
     return title, body, link if isinstance(link, str) else ""
@@ -82,7 +85,7 @@ class EmailDispatcher:
     channel = "email"
 
     def deliver(self, notification, recipient, ctx=None) -> DeliveryResult:
-        title, body, url = _render_content(notification.content, recipient.user)
+        title, body, url = _render_content(notification.content, recipient.user, ctx)
         _send_email(
             title=title,
             body=body,
@@ -97,7 +100,7 @@ class PushDispatcher:
     channel = "push"
 
     def deliver(self, notification, recipient, ctx=None) -> DeliveryResult:
-        title, body, url = _render_content(notification.content, recipient.user)
+        title, body, url = _render_content(notification.content, recipient.user, ctx)
         _send_push(
             title=title,
             body=body,
@@ -151,7 +154,7 @@ def get_dispatcher(channel: str) -> Dispatcher | None:
     return _DISPATCHERS.get(channel)
 
 
-def dispatch(channel: str, *, notification, recipient) -> bool | None:
+def dispatch(channel: str, *, notification, recipient, ctx=None) -> bool | None:
     """Dispatch one channel, returning success, failure, or pending-stub status."""
 
     dispatcher = get_dispatcher(channel)
@@ -161,7 +164,7 @@ def dispatch(channel: str, *, notification, recipient) -> bool | None:
 
     for attempt in range(_MAX_DELIVERY_ATTEMPTS):
         try:
-            result = dispatcher.deliver(notification, recipient)
+            result = dispatcher.deliver(notification, recipient, ctx)
         except Exception:
             logger.exception("Notification %s dispatch failed for %s", notification.pk, channel)
             return False

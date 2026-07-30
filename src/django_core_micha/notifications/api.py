@@ -64,7 +64,9 @@ def _get_delivery_with_retry(*, recipient, channel):
         )
 
 
-def notify(*, type, recipients, category=None, urgency="normal", content, notifiable=None, channels=None) -> Notification:
+def notify(
+    *, type, recipients, category=None, urgency="normal", content, notifiable=None, channels=None, transient=None
+) -> Notification:
     """Create or reuse a logical message, then dispatch it per recipient and channel."""
 
     ntype = get_notification_type(type)
@@ -88,7 +90,7 @@ def notify(*, type, recipients, category=None, urgency="normal", content, notifi
             delivery, created = _get_delivery_with_retry(recipient=recipient, channel=channel)
             if not created:
                 continue
-            result = dispatch(channel, notification=notification, recipient=recipient)
+            result = dispatch(channel, notification=notification, recipient=recipient, ctx=transient)
             if result is True:
                 delivery.status = "sent"
                 delivery.sent_at = timezone.now()
