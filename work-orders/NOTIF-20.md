@@ -1,5 +1,64 @@
 # WORK ORDER NOTIF-20 (jg-ferien + cockpit) — turn on notification retention
 
+> **STATUS 2026-07-30: BLOCKED — paused by operator decision, returned for re-authoring.**
+> Not implemented. Nothing was committed for this WO. See "ORCHESTRATOR FINDING" below: the
+> envelope's core premise — that adding `prune_notifications` to `project.yaml` makes the janitor
+> run where the data grows — does not hold for production. Re-author with the role constraint in
+> view before handing this back for implementation.
+
+---
+
+## ORCHESTRATOR FINDING (2026-07-30) — why this was paused
+
+**The `scheduled_commands` role is granted to `staging` only, so scope A/B cannot bound production
+growth — the exact thing this WO exists to fix.**
+
+Verified chain:
+1. `webapp-management/.github/workflows/scheduled-commands.yml` (daily `0 4 * * *`) resolves its
+   targets via `resolve_inventory_targets.py --role scheduled_commands` (`:76`), and explicitly
+   tolerates zero carriers: *"No target currently carries the 'scheduled_commands' role — nothing
+   to run."*
+2. `webapp-management/project.yaml:82` grants `roles: [traefik, restore, scheduled_commands]` to
+   **`staging`**.
+3. `main-prod`, `contact-prod` and `innoservice-prod` all carry
+   `[traefik, backup, maintenance, janitor, ssh_sync, restore]` — **no `scheduled_commands`**
+   (`project.yaml:51,59,64`).
+
+So adding `prune_notifications` to jg's `infra.scheduled_commands` schedules it on **staging only**.
+Production jg — the environment actually writing one `Notification` + one `NotificationRecipient`
+per chat message since NOTIF-14 (`37ea0a7`), invisible by design via `feed_visible=False` — keeps
+growing exactly as today. This is precisely the WO's own named risk ("if the scheduled command is
+registered but never actually fires, nothing fails visibly"), and the WO's Expected Outcome ("row
+growth is bounded") would be false for prod while appearing done.
+
+Granting `main-prod` the role is a change to prod-affecting deploy config in a **platform repo**,
+which this WO explicitly forbids ("If it needs platform-side work, do NOT build that here — report
+it"). Hence: reported, not built.
+
+### Second-order finding — larger than the janitor, outside this WO
+`send_todo_digests` (jg's only other scheduled command, and the live todo digest that NOTIF-8/9/10
+cut over to) runs through this **same** role-gated mechanism. On the evidence above it therefore
+also runs on staging only, i.e. jg's production todo digest may not be running at all. This is
+pre-existing and unrelated to retention — worth its own investigation, not a fold-in here.
+
+### Scope B answer (cockpit) — mechanism is fine, no platform work needed
+`resolve_app_inventory.py` is fully generic: `register_scheduled_commands()` (`:188-205`) runs for
+every app's server and, when distinct, its staging server, gated only on a non-empty
+`infra.scheduled_commands`; a missing `infra:` block simply yields `[]` (`:131-133`). cockpit is in
+the inventory with `production: main-prod` / `staging: staging`. So **adding an `infra:` block to
+cockpit's `project.yaml` is mechanically sufficient** — it inherits the same staging-only ceiling.
+
+### What a re-authored WO needs to decide
+- Whether to grant `main-prod` (and the other prod boxes) the `scheduled_commands` role — a
+  webapp-management WO, prod-affecting, approval-gated.
+- Whether the first production run stays dry-run-gated once the role exists (scope C should survive
+  re-authoring; the unpruned backlog argument is unchanged and still correct).
+- Whether staging-only scheduling is worth landing on its own in the meantime.
+
+*(Scope C was not exercised: no `--dry-run` was run, since the WO was paused before implementation.)*
+
+---
+
 **EXECUTION DIRECTIVE.** Implement through `codex exec` in the background — invoked **directly via
 Bash** (never the `debugger`/`*_coder` Agent wrappers) with **both** flags `--skip-git-repo-check`
 and `--dangerously-bypass-approvals-and-sandbox`, prompt passed as a positional argument from this
