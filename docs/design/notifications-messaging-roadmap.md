@@ -1,6 +1,7 @@
 # Notifications & Messaging — Target Picture, Must-Reads, Roadmap
 
-Status: **planning** (2026-07-29). Forward-looking companion to
+Status: **Phase A nearly closed** (updated 2026-07-30; Layer 1 built, jg fully cut over — see §3/§4).
+Forward-looking companion to
 [`notifications-platform.md`](./notifications-platform.md) (the canonical, approved **notifications**
 design). This doc adds: the **must-reads** for anyone picking up the workstream, the **consolidated
 3-layer target picture** (notifications **and** messaging), the verified **current state**, and the
@@ -62,12 +63,16 @@ Layer 2 — Notifications domain            Layer 3 — Messaging domain
      ucm bell/settings)                        rides Layer 1; PRODUCES notify()
 ```
 
-- **Layer 1 — transport.** Today ucm's `NotificationsProvider` owns one socket but is hardwired to
-  notification message-types; jg works around this with its **own** local `NotificationsContext` that
-  multiplexes (`registerMessageCallback`) so `MessagingContext` can ride it. **Target:** promote that
-  multiplexing into ucm as a generic realtime primitive (one socket, subscribe by message-type) + a dcm
-  consumer that carries multiple stream types; retire jg's local context. This is the **hinge**: it
-  finishes the notifications frontend (jg adopts the ucm bell) **and** is the substrate messaging needs.
+- **Layer 1 — transport. ✓ Built (NOTIF-13, ucm 2.13.0 / dcm 2.33.0).** ucm's `NotificationsProvider`
+  now owns the socket through a generic `useRealtime()` / `subscribe(envelope, handler)` primitive
+  (`src/notifications/realtime.jsx`); jg's local `NotificationsContext` is deleted (NOTIF-15). Messages
+  are routed by an **envelope discriminator that names the domain** (`envelope: "notification"`,
+  `envelope: "messaging"`), and an unknown envelope is ignored rather than mistaken for a notification.
+  A payload with no `envelope` defaults to `"notification"`, so an un-bumped backend keeps working.
+  **Correction to the original plan:** it called for "a dcm consumer that carries multiple stream types".
+  That was never needed — `delivery.py::push_to_users` already fans arbitrary payloads into the per-user
+  group and `NotificationConsumer.message()` is stream-agnostic. The whole problem lived in ucm's
+  client-side catch-all. dcm's share was the envelope contract plus the `notification_envelope()` helper.
 - **Layer 2 — notifications.** Canonical model, router, `notify()`, category×channel prefs, dispatchers,
   `feed/*`, todo channel, bell/settings. Design: `notifications-platform.md`. Remaining closure work in §4.
 - **Layer 3 — messaging.** A shared full-parity chat subsystem (Conversation/Message/Participant/
@@ -80,15 +85,16 @@ Layer 1. Nothing in Layer 1 depends on 2 or 3.
 
 ---
 
-## 3. Current state (verified 2026-07-29)
+## 3. Current state (verified 2026-07-30)
 
 | Domain | Central (dcm/ucm) | Local in jg | Verdict |
 |---|---|---|---|
-| System notifications | dcm 2.31.0: canonical model, `notify()` router, prefs matrix, 5 dispatchers, `feed/*`, `NotificationConsumer`. ucm 2.12.0: provider/bell/settings/sw.js | jg's **message-notify** producer (`messaging/services.py`) still calls legacy `deliver_push_email`/`push_to_users`, NOT `notify()` | Delivery central; jg's 2nd producer NOT on the canonical router |
-| Onboarding | dcm `onboarding` + ucm provider/wizard | — | fully central |
-| Task/todo engine | dcm todo channel (NOTIF-8/8b, 2.29.0) | **NOTIF-9 landed (bb0580b):** providers registered, overlays dual-written to canonical, `/api/tasks/` dcm-derive-backed via adapter. Legacy engine + 3 overlay tables still LIVE (dual-write expand) | data-side centralized; contract phase = NOTIF-10 (cutover) + NOTIF-11 (drop) |
-| Messaging | none | 100% local: 9 models, 25 REST endpoints, event-chat-sync signals, ~2400-LOC `Thread.jsx`, encrypted-at-rest | greenfield centrally |
-| Realtime transport | ucm provider = notifications-only, not pluggable | jg-local `NotificationsContext` multiplexes the one socket for messaging | not extracted |
+| System notifications | dcm 2.35.0: canonical model, `notify()` router, prefs matrix, 5 dispatchers (popup now real), `feed/*`, `NotificationConsumer`, `transient=` + `feed_visible`. ucm 2.14.0: provider/bell/settings/sw.js/popup surface | **NOTIF-14 landed (`37ea0a7`):** the message-notify producer is on `notify()` with a registered type rendered per recipient language; all six messaging WS payloads tagged `envelope: "messaging"` | central; jg has **no** legacy producer left except the unscheduled one in NOTIF-18 |
+| Onboarding | dcm `onboarding` + ucm provider/wizard (dialog shell now shared with the popup channel) | — | fully central |
+| Task/todo engine | dcm todo channel (NOTIF-8/8b/8c, 2.32.0) | **NOTIF-10 landed (`e8d5d76`):** all live reads+writes cut over to canonical, dual-write shims retired. The 3 overlay tables still exist but are unread | cutover complete; only the drop (NOTIF-11) remains, gated on the jg promotion |
+| Messaging | none | 100% local: 9 models, 25 REST endpoints, event-chat-sync signals, ~2400-LOC `Thread.jsx`, encrypted-at-rest | greenfield centrally — unchanged, this is Phase B |
+| Realtime transport | **✓ extracted (NOTIF-13):** ucm `useRealtime()`/`subscribe(envelope, handler)`, one socket, unknown envelopes ignored | **NOTIF-15 landed (`5148677`):** local `NotificationsContext` deleted; `MessagingContext` **and** `Thread.jsx` re-subscribe via Layer 1 | done |
+| Retention | `prune_notifications` exists (NOTIF-4) | — | **scheduled nowhere, in any repo** — see NOTIF-20 |
 
 ---
 
@@ -98,28 +104,46 @@ Canonical register = dcm `WORK_ORDERS.md`; app-side rows in app registers. Each 
 train (publish-from-main, **registry live-check before app pin-bump**). `[approval]` = schema migration on
 a production model.
 
-### WO-numbering reconciliation (fix a collision introduced 2026-07-29)
-Splitting the old single-step NOTIF-10 into **NOTIF-10 (cutover)** + **NOTIF-11 (drop)** (jg) collided with
-the platform register's **NOTIF-11 = popup channel**. Resolution: **popup → NOTIF-12** (it is uncut/future;
-annotate "was NOTIF-11", precedent: it was already "was NOTIF-10"). Action item: update dcm
-`WORK_ORDERS.md` row 38 + `notifications-platform.md` P3 accordingly. jg's pushed NOTIF-10/11 are unchanged.
+### WO-numbering reconciliation (two collisions, both resolved)
+1. **2026-07-29:** splitting the old single-step NOTIF-10 into **NOTIF-10 (cutover)** + **NOTIF-11 (drop)**
+   (jg) collided with the platform register's **NOTIF-11 = popup channel**. Resolved: **popup → NOTIF-12**
+   (uncut/future, annotated "was NOTIF-11").
+2. **2026-07-29, same day:** an unplanned dcm schema fix was filed as **NOTIF-13**, which this document had
+   already allocated to the transport extraction — but §4's IDs had never been mirrored into the register,
+   so the "highest used ID" check could not see them. Resolved: the schema fix became **NOTIF-8c** (it
+   extends the NOTIF-8/8b `TodoOverride` line), and NOTIF-13..17 were registered immediately.
+
+**Lesson, and the standing rule now:** an ID that exists only in this document does not exist. Every WO
+named here must have a register row in dcm `WORK_ORDERS.md` at the moment it is named, even with no WO file.
 
 ### Phase A — close notifications cleanly (Layer 2 done + Layer 1 extracted)
 | WO | Repo | Scope | Depends on | Status |
 |---|---|---|---|---|
 | NOTIF-9 | jg | adopt dcm todo channel (dual-write expand) | NOTIF-8 | ✓ done (bb0580b) |
-| NOTIF-10 | jg | **read/write cutover** to canonical-only (derive/digest reads + 4 live endpoints; retire dual-write shims); tables stay | NOTIF-9 | planned |
-| NOTIF-11 | jg | **drop** the 3 legacy overlay tables (guarded, one-way) `[approval]` | NOTIF-10 staging-green + no-residual-access proof | planned |
-| NOTIF-12 | ucm | popup channel via wizard renderer (was NOTIF-11) | NOTIF-6 | planned (P3, uncritical) |
-| NOTIF-13 | ucm+dcm | **Layer-1 transport extraction:** generalize ucm provider to pluggable-by-message-type + dcm multi-stream consumer; keep S112 + single-socket invariant. The hinge to messaging. | NOTIF-6 | planned |
-| NOTIF-14 | jg | **message-notify → `notify()`:** move jg's 2nd producer (`messaging/services.py`) off legacy `deliver_push_email`/`push_to_users` onto the canonical router + a registered type | — (backend delivery; independent) | planned |
-| NOTIF-15 | jg | **jg bell/feed adoption:** frontend onto ucm `NotificationsProvider`/`NotificationBell` on `feed/*`; retire jg-local `NotificationsContext` (messaging re-subscribes via Layer 1) | NOTIF-13 | planned |
-| NOTIF-16 | hram | hram `notify()` adoption (state-only "job done") | Layer 2 stable | planned |
-| NOTIF-17 | spesix | spesix `notify()` adoption (state-only "job done") | Layer 2 stable | planned |
+| NOTIF-10 | jg | **read/write cutover** to canonical-only (derive/digest reads + 4 live endpoints; retire dual-write shims); tables stay | NOTIF-9 | ✓ done (`e8d5d76`) |
+| NOTIF-11 | jg | **drop** the 3 legacy overlay tables (guarded, one-way) `[approval]` | NOTIF-10 promoted to **prod** + no-residual-access proof | planned — **the only WO gated on the jg `develop → main` promotion** |
+| NOTIF-12 | ucm+dcm | popup channel via the shared dialog shell (was NOTIF-11) | NOTIF-13 | ✓ done (ucm `c8e222f` / dcm `1612429`) — **ships with zero producers, deliberately** |
+| NOTIF-13 | ucm+dcm | **Layer-1 transport extraction** — the hinge to messaging | NOTIF-6 | ✓ done (ucm `7a83ee9` / dcm `de77335`) |
+| NOTIF-14 | jg | **message-notify → `notify()`** + tag the six messaging WS payloads `envelope: "messaging"` | — | ✓ done (`37ea0a7`) |
+| NOTIF-15 | jg | **jg bell/feed adoption:** ucm provider + bell; delete jg's local `NotificationsContext` | NOTIF-13 **and NOTIF-14** | ✓ done (`5148677`) |
+| NOTIF-16 | hram | hram `notify()` adoption (state-only "job done") | Layer 2 stable | planned — **backlog, no demand recorded** |
+| NOTIF-17 | spesix | spesix `notify()` adoption (state-only "job done") | Layer 2 stable | planned — **backlog, no demand recorded** |
+| NOTIF-18 | jg | retire the **unscheduled** legacy task-digest producer (a deletion, not a migration) | — | planned |
+| NOTIF-19 | dcm | `notify(transient=…)` + `NotificationType.feed_visible` | raised by NOTIF-14 | ✓ done (`bea6ad0`, 2.35.0) |
+| NOTIF-20 | jg+cockpit | schedule the never-scheduled `prune_notifications` janitor | — | planned |
+| NOTIF-21 | dcm+jg | per-type retention: expose `expires_at` on `notify()` | NOTIF-20 | planned |
 
-Ordering notes: NOTIF-13 (transport) precedes NOTIF-15 (bell live-updates + retiring jg's local context).
-NOTIF-14 is independent (backend delivery) and can land any time. NOTIF-16/17 are per-app adoption tracks,
-parallelizable once Layer 2 is stable.
+**Ordering — corrected.** The original note here claimed *"NOTIF-14 is independent (backend delivery) and
+can land any time"*. **That was wrong.** jg's six messaging WS payloads are chat live-sync, not
+notifications, so they must never go through `notify()` — but they were envelope-less, and Layer 1 defaults
+an envelope-less payload to the notification envelope. Retiring jg's local socket owner without tagging them
+first would have poured the entire chat stream into the notification feed. The tagging therefore lives in
+NOTIF-14, and **NOTIF-15 depends on it**. The rest holds: NOTIF-13 precedes NOTIF-15; NOTIF-16/17 are
+parallelizable per-app tracks.
+
+**What actually remains to call Phase A closed:** NOTIF-18, NOTIF-20, and NOTIF-11 (which waits on the jg
+promotion). NOTIF-16/17 are backlog — nothing is broken in hram or spesix without them — and NOTIF-21 is
+tuning that only matters once the janitor from NOTIF-20 actually runs.
 
 ### Phase B — messaging v1 (shared full-parity, greenfield, spesix-first) — prefix `MSG-*`
 Starts **after** Phase A closes (Layer 1 extracted). Co-design from **two real shapes**: jg (reference,
@@ -142,8 +166,18 @@ full feature set) + spesix (first live consumer).
 - **Messaging encryption key-management (multi-app).** Full-parity + hard at-rest requirement means the
   shared service must own an encryption scheme that works across tenants/apps without a single shared key
   that widens blast radius. Resolve in MSG-1 before any model lands.
-- **Transport extraction backward-compat (NOTIF-13).** Retiring jg's local `NotificationsContext` must not
-  drop messaging's live updates; the pluggable primitive must carry both stream types before jg cuts over.
+- ~~**Transport extraction backward-compat (NOTIF-13).**~~ **Resolved.** The primitive carries both stream
+  types, an envelope-less payload still defaults to the notification envelope, and jg's chat re-subscribed
+  without loss. Residual: end-to-end chat over the socket was never browser-verified (no local
+  events/conversations, no seed command) — it rests on unit coverage of all nine handler paths and an exact
+  envelope match on both sides. Exercise chat once on staging before the jg promotion.
+- **Cross-repo release chains discovered mid-implementation** — the biggest real cost driver so far, not a
+  hypothetical. Three times in four days an app-level WO turned out to need a dcm capability that did not
+  exist (`transient=`/`feed_visible` in NOTIF-19; `created_by` in NOTIF-8c; `expires_at`, still open as
+  NOTIF-21), each forcing a publish → PyPI check → pin bump → redeploy cycle in the middle of the WO. When
+  scoping any WO that calls `notify()`, settle four questions **first**: which channels, whether a persistent
+  notification row is wanted at all, whether it should be **feed-visible** (independent of the channels!),
+  and what may be persisted in `content` and the `dedup_key`. Missing the last two is what caused NOTIF-19.
 - **Full-parity abstraction from 2 shapes.** jg + spesix are the only real inputs; rule-of-three risk is
   accepted (operator) with the YAGNI guardrail — generalize to jg+spesix needs, not speculatively.
 - **jg data migration (Phase C).** Encrypted-at-rest content is the hard part; greenfield-first buys time

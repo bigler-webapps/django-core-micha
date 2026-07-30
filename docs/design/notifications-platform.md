@@ -97,6 +97,7 @@ payment_due:
   resolution: state-resolved   # user-done | state-resolved | expired
   default_channels:  [todo, push, email]
   eligible_channels: [todo, push, email, chip]   # popup NOT allowed for this type
+  feed_visible: true       # NOTIF-19; set False to keep a type out of feed/ entirely
   persistUntilDone: true
   window: { base: zahlungsfrist, remindBefore: P7D }
   critical: false
@@ -125,6 +126,35 @@ notify(
    push/chip/popup projections clear.
 5. Prefs: user turns finance→push off → next time todo only. Derived types self-heal (payment lands
    → provider stops emitting → `state-resolved`).
+
+## Two things `notify()` does NOT decide for you (NOTIF-19, dcm 2.35.0)
+
+Both were added after a real near-miss in jg's NOTIF-14 and are easy to get wrong, because the obvious
+assumption about each is false.
+
+**1. `feed_visible` — channel selection does NOT control feed visibility.**
+The canonical feed (`CanonicalInboxView` / `CanonicalUnreadCountView`) reads a user's
+`NotificationRecipient` rows **directly**. It does not look at which channels were dispatched. So omitting
+`chip` does **not** keep a type out of the bell — the row is created by `notify()` and the feed shows it
+anyway. To keep a type out of `feed/` and `feed/unread-count/`, set `feed_visible=False` on the registered
+type. jg's new-message type does exactly this: it delivers via email/push, but human chat messages never
+appear in the bell (bell = system notifications, chat badge = human messages).
+*Does not apply to provider-derived todo rows, which the feed handles on their own path.*
+
+**2. `transient=` — everything in `content` is persisted forever, and feeds the `dedup_key`.**
+`notify(content=…)` writes into a plain `JSONField` that survives for the retention window and
+participates in deduplication. That is wrong for anything sensitive or per-instance volatile. Pass such
+values as `transient=` instead: they are rendered into email/push (via the previously unused `ctx` on
+`Dispatcher.deliver`) but are **never** persisted into `Notification.content` and **never** enter the
+`dedup_key`.
+This exists because jg's first NOTIF-14 design would have copied cleartext excerpts of
+Fernet-`EncryptedTextField` chat bodies into the unencrypted `content` column, bypassing the audited
+privileged-read path. **Rule of thumb: if the value is encrypted at rest, user-authored, or unique per
+message, it belongs in `transient=`, not `content`.**
+
+**Still missing (NOTIF-21):** `notify()` does not accept `expires_at`, although `Notification.expires_at`
+exists and `prune_notifications` honours it. Until then every type shares the global
+`NOTIFICATIONS_RETENTION_DAYS` (default 90) — too long for high-volume types like chat.
 
 ## Infra
 - **Daily window-scan / digest** = a generic dcm **management command**; apps declare it in
@@ -324,9 +354,16 @@ or `failed` after the real send attempt — mirroring `notify()`'s own
 pending-then-resolved delivery pattern, so a send failure stays distinguishable
 from a real success instead of being recorded as delivered either way.
 
-**P3 — popup channel** (uncritical): NOTIF-12 (ucm, was NOTIF-11 — renumbered for the jg cutover/drop
-split) hook the wizard renderer as the popup channel; seen-status on `NotificationRecipient`, not the
-onboarding-progress store.
+**P3 — popup channel: ✓ done** (NOTIF-12, ucm `c8e222f` / dcm `1612429`; was NOTIF-11, renumbered for the
+jg cutover/drop split). The presentational dialog shell was extracted out of `OnboardingWizard` and is now
+shared; seen/dismissed status lives on `NotificationRecipient`, not the onboarding-progress store (D-F7
+holds). A blocking onboarding step takes precedence, and the two surfaces never stack two dialogs.
+
+**It ships with zero producers, deliberately.** No notification type in any app declares `popup` in
+`eligible_channels`, so `resolve_channels()` routes nothing to it — the channel is wired and inactive until
+an app opts a type in. This was an explicit operator decision made with that evidence in hand; the path is
+proven end-to-end only by a test-local type. Do not describe the popup channel as "available" to users
+without first checking that a producer exists.
 
 hram/spesix consume from P1 onward as their **first** notification implementation (they never diverge —
 the reason for building the contract now).
