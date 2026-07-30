@@ -1,6 +1,7 @@
 # Notifications & Messaging — Target Picture, Must-Reads, Roadmap
 
-Status: **Phase A nearly closed** (updated 2026-07-30; Layer 1 built, jg fully cut over — see §3/§4).
+Status: **Phase A CLOSED 2026-07-30.** Layer 1 built and jg fully cut over; the legacy overlay tables are
+dropped and no legacy notification producer remains. Next up is Phase B (`MSG-*`), starting with MSG-1.
 Forward-looking companion to
 [`notifications-platform.md`](./notifications-platform.md) (the canonical, approved **notifications**
 design). This doc adds: the **must-reads** for anyone picking up the workstream, the **consolidated
@@ -122,7 +123,7 @@ named here must have a register row in dcm `WORK_ORDERS.md` at the moment it is 
 |---|---|---|---|---|
 | NOTIF-9 | jg | adopt dcm todo channel (dual-write expand) | NOTIF-8 | ✓ done (bb0580b) |
 | NOTIF-10 | jg | **read/write cutover** to canonical-only (derive/digest reads + 4 live endpoints; retire dual-write shims); tables stay | NOTIF-9 | ✓ done (`e8d5d76`) |
-| NOTIF-11 | jg | **drop** the 3 legacy overlay tables (guarded, one-way) `[approval]` | NOTIF-10 promoted to **prod** + no-residual-access proof | planned — **the only WO gated on the jg `develop → main` promotion** |
+| NOTIF-11 | jg | **drop** the 3 legacy overlay tables (guarded, one-way) `[approval]` | NOTIF-10 promoted to **prod** + no-residual-access proof | ✓ done (`bec2a0e`) — migration `0063`, tables confirmed absent via `information_schema` |
 | NOTIF-12 | ucm+dcm | popup channel via the shared dialog shell (was NOTIF-11) | NOTIF-13 | ✓ done (ucm `c8e222f` / dcm `1612429`) — **ships with zero producers, deliberately** |
 | NOTIF-13 | ucm+dcm | **Layer-1 transport extraction** — the hinge to messaging | NOTIF-6 | ✓ done (ucm `7a83ee9` / dcm `de77335`) |
 | NOTIF-14 | jg | **message-notify → `notify()`** + tag the six messaging WS payloads `envelope: "messaging"` | — | ✓ done (`37ea0a7`) |
@@ -130,6 +131,7 @@ named here must have a register row in dcm `WORK_ORDERS.md` at the moment it is 
 | NOTIF-16 | hram | hram `notify()` adoption (state-only "job done") | Layer 2 stable | planned — **backlog, no demand recorded** |
 | NOTIF-17 | spesix | spesix `notify()` adoption (state-only "job done") | Layer 2 stable | planned — **backlog, no demand recorded** |
 | NOTIF-18 | jg | retire the **unscheduled** legacy task-digest producer (a deletion, not a migration) | — | ✓ done (`cbb14e3`) — last legacy `deliver_push_email` producer in jg is gone |
+| NOTIF-22 | jg | move the deep task coverage onto the canonical path, retire `build_tasks_for_user` | NOTIF-11 | ✓ done (`1f52c92`, `7442794`) — **TE-2 duty pin HELD on the canonical path**, so no hidden NOTIF-9/10 regression |
 | NOTIF-19 | dcm | `notify(transient=…)` + `NotificationType.feed_visible` | raised by NOTIF-14 | ✓ done (`bea6ad0`, 2.35.0) |
 | NOTIF-20 | jg+cockpit | schedule the `prune_notifications` janitor | — | **dropped** 2026-07-30 — no benefit at these volumes; surfaced the `scheduled_commands` role gap instead (→ `CI-5`) |
 | NOTIF-21 | dcm+jg | per-type retention: expose `expires_at` on `notify()` | NOTIF-20 | **dropped** 2026-07-30 — moot without NOTIF-20; the API gap itself is real and recorded |
@@ -142,10 +144,14 @@ first would have poured the entire chat stream into the notification feed. The t
 NOTIF-14, and **NOTIF-15 depends on it**. The rest holds: NOTIF-13 precedes NOTIF-15; NOTIF-16/17 are
 parallelizable per-app tracks.
 
-**What remains to call Phase A closed: NOTIF-11 alone** — the drop of jg's three legacy overlay tables,
-which waits on the jg `develop → main` promotion (NOTIF-10 must reach prod first). Everything else in the
-phase has landed. NOTIF-16/17 are backlog — nothing is broken in hram or spesix without them.
-NOTIF-20/21 were dropped on 2026-07-30: retention is not worth turning on at these volumes.
+**Phase A is closed.** NOTIF-11 dropped the three legacy overlay tables (`bec2a0e`) and NOTIF-22 moved the
+deep task coverage onto the canonical path and retired the last dead wrapper (`1f52c92`). NOTIF-22 also settled
+the one open correctness question the cutover had left: the TE-2 pin — a cancelled registration whose
+`GroupMembership` survives must still surface its duty task — **holds on the canonical path**, so NOTIF-9/10
+hid no regression behind the legacy harness.
+
+**Still open, deliberately:** NOTIF-16/17 (hram/spesix `notify()` adoption) remain backlog with no demand
+recorded — nothing is broken in either app without them. They are not a Phase A prerequisite.
 
 **One thing left the workstream, deliberately.** Investigating NOTIF-20 revealed that the platform's
 `scheduled_commands` role is granted to `staging` only, so no app command has ever executed in production —
