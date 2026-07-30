@@ -1,10 +1,22 @@
 # WORK ORDER NOTIF-20 (jg-ferien + cockpit) — turn on notification retention
 
-> **STATUS 2026-07-30: BLOCKED — paused by operator decision, returned for re-authoring.**
-> Not implemented. Nothing was committed for this WO. See "ORCHESTRATOR FINDING" below: the
-> envelope's core premise — that adding `prune_notifications` to `project.yaml` makes the janitor
-> run where the data grows — does not hold for production. Re-author with the role constraint in
-> view before handing this back for implementation.
+> **STATUS 2026-07-30: DROPPED — operator decision. Not implemented, never will be as specified.**
+> Nothing was committed for this WO. Kept in the repository because the investigation below is the
+> valuable part; the retention work itself is cancelled.
+>
+> **Why dropped:** retention brings no real benefit at these volumes. With a 90-day cutoff nothing
+> would be deleted for 90 days anyway, so there was never the cliff the envelope implied, and the
+> privacy concern that originally motivated it is already solved by NOTIF-19's `transient=` — chat
+> text is never persisted into `Notification.content`. `prune_notifications` stays in dcm, unused and
+> reactivatable should a consumer ever produce high volume. NOTIF-21 (per-type TTL) is dropped with it.
+>
+> **What it produced instead, and why it was worth running:** the Orchestrator finding below — that
+> the `scheduled_commands` role is granted to `staging` only — turned out not to be an oversight but
+> **CI-3's own documented staging-first gate**, whose register note says prod servers get the role
+> "only after a green staging dispatch + operator OK (separate mini-commit)". That completion step is
+> now authored as **`webapp-management/work-orders/CI-5.md`**, with the real risk it exposed: the first
+> production run of `send_todo_digests` would fan out every eligible reminder threshold at once,
+> and that command has no `--dry-run`.
 
 ---
 

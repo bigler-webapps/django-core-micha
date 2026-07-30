@@ -94,7 +94,8 @@ Layer 1. Nothing in Layer 1 depends on 2 or 3.
 | Task/todo engine | dcm todo channel (NOTIF-8/8b/8c, 2.32.0) | **NOTIF-10 landed (`e8d5d76`):** all live reads+writes cut over to canonical, dual-write shims retired. The 3 overlay tables still exist but are unread | cutover complete; only the drop (NOTIF-11) remains, gated on the jg promotion |
 | Messaging | none | 100% local: 9 models, 25 REST endpoints, event-chat-sync signals, ~2400-LOC `Thread.jsx`, encrypted-at-rest | greenfield centrally — unchanged, this is Phase B |
 | Realtime transport | **✓ extracted (NOTIF-13):** ucm `useRealtime()`/`subscribe(envelope, handler)`, one socket, unknown envelopes ignored | **NOTIF-15 landed (`5148677`):** local `NotificationsContext` deleted; `MessagingContext` **and** `Thread.jsx` re-subscribe via Layer 1 | done |
-| Retention | `prune_notifications` exists (NOTIF-4) | — | **scheduled nowhere, in any repo** — see NOTIF-20 |
+| Retention | `prune_notifications` exists (NOTIF-4) | — | **deliberately not scheduled** (NOTIF-20/21 dropped 2026-07-30) — no benefit at these volumes, and `transient=` already keeps chat text out of `content`. Reactivatable if a consumer ever produces high volume |
+| Scheduled commands | role `scheduled_commands` is carried by **`staging` only** — CI-3's documented staging-first gate | jg declares `send_todo_digests`, the estate's only scheduled command | so **no app command has ever run in production**; the completion step is `webapp-management/work-orders/CI-5.md` |
 
 ---
 
@@ -130,8 +131,8 @@ named here must have a register row in dcm `WORK_ORDERS.md` at the moment it is 
 | NOTIF-17 | spesix | spesix `notify()` adoption (state-only "job done") | Layer 2 stable | planned — **backlog, no demand recorded** |
 | NOTIF-18 | jg | retire the **unscheduled** legacy task-digest producer (a deletion, not a migration) | — | planned |
 | NOTIF-19 | dcm | `notify(transient=…)` + `NotificationType.feed_visible` | raised by NOTIF-14 | ✓ done (`bea6ad0`, 2.35.0) |
-| NOTIF-20 | jg+cockpit | schedule the never-scheduled `prune_notifications` janitor | — | planned |
-| NOTIF-21 | dcm+jg | per-type retention: expose `expires_at` on `notify()` | NOTIF-20 | planned |
+| NOTIF-20 | jg+cockpit | schedule the `prune_notifications` janitor | — | **dropped** 2026-07-30 — no benefit at these volumes; surfaced the `scheduled_commands` role gap instead (→ `CI-5`) |
+| NOTIF-21 | dcm+jg | per-type retention: expose `expires_at` on `notify()` | NOTIF-20 | **dropped** 2026-07-30 — moot without NOTIF-20; the API gap itself is real and recorded |
 
 **Ordering — corrected.** The original note here claimed *"NOTIF-14 is independent (backend delivery) and
 can land any time"*. **That was wrong.** jg's six messaging WS payloads are chat live-sync, not
@@ -141,9 +142,15 @@ first would have poured the entire chat stream into the notification feed. The t
 NOTIF-14, and **NOTIF-15 depends on it**. The rest holds: NOTIF-13 precedes NOTIF-15; NOTIF-16/17 are
 parallelizable per-app tracks.
 
-**What actually remains to call Phase A closed:** NOTIF-18, NOTIF-20, and NOTIF-11 (which waits on the jg
-promotion). NOTIF-16/17 are backlog — nothing is broken in hram or spesix without them — and NOTIF-21 is
-tuning that only matters once the janitor from NOTIF-20 actually runs.
+**What actually remains to call Phase A closed: NOTIF-18 and NOTIF-11** (the latter waits on the jg
+`develop → main` promotion). NOTIF-16/17 are backlog — nothing is broken in hram or spesix without them.
+NOTIF-20/21 were dropped on 2026-07-30: retention is not worth turning on at these volumes.
+
+**One thing left the workstream, deliberately.** Investigating NOTIF-20 revealed that the platform's
+`scheduled_commands` role is granted to `staging` only, so no app command has ever executed in production —
+CI-3's intended staging-first gate, still awaiting its documented completion. That is a platform concern,
+not a notifications one, and lives as `webapp-management/work-orders/CI-5.md`. It matters here only because
+jg's `send_todo_digests` — the digest NOTIF-8/9/10 cut over to — is the single command it would switch on.
 
 ### Phase B — messaging v1 (shared full-parity, greenfield, spesix-first) — prefix `MSG-*`
 Starts **after** Phase A closes (Layer 1 extracted). Co-design from **two real shapes**: jg (reference,
