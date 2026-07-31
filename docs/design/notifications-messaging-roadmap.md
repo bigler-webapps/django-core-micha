@@ -4,9 +4,11 @@ Status: **Phase A CLOSED 2026-07-30 · Phase B running.** Layer 1 built and jg f
 overlay tables are dropped and no legacy notification producer remains. MSG-1 is **done** (2026-07-31 —
 binding design: [`messaging-platform.md`](./messaging-platform.md)); the 2026-07-31 operator revision
 makes the build **consumer-agnostic** (jg first via MSG-5, spesix deferred); **MSG-2 is done — published
-dcm 2.36.0** (chunks 1–4, one independent review per chunk, 146/146 green). **MSG-3 (ucm surfaces) is the
-next block; the platform currently has zero consumers** — nothing in the estate exercises the messaging
-domain until MSG-3 + MSG-5 land.
+dcm 2.36.0**, extended by MSG-2b (2.36.1). **MSG-3 is done — published ucm 2.16.0** — but a
+post-completion three-way audit found substantial parity and contract gaps on both sides, now cut as
+**`MSG-2c`** (dcm) and **`MSG-3b`** (ucm); see §5 for the systemic cause. **MSG-5 should not start until
+both are closed.** The platform still has zero consumers — nothing in the estate exercises the messaging
+domain until MSG-5 lands.
 Forward-looking companion to
 [`notifications-platform.md`](./notifications-platform.md) (the canonical, approved **notifications**
 design). This doc adds: the **must-reads** for anyone picking up the workstream, the **consolidated
@@ -205,7 +207,9 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
 | MSG-1 | dcm(+design) | **Requirements + design doc**: generalize jg's messaging domain (Conversation kinds, Participant/read-state, Message + reactions/polls/attachments, event-chat-sync, WhatsApp-tick receipts) off the `Event` FK onto a generic scope; reconcile against spesix's concrete needs. **Encryption-at-rest key-management for a multi-app service = explicit design-risk block, resolved here.** Rides Layer 1; produces `notify()` for "new message". **✓ done 2026-07-31** (`0b3a47d`/`576c094` → the binding `messaging-platform.md`; "spesix's concrete needs" became a hypothetical paper test per the revision above). |
 | MSG-2 | dcm | messaging domain models + services + REST/realtime on the Layer-1 transport (**no new WS consumer** — corrected per design §Realtime; rides `push_to_users`) + `notify()` on new message + `notify(expires_at=…)` API. **✓ done 2026-07-31, published dcm 2.36.0** (chunks `7df9670`/`858f705`/`a6a4cf5`/`3ad7709`, publish `1d8c60d`; independent review per chunk, chunk 3 twice after the operator design calls on `app_key` tenant resolution + soft-delete redaction — see `messaging-platform.md` §"Tenant resolution and deletion semantics"). Its one open P3 (scoped DM forecloses first contact) is decided and cut as **MSG-2b** — see §5 |
 | MSG-2b | dcm | **scoped first-contact DM must be possible** — drop `DirectConversationView`'s participant-existence precondition; target-side tenant safety rests on `MessagingPolicy.can_open_direct` alone. Tier 1, no migration. Depends on MSG-2; **planned, runs before MSG-3.** Envelope `work-orders/MSG-2b.md` |
-| MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity. **Envelope authored 2026-07-31** in the target repo (`ui-core-micha/work-orders/MSG-3.md`); 5 chunks, carries `ui_reviewer`. Operator decisions: **redesign permitted** for layout/interaction with "No jg feature is lost" still binding and a written deviation list as a deliverable; UI validated through the new ucm dev harness. Preconditions: dcm 2.36.1 published · ucm `DX-1` done |
+| MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity. **Envelope authored 2026-07-31** in the target repo (`ui-core-micha/work-orders/MSG-3.md`); 5 chunks, carries `ui_reviewer`. Operator decisions: **redesign permitted** for layout/interaction with "No jg feature is lost" still binding and a written deviation list as a deliverable; UI validated through the new ucm dev harness. Preconditions: dcm 2.36.1 published · ucm `DX-1` done. **✓ done 2026-07-31, published ucm 2.16.0** (5 chunks, review per chunk, `ui_reviewer` clean, 139/139). Decomposition held (largest component 110 LOC). **A post-completion audit found substantial gaps → `MSG-2c` + `MSG-3b`** |
+| MSG-2c | dcm | **contract gaps found after MSG-3:** amend the design for a poll **read** path (none is specified), emit the 9 missing realtime frames (`services.py` has 3 `_publish` call sites against 12 designed), add `last_message` to the conversation payload. Blocks 7 rows of MSG-3b. WO file not yet authored |
+| MSG-3b | ucm | **parity + contract gaps found after MSG-3:** unread lifecycle (mark-read was never called — badges never clear), edit/delete, DM launcher, `reply_to_id`-vs-`reply_to` reply grouping, quoting, copy, image compression, and a contract-conformance test. 59-row capability checklist **is** the spec. Envelope `ui-core-micha/work-orders/MSG-3b.md` |
 | MSG-4 | spesix | spesix adopts the shared service — **deferred 2026-07-31**, backlog (no demand recorded); entry gate = the spesix demand confirmations |
 
 ### Phase C — adopters (MSG-5 pulled forward 2026-07-31; rest sketched)
@@ -227,6 +231,27 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
   already calls before creating any row, so the check was not only too strict but sat in front of the hook
   and pre-empted it. Core keeps tenant resolution and self-DM rejection. Sequenced **before MSG-3** so the
   ucm composer is not built against behaviour that would change at adoption.
+- **Both sides of the seam were tested against themselves — and every gate passed anyway.** The single
+  most important lesson of this workstream so far. MSG-2 shipped 146/146 green with four independent
+  chunk reviews; MSG-3 shipped 139/139 green with five chunk reviews and a clean `ui_reviewer`. A
+  three-way audit afterwards found: an entire missing capability area (unread never clears), two
+  features whose REST adapters had no caller (edit/delete, DM launcher), reply grouping that is inert
+  because the client reads `reply_to` while the server emits `reply_to_id`, a conversation preview
+  bound to a field the serializer never sends, a poll UI reading fields no endpoint returns, and 9 of
+  12 designed realtime frames that are never emitted. **None of it was catchable by either side's
+  tests**, because dcm tested its services and ucm tested its components against a mock whose surface
+  mirrors the *provider* rather than the *contract* — an endpoint with no caller is structurally
+  invisible to it. DX-1's envelope predicted exactly this ("a mock adapter can drift from the real
+  contract — shape fixtures from the design doc's REST/realtime sections, not from imagination") and
+  the prediction came true anyway. The fix is mechanical, not diligence-based: the contract-conformance
+  test in MSG-3b (an `api.js` export with no caller, or a handled frame the design does not list,
+  fails the build). Apply the same seam check to any future cross-repo contract in this estate.
+- **A parity requirement is unverifiable until someone writes the parity list.** MSG-3 made "no jg
+  feature is lost" binding and delegated the proof — a deviation list — to the party doing the work,
+  against a **file-level** inventory. Files pass as "represented" far too easily; capabilities do not.
+  The list came back claiming completeness and was wrong on edit, delete, DM launcher, mark-read,
+  quoting, copy and image compression. MSG-3b replaces it with a 59-row capability checklist authored
+  before implementation. Do this for MSG-5 too, and for any future adoption WO that claims parity.
 - **MSG-5 is now a visible change for jg users (operator decision 2026-07-31).** MSG-3 was granted a
   redesign licence for layout, composition and interaction — jg's current messaging UI is no longer a
   verbatim visual target. The feature floor is unchanged ("No jg feature is lost" stays binding, and
