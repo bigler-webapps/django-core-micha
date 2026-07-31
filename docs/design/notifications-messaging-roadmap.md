@@ -3,12 +3,16 @@
 Status: **Phase A CLOSED 2026-07-30 · Phase B running.** Layer 1 built and jg fully cut over; the legacy
 overlay tables are dropped and no legacy notification producer remains. MSG-1 is **done** (2026-07-31 —
 binding design: [`messaging-platform.md`](./messaging-platform.md)); the 2026-07-31 operator revision
-makes the build **consumer-agnostic** (jg first via MSG-5, spesix deferred); **MSG-2 is done — published
-dcm 2.36.0**, extended by MSG-2b (2.36.1). **MSG-3 is done — published ucm 2.16.0** — but a
-post-completion three-way audit found substantial parity and contract gaps on both sides, now cut as
-**`MSG-2c`** (dcm) and **`MSG-3b`** (ucm); see §5 for the systemic cause. **MSG-5 should not start until
-both are closed.** The platform still has zero consumers — nothing in the estate exercises the messaging
-domain until MSG-5 lands.
+makes the build **consumer-agnostic** (jg first via MSG-5, spesix deferred).
+
+**Phase B backend and surfaces are built (state 2026-08-01): dcm 2.38.0 · ucm 2.18.0.** MSG-2 shipped the
+domain and MSG-3 the surfaces; a post-completion three-way audit then found substantial parity and
+contract gaps on both sides, closed across four follow-up WOs — MSG-2b, MSG-2c, MSG-2d (dcm) and MSG-3b,
+MSG-3c (ucm). **Everything the audit found is delivered except checklist rows 27 and 42**, which dcm
+2.38.0 unblocked on the same day MSG-3c closed and which still need a small ucm WO. §5 records the
+systemic causes — they are the most reusable thing in this document. The platform still has **zero
+consumers**: nothing in the estate exercises the messaging domain until MSG-5 lands, and MSG-5 should
+not start while rows 27/42 are open.
 Forward-looking companion to
 [`notifications-platform.md`](./notifications-platform.md) (the canonical, approved **notifications**
 design). This doc adds: the **must-reads** for anyone picking up the workstream, the **consolidated
@@ -210,8 +214,8 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
 | MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity. **Envelope authored 2026-07-31** in the target repo (`ui-core-micha/work-orders/MSG-3.md`); 5 chunks, carries `ui_reviewer`. Operator decisions: **redesign permitted** for layout/interaction with "No jg feature is lost" still binding and a written deviation list as a deliverable; UI validated through the new ucm dev harness. Preconditions: dcm 2.36.1 published · ucm `DX-1` done. **✓ done 2026-07-31, published ucm 2.16.0** (5 chunks, review per chunk, `ui_reviewer` clean, 139/139). Decomposition held (largest component 110 LOC). **A post-completion audit found substantial gaps → `MSG-2c` + `MSG-3b`** |
 | MSG-2c | dcm | **contract gaps found after MSG-3:** implement the poll **read** path (the design gap is closed — see `messaging-platform.md` §"Poll read contract and conversation preview", 2026-07-31), emit the 8 missing realtime frames (`services.py` has 3 `_publish` call sites; `attachment_ready` is now recorded as reserved-and-unemitted, so 8 not 9), add `last_message` to the conversation payload. Additive, no schema change. Envelope `work-orders/MSG-2c.md`. **✓ done 2026-07-31, published dcm 2.37.0** (`1399d05`) — independent `reviewer` caught a real P1 (`open_direct` re-broadcast `conversation_upsert` on every reopen of an existing DM; fixed by gating on the `created` flag, plus a matching no-op guard on reactions, both with regression tests). **This unblocks rows 38, 51-53 and 56-58 of MSG-3b** |
 | MSG-3b | ucm | **parity + contract gaps found after MSG-3:** unread lifecycle (mark-read was never called — badges never clear), edit/delete, DM launcher, `reply_to_id`-vs-`reply_to` reply grouping, quoting, copy, image compression, and a contract-conformance test. 59-row capability checklist **is** the spec. Envelope `ui-core-micha/work-orders/MSG-3b.md`. **✓ done 2026-07-31, published ucm 2.17.0** — 6 chunks, review per chunk, WO-end `ui_reviewer` row-by-row, no findings. Nine rows left BLOCKED: seven of them wrongly (dcm 2.37.0 had shipped mid-flight → `MSG-3c`), two correctly (→ `MSG-2d`) |
-| MSG-2d | dcm | **the two read-side gaps MSG-2c did not cover:** readable thread reply state (`reply_count`/`last_reply_at` viewer-independent, `thread_last_read_at` REST-only) and `external_key` on the conversation payload. Additive, no schema change. Unblocks MSG-3b rows 27 and 42. Envelope `work-orders/MSG-2d.md` |
-| MSG-3c | ucm | **the seven rows MSG-3b blocked against a stale dcm version** (38, 51-53, 56-58): last-message preview + reorder, full poll rendering, and the `reaction`/`poll_updated` handlers that have never run against a real frame. Plus the deviation-doc correction and the version-pin rule. Envelope `ui-core-micha/work-orders/MSG-3c.md` |
+| MSG-2d | dcm | **the two read-side gaps MSG-2c did not cover:** readable thread reply state (`reply_count`/`last_reply_at` viewer-independent, `thread_last_read_at` REST-only) and `external_key` on the conversation payload. Additive, no schema change. Envelope `work-orders/MSG-2d.md`. **✓ done 2026-08-01, published dcm 2.38.0** (`8acf894`) — Codex ran out of credits, so the orchestrator implemented as the governed fallback and became author, making the independent review mandatory rather than routine; it earned its keep, catching a P1 where `.annotate()` silently drops `Meta.ordering` (GROUP BY suppresses it) — a real ~1/3 flake that would have shipped as undefined row order on Postgres. 467/467. **Unblocks MSG-3b rows 27 and 42** |
+| MSG-3c | ucm | **the seven rows MSG-3b blocked against a stale dcm version** (38, 51-53, 56-58): last-message preview + reorder, full poll rendering, and the `reaction`/`poll_updated` handlers that had never run against a real frame. Plus the deviation-doc correction and the version-pin rule. Envelope `ui-core-micha/work-orders/MSG-3c.md`. **✓ done 2026-08-01, published ucm 2.18.0** — the never-exercised handlers were indeed where the bugs were: three latent defects of one shape (a viewer-independent projection wiping viewer-specific state on merge), now a contract obligation in the design doc. Rows 27/42 re-verified against dcm's source, correctly still BLOCKED at 2.37.0 — freed by 2.38.0 the same day |
 | MSG-4 | spesix | spesix adopts the shared service — **deferred 2026-07-31**, backlog (no demand recorded); entry gate = the spesix demand confirmations |
 
 ### Phase C — adopters (MSG-5 pulled forward 2026-07-31; rest sketched)
@@ -262,6 +266,21 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
   than applied in passing because it changes what CI executes, and the first run may legitimately go
   red — which would itself be the finding. Root cause worth fixing beyond the one line: `testpaths` is
   an allowlist with no guard, so the next subpackage will repeat this silently.
+- **The version-pin rule worked on its first outing (2026-08-01).** MSG-3c re-verified the two remaining
+  BLOCKED rows against dcm's committed source rather than the WO text, recorded the result *with the
+  version* — "blocked as of dcm 2.37.0 … re-verified against 2.37.0: still absent" — and even noticed
+  dcm had uncommitted `MSG-2d` work in flight. dcm 2.38.0 has since shipped it, and because the pin is
+  there, seeing that rows 27 and 42 are now deliverable is a ten-second read instead of an
+  investigation. Cheap rule, immediate payoff; keep it on every cross-repo WO.
+- **Client-side field-name drift: two occurrences, still unguarded.** `reply_to` vs the server's
+  `reply_to_id` (MSG-3b) and `last_message.body` vs the server's `.excerpt` (MSG-3c) are the same defect:
+  the client reads a key the server never emits, tests pass because the fixtures are client-shaped, and
+  the feature is silently inert. MSG-3b's contract-conformance test closed the *export* and *frame-type*
+  gaps but not this one — it compares names of things, not the shape of payloads. Candidate fix, not yet
+  cut: have dcm emit a machine-readable contract snapshot (example payloads from the real serializers)
+  that ucm's tests assert against, so a renamed or absent field fails the build on the client side.
+  Until then the mitigation is the rule MSG-3c already applies — **fixtures must be server-shaped**,
+  copied from actual serializer output, never hand-written.
 - **Third occurrence, one layer up: a BLOCKED row is only as true as the day it was written.** MSG-3b
   started against dcm 2.36.1, recorded seven rows as blocked on a "future dcm work order", and closed
   with those rows undone — while dcm 2.37.0 (MSG-2c) had shipped exactly that work **mid-flight**. Six

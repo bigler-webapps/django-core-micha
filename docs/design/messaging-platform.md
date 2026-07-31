@@ -177,7 +177,18 @@ host owns what it means and how to display it, exactly as with `sender_id`.
 
 ## Realtime
 
-Every frame is `{envelope:'messaging',type,event_id,app_key,conversation_id,occurred_at,...}` and is emitted only to live policy-resolved users. Frames: `conversation_upsert`, `conversation_archived`, `message`, `message_edited`, `message_deleted`, `attachment_ready`, `reaction`, `poll_updated`, `delivered`, `read_state`, `thread_read_state`, `participant_changed`. **`attachment_ready` is reserved and deliberately unemitted (2026-07-31):** v1 has no scanner and the attachment pipeline validates, re-encodes and persists synchronously, so there is no asynchronous "ready" moment to signal. It stays in the frame vocabulary for the day a scan hook is installed; until then a client must not wait for it. Message frames carry safe serialization/API attachment URLs; receipt frames carry only aggregate unless permitted, never direct detail. All mutations commit before fan-out; handlers deduplicate `event_id`. Reconnect refetches REST state/cursors. ucm must destructure `const { subscribe } = useRealtime()` and depend on `subscribe`, never the recreated context object.
+Every frame is `{envelope:'messaging',type,event_id,app_key,conversation_id,occurred_at,...}` and is emitted only to live policy-resolved users. Frames: `conversation_upsert`, `conversation_archived`, `message`, `message_edited`, `message_deleted`, `attachment_ready`, `reaction`, `poll_updated`, `delivered`, `read_state`, `thread_read_state`, `participant_changed`. **`attachment_ready` is reserved and deliberately unemitted (2026-07-31):** v1 has no scanner and the attachment pipeline validates, re-encodes and persists synchronously, so there is no asynchronous "ready" moment to signal. It stays in the frame vocabulary for the day a scan hook is installed; until then a client must not wait for it. Message frames carry safe serialization/API attachment URLs; receipt frames carry only aggregate unless permitted, never direct detail. **Consumer obligation — the other half of viewer-independence (added 2026-08-01).** Because a frame
+carries no viewer-specific field *by construction*, a client that merges a frame by **replacing** the
+cached object silently destroys the viewer-specific state it had learned from REST: `voted_option_ids`,
+a reaction's own-`reacted` flags, `thread_last_read_at`. The rule that keeps one viewer's state off
+another viewer's wire also guarantees the field is missing from the payload the first viewer receives.
+**A frame must therefore be merged field-wise, preserving viewer-specific keys the frame does not
+carry — never as a wholesale object replacement.** The same applies to any REST response that is itself
+viewer-independent: confirming an optimistic mutation from it must not clear the viewer state the
+mutation just established. MSG-3c found three separate live bugs of exactly this shape in ucm
+(`poll_updated`, the `reaction` frame, and `toggleReaction`'s REST confirm), which is what promoted this
+from an implementation note to a contract obligation on every consumer. All mutations commit before
+fan-out; handlers deduplicate `event_id`. Reconnect refetches REST state/cursors. ucm must destructure `const { subscribe } = useRealtime()` and depend on `subscribe`, never the recreated context object.
 
 ## Notification contract
 
