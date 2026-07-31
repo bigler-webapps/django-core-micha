@@ -208,7 +208,7 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
 | MSG-2 | dcm | messaging domain models + services + REST/realtime on the Layer-1 transport (**no new WS consumer** — corrected per design §Realtime; rides `push_to_users`) + `notify()` on new message + `notify(expires_at=…)` API. **✓ done 2026-07-31, published dcm 2.36.0** (chunks `7df9670`/`858f705`/`a6a4cf5`/`3ad7709`, publish `1d8c60d`; independent review per chunk, chunk 3 twice after the operator design calls on `app_key` tenant resolution + soft-delete redaction — see `messaging-platform.md` §"Tenant resolution and deletion semantics"). Its one open P3 (scoped DM forecloses first contact) is decided and cut as **MSG-2b** — see §5 |
 | MSG-2b | dcm | **scoped first-contact DM must be possible** — drop `DirectConversationView`'s participant-existence precondition; target-side tenant safety rests on `MessagingPolicy.can_open_direct` alone. Tier 1, no migration. Depends on MSG-2; **planned, runs before MSG-3.** Envelope `work-orders/MSG-2b.md` |
 | MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity. **Envelope authored 2026-07-31** in the target repo (`ui-core-micha/work-orders/MSG-3.md`); 5 chunks, carries `ui_reviewer`. Operator decisions: **redesign permitted** for layout/interaction with "No jg feature is lost" still binding and a written deviation list as a deliverable; UI validated through the new ucm dev harness. Preconditions: dcm 2.36.1 published · ucm `DX-1` done. **✓ done 2026-07-31, published ucm 2.16.0** (5 chunks, review per chunk, `ui_reviewer` clean, 139/139). Decomposition held (largest component 110 LOC). **A post-completion audit found substantial gaps → `MSG-2c` + `MSG-3b`** |
-| MSG-2c | dcm | **contract gaps found after MSG-3:** implement the poll **read** path (the design gap is closed — see `messaging-platform.md` §"Poll read contract and conversation preview", 2026-07-31), emit the 8 missing realtime frames (`services.py` has 3 `_publish` call sites; `attachment_ready` is now recorded as reserved-and-unemitted, so 8 not 9), add `last_message` to the conversation payload. Additive, no schema change. Blocks 7 rows of MSG-3b. Envelope `work-orders/MSG-2c.md` |
+| MSG-2c | dcm | **contract gaps found after MSG-3:** implement the poll **read** path (the design gap is closed — see `messaging-platform.md` §"Poll read contract and conversation preview", 2026-07-31), emit the 8 missing realtime frames (`services.py` has 3 `_publish` call sites; `attachment_ready` is now recorded as reserved-and-unemitted, so 8 not 9), add `last_message` to the conversation payload. Additive, no schema change. Envelope `work-orders/MSG-2c.md`. **✓ done 2026-07-31, published dcm 2.37.0** (`1399d05`) — independent `reviewer` caught a real P1 (`open_direct` re-broadcast `conversation_upsert` on every reopen of an existing DM; fixed by gating on the `created` flag, plus a matching no-op guard on reactions, both with regression tests). **This unblocks rows 38, 51-53 and 56-58 of MSG-3b** |
 | MSG-3b | ucm | **parity + contract gaps found after MSG-3:** unread lifecycle (mark-read was never called — badges never clear), edit/delete, DM launcher, `reply_to_id`-vs-`reply_to` reply grouping, quoting, copy, image compression, and a contract-conformance test. 59-row capability checklist **is** the spec. Envelope `ui-core-micha/work-orders/MSG-3b.md` |
 | MSG-4 | spesix | spesix adopts the shared service — **deferred 2026-07-31**, backlog (no demand recorded); entry gate = the spesix demand confirmations |
 
@@ -231,6 +231,18 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
   already calls before creating any row, so the check was not only too strict but sat in front of the hook
   and pre-empted it. Core keeps tenant resolution and self-DM rejection. Sequenced **before MSG-3** so the
   ucm composer is not built against behaviour that would change at adoption.
+- **CI has never run a single messaging test. Open, needs an operator decision (found 2026-07-31).**
+  `pyproject.toml:39` sets `testpaths = ["tests", "src/django_core_micha/notifications/tests",
+  "src/django_core_micha/onboarding/tests"]` — an allowlist that was never extended when the
+  `messaging` subpackage was added in MSG-2. CI runs a bare `pytest -q`, which collects **401 tests and
+  zero of the 58 messaging tests**; they are only reachable by passing the path explicitly, which is
+  what every local "messaging suite green" figure across MSG-2 / MSG-2b / MSG-2c actually did. So the
+  promotion gate does not cover the messaging subsystem at all, and has not since it was created. It
+  also explains a symptom seen in MSG-2c: an implementer running plain `pytest` sees no messaging tests
+  and can reasonably conclude none are expected. The fix is one line; it is filed as dcm `DX-2` rather
+  than applied in passing because it changes what CI executes, and the first run may legitimately go
+  red — which would itself be the finding. Root cause worth fixing beyond the one line: `testpaths` is
+  an allowlist with no guard, so the next subpackage will repeat this silently.
 - **Both sides of the seam were tested against themselves — and every gate passed anyway.** The single
   most important lesson of this workstream so far. MSG-2 shipped 146/146 green with four independent
   chunk reviews; MSG-3 shipped 139/139 green with five chunk reviews and a clean `ui_reviewer`. A
