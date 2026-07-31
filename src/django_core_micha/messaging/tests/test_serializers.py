@@ -83,6 +83,49 @@ def test_last_message_is_none_bounded_and_reflects_special_kinds(serializer_doma
 
 
 @pytest.mark.django_db
+def test_reply_count_and_last_reply_at_count_soft_deleted_replies(serializer_domain):
+    _, conversation, users = serializer_domain
+    root = Message.objects.create(conversation=conversation, sender=users[0], body="root")
+    assert serialize_message(root)["reply_count"] == 0
+    assert serialize_message(root)["last_reply_at"] is None
+
+    first = Message.objects.create(conversation=conversation, sender=users[1], body="one", reply_to=root)
+    second = Message.objects.create(conversation=conversation, sender=users[1], body="two", reply_to=root)
+    data = serialize_message(Message.objects.get(pk=root.pk))
+    assert data["reply_count"] == 2 and data["last_reply_at"] == second.created_at
+
+    # A soft-deleted reply keeps its row (rendered as a tombstone) and must still count —
+    # excluding it would undercount against what the thread actually displays.
+    first.deleted_at = first.created_at
+    first.body = first.title = first.link_target = None
+    first.save(update_fields=["deleted_at", "body", "title", "link_target"])
+    data = serialize_message(Message.objects.get(pk=root.pk))
+    assert data["reply_count"] == 2 and data["last_reply_at"] == second.created_at
+
+
+@pytest.mark.django_db
+def test_external_key_is_null_unless_managed_or_broadcast(serializer_domain):
+    app, conversation, users = serializer_domain
+    scope = MessagingScope.objects.get(app=app, kind="global")
+    participant = ConversationParticipant.objects.get(conversation=conversation, user=users[0])
+    assert conversation.kind == "group"
+    assert serialize_conversation(conversation, participant)["external_key"] is None
+
+    def _external_key(kind, **extra):
+        row = Conversation.objects.create(app=app, scope=extra.pop("scope", scope), kind=kind, **extra)
+        ConversationParticipant.objects.create(conversation=row, user=users[0])
+        return serialize_conversation(row, ConversationParticipant.objects.get(conversation=row, user=users[0]))["external_key"]
+
+    assert _external_key("managed", external_key="event_all") == "event_all"
+    assert _external_key("broadcast", external_key="announcements") == "announcements"
+    assert _external_key("direct", user_low=users[0], user_high=users[1]) is None
+
+    from django.contrib.contenttypes.models import ContentType
+    object_scope = MessagingScope.objects.create(app=app, kind="object", content_type=ContentType.objects.get_for_model(get_user_model()), object_id=str(users[0].pk))
+    assert _external_key("object_thread", scope=object_scope) is None
+
+
+@pytest.mark.django_db
 def test_conversation_upsert_style_projection_excludes_participant_fields(serializer_domain):
     """The realtime `conversation_upsert` frame reuses `serialize_conversation_core`
     (not `serialize_conversation`) precisely because the latter's archived_at/muted/

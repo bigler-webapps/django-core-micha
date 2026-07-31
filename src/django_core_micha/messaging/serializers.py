@@ -4,6 +4,7 @@ These functions are deliberately the only place REST/realtime turn encrypted
 model fields into response data.  They never expose ciphertext, audit rows, or
 storage keys.
 """
+from django.db.models import Count, Max
 from rest_framework import serializers
 
 from .models import Poll
@@ -64,8 +65,21 @@ def serialize_poll(poll):
     }
 
 
+def _reply_stats(message):
+    # A queryset-level `.annotate(reply_count=..., last_reply_at=...)` (see views.py's
+    # list endpoints) sets these as real attributes on the instance, making this free;
+    # single-object fetches fall back to one small aggregate query here. Either way,
+    # a soft-deleted reply still counts — the row survives deletion as a tombstone, so
+    # excluding it would undercount against what the thread actually renders.
+    if hasattr(message, "reply_count"):
+        return message.reply_count, message.last_reply_at
+    agg = message.replies.aggregate(count=Count("id"), last=Max("created_at"))
+    return agg["count"], agg["last"]
+
+
 def serialize_message(message):
     app_key = message.conversation.app.app_key
+    reply_count, last_reply_at = _reply_stats(message)
     result = {
         "id": str(message.id), "conversation_id": str(message.conversation_id),
         "sender_id": message.sender_id, "kind": message.kind,
@@ -77,6 +91,7 @@ def serialize_message(message):
         "edited_at": message.edited_at, "deleted_at": message.deleted_at,
         "created_at": message.created_at, "attachments": [serialize_attachment(a) for a in message.attachments.all()],
         "reactions": serialize_reactions(message),
+        "reply_count": reply_count, "last_reply_at": last_reply_at,
     }
     if message.kind == "poll":
         try:
@@ -111,6 +126,7 @@ def serialize_conversation_core(conversation):
         "title": decrypt_text(app_key=conversation.app.app_key, value=conversation.title),
         "last_message_at": conversation.last_message_at,
         "last_message": serialize_last_message(conversation), "created_at": conversation.created_at,
+        "external_key": conversation.external_key,
     }
 
 

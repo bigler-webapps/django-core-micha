@@ -4,7 +4,7 @@ from __future__ import annotations
 from django.contrib.auth import get_user_model
 from django.core import signing
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Max, Q
 from django.shortcuts import get_object_or_404
 from django.http import FileResponse, Http404
 from django.utils import timezone
@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 
 from .models import (Conversation, ConversationParticipant, Message, MessagingScope,
-                     Poll, resolve_messaging_app, MessagingTenantResolutionError)
+                     MessageThreadReceipt, Poll, resolve_messaging_app, MessagingTenantResolutionError)
 from .policy import get_messaging_policy
 from .serializers import MessageInputSerializer, PollInputSerializer, serialize_conversation, serialize_message, serialize_poll
 from .services import (MessagingPermissionDenied, add_reaction, archive_conversation,
@@ -34,6 +34,44 @@ def _poll_response(poll, user):
     result = serialize_poll(poll)
     result["voted_option_ids"] = [str(option_id) for option_id in poll.options.filter(votes__user=user).values_list("id", flat=True)]
     return result
+
+
+def _with_reply_count(queryset):
+    """Free `reply_count`/`last_reply_at` on serialize_message for a list endpoint —
+    a soft-deleted reply row still counts, so no filter narrows the `replies` join.
+    An aggregate annotate() forces a GROUP BY, which silently drops Message.Meta's
+    default ordering (QuerySet.ordered goes False — Django only auto-applies default
+    ordering when query.group_by is None) — re-assert it explicitly or pagination
+    cursors (and plain list order) become undefined, most visibly on Postgres where a
+    GROUP BY with no ORDER BY has no guaranteed row order at all."""
+    return queryset.annotate(reply_count=Count("replies", distinct=True), last_reply_at=Max("replies__created_at")).order_by("created_at", "id")
+
+
+def _thread_receipt(message, user):
+    """thread_last_read_at is viewer-specific and REST-only — never part of
+    serialize_message's own output, or it would leak into the message/message_edited
+    realtime frames the same way voted_option_ids must never leak into poll_updated."""
+    return MessageThreadReceipt.objects.filter(root=message, user=user).values_list("last_read_at", flat=True).first()
+
+
+def _message_response(message, user):
+    data = serialize_message(message)
+    data["thread_last_read_at"] = _thread_receipt(message, user)
+    return data
+
+
+def _message_page_response(request, queryset, user):
+    """Cursor-paginated message list, with thread_last_read_at attached via exactly
+    one bulk query for the whole page (not per row) — the N+1 case this WO guards
+    against."""
+    rows, next_cursor = _paginate_rows(request, queryset)
+    receipts = dict(MessageThreadReceipt.objects.filter(user=user, root_id__in=[row.id for row in rows]).values_list("root_id", "last_read_at"))
+    results = []
+    for row in rows:
+        data = serialize_message(row)
+        data["thread_last_read_at"] = receipts.get(row.id)
+        results.append(data)
+    return Response({"results": results, "next_cursor": next_cursor})
 
 
 def _cursor(value):
@@ -62,7 +100,7 @@ def _limit(request):
     return value
 
 
-def _page(request, queryset, serializer):
+def _paginate_rows(request, queryset):
     limit, cursor = _limit(request), _decode_cursor(request.query_params.get("cursor"))
     if cursor:
         queryset = queryset.filter(Q(created_at__gt=cursor["created_at"]) | Q(created_at=cursor["created_at"], id__gt=cursor["id"]))
@@ -72,7 +110,7 @@ def _page(request, queryset, serializer):
         rows.pop()
         last = rows[-1]
         next_cursor = _cursor({"created_at": last.created_at.isoformat(), "id": str(last.id)})
-    return Response({"results": [serializer(row) for row in rows], "next_cursor": next_cursor})
+    return rows, next_cursor
 
 
 def _idempotency_request_id(request, values):
@@ -158,13 +196,14 @@ class ConversationCreateView(MessagingView):
 class ConversationMessagesView(MessagingView):
     def get(self, request, conversation_id):
         conversation = self._viewer_conversation(request, conversation_id)
-        return _page(request, Message.objects.filter(conversation=conversation, reply_to__isnull=True).select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes"), serialize_message)
+        queryset = _with_reply_count(Message.objects.filter(conversation=conversation, reply_to__isnull=True).select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes"))
+        return _message_page_response(request, queryset, request.user)
     def post(self, request, conversation_id):
         conversation = self._viewer_conversation(request, conversation_id); data = MessageInputSerializer(data=request.data); data.is_valid(raise_exception=True)
         values = _idempotency_request_id(request, data.validated_data)
         reply = get_object_or_404(Message, pk=values.pop("reply_to")) if values.get("reply_to") else None
         message, created = self._service(lambda: send_message(actor=request.user, conversation=conversation, reply_to=reply, **values))
-        return Response(serialize_message(message), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        return Response(_message_response(message, request.user), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class ConversationAttachmentView(MessagingView):
@@ -202,7 +241,7 @@ class ConversationAttachmentView(MessagingView):
                         raise ValidationError({"files": exc.messages}) from exc
                     raise
         message = Message.objects.select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes").get(pk=message.pk)
-        return Response(serialize_message(message), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        return Response(_message_response(message, request.user), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class AttachmentDownloadView(MessagingView):
@@ -224,11 +263,11 @@ class MessageDetailView(MessagingView):
     def _message(self, request, message_id):
         message = get_object_or_404(Message.objects.select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes"), pk=message_id)
         self._viewer_conversation(request, message.conversation_id); return message
-    def get(self, request, message_id): return Response(serialize_message(self._message(request, message_id)))
+    def get(self, request, message_id): return Response(_message_response(self._message(request, message_id), request.user))
     def patch(self, request, message_id):
         message = self._message(request, message_id)
         updated = self._service(lambda: edit_message(actor=request.user, message=message, body=request.data.get("body", message.body), title=request.data.get("title", message.title), link_target=request.data.get("link_target", message.link_target)))
-        return Response(serialize_message(updated))
+        return Response(_message_response(updated, request.user))
     def delete(self, request, message_id):
         from .services import soft_delete_message
         self._service(lambda: soft_delete_message(actor=request.user, message=self._message(request, message_id)))
@@ -239,7 +278,7 @@ class ReactionView(MessagingView):
     def post(self, request, message_id):
         message = get_object_or_404(Message, pk=message_id); self._participant_conversation(request, message.conversation_id)
         self._service(lambda: add_reaction(actor=request.user, message=message, emoji=request.data.get("emoji")))
-        return Response(serialize_message(Message.objects.prefetch_related("reactions", "attachments", "poll__options__votes").get(pk=message.pk)))
+        return Response(_message_response(Message.objects.prefetch_related("reactions", "attachments", "poll__options__votes").get(pk=message.pk), request.user))
     def delete(self, request, message_id, emoji):
         message = get_object_or_404(Message, pk=message_id); self._participant_conversation(request, message.conversation_id)
         self._service(lambda: remove_reaction(actor=request.user, message=message, emoji=emoji)); return Response(status=status.HTTP_204_NO_CONTENT)
@@ -296,7 +335,8 @@ class ThreadView(MessagingView):
     def get(self, request, root_id):
         root = get_object_or_404(Message.objects.select_related("conversation__app"), pk=root_id, reply_to__isnull=True)
         self._viewer_conversation(request, root.conversation_id)
-        return _page(request, Message.objects.filter(reply_to=root).select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes"), serialize_message)
+        queryset = _with_reply_count(Message.objects.filter(reply_to=root).select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes"))
+        return _message_page_response(request, queryset, request.user)
 
 
 class ThreadReadView(MessagingView):

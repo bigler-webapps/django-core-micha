@@ -284,6 +284,38 @@ def test_message_and_message_edited_frames_never_gain_voted_option_ids_when_poll
 
 
 @pytest.mark.django_db
+def test_message_and_message_edited_frames_never_gain_thread_last_read_at(domain, monkeypatch, django_capture_on_commit_callbacks):
+    """MSG-2d's second viewer-specific field must be held to the same rule as
+    voted_option_ids: thread_last_read_at is REST-only (added by views.py, never by
+    serialize_message itself), so it must never appear on a fanned-out frame — even
+    after the actor has an actual MessageThreadReceipt for this root."""
+    _, conversation, users, _ = domain
+    sent = _capture_frames(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        root, _ = send_message(actor=users[0], conversation=conversation, body="root")
+    with django_capture_on_commit_callbacks(execute=True):
+        reply, _ = send_message(actor=users[1], conversation=conversation, body="a reply", reply_to=root)
+    mark_thread_read(actor=users[0], root=root)  # gives users[0] an actual receipt for `root`
+    sent.clear()
+
+    # A fresh "message" frame, sent after the receipt above exists.
+    with django_capture_on_commit_callbacks(execute=True):
+        send_message(actor=users[1], conversation=conversation, body="another reply", reply_to=root)
+    # And a "message_edited" frame on the root itself, the message the receipt is actually for.
+    with django_capture_on_commit_callbacks(execute=True):
+        edit_message(actor=users[0], message=root, body="root, edited")
+
+    message = [frame for _, frame in sent if frame["type"] == "message"]
+    edited = [frame for _, frame in sent if frame["type"] == "message_edited"]
+    assert len(message) == 1 and len(edited) == 1
+    assert "thread_last_read_at" not in message[0]["message"]
+    assert "thread_last_read_at" not in edited[0]["message"]
+    assert edited[0]["message"]["reply_count"] == 2
+    assert edited[0]["message"]["last_reply_at"] > reply.created_at
+
+
+@pytest.mark.django_db
 def test_watermark_frames_fire_only_on_actual_advance(domain, monkeypatch, django_capture_on_commit_callbacks):
     _, conversation, users, _ = domain
     message, _ = send_message(actor=users[0], conversation=conversation, body="hi")

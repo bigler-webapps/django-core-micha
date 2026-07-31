@@ -3,7 +3,9 @@ import uuid
 import pytest
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
 from django_core_micha.messaging.crypto import register_messaging_app
@@ -333,3 +335,86 @@ def test_unread_count_reflects_only_the_caller(api_domain):
     client = APIClient(); client.force_authenticate(users["viewer"])
     response = client.get("/messaging/unread-count/")
     assert response.status_code == 200 and response.data["unread_count"] >= 1
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_thread_last_read_at_is_per_viewer_and_null_without_a_receipt(api_domain):
+    _, _, conversation, users = api_domain
+    client = APIClient(); client.force_authenticate(users["author"])
+    messages_url = f"/messaging/conversations/{conversation.id}/messages/"
+    root = client.post(messages_url, {"body": "root"}, format="json").data
+    client.post(messages_url, {"body": "a reply", "reply_to": root["id"]}, format="json")
+
+    # Nobody has marked the thread read yet — null for every viewer.
+    fresh = client.get(f"/messaging/messages/{root['id']}/")
+    assert fresh.data["thread_last_read_at"] is None
+
+    client.post(f"/messaging/messages/{root['id']}/thread/read/", {}, format="json")
+    author_view = client.get(f"/messaging/messages/{root['id']}/")
+    assert author_view.data["thread_last_read_at"] is not None
+
+    client.force_authenticate(users["viewer"])
+    viewer_view = client.get(f"/messaging/messages/{root['id']}/")
+    assert viewer_view.data["thread_last_read_at"] is None  # viewer never marked it read
+
+    # Also present, and bulk-correct, on the conversation message-list endpoint (not
+    # just single-message GET) — the same viewer, same root, same answer either way.
+    listed = client.get(messages_url).data["results"]
+    listed_root = next(m for m in listed if m["id"] == root["id"])
+    assert listed_root["thread_last_read_at"] is None
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_thread_last_read_at_is_absent_from_realtime_frames(api_domain, monkeypatch, django_capture_on_commit_callbacks):
+    """The load-bearing viewer-independence rule from MSG-2c extends to this new
+    per-viewer field: thread_last_read_at must never ride the message/message_edited
+    realtime frame, only the REST response, since a frame is fanned out identically
+    to every recipient. (transaction.on_commit callbacks never fire under pytest-django's
+    default atomic-wrapped test — django_capture_on_commit_callbacks(execute=True) is
+    what actually runs them; see test_services.py for the same pattern.)"""
+    _, _, conversation, users = api_domain
+    sent = []
+    monkeypatch.setattr("django_core_micha.messaging.realtime.push_to_users", lambda users, frame: sent.append(frame))
+    client = APIClient(); client.force_authenticate(users["author"])
+    messages_url = f"/messaging/conversations/{conversation.id}/messages/"
+
+    with django_capture_on_commit_callbacks(execute=True):
+        root_id = client.post(messages_url, {"body": "root"}, format="json").data["id"]
+    with django_capture_on_commit_callbacks(execute=True):
+        client.post(f"/messaging/messages/{root_id}/thread/read/", {}, format="json")
+
+    message_frames = [f for f in sent if f["type"] in {"message", "message_edited"}]
+    assert message_frames  # sanity: the send above did fan out
+    for frame in message_frames:
+        assert "thread_last_read_at" not in frame["message"]
+        assert "reply_count" in frame["message"] and "last_reply_at" in frame["message"]
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_message_list_query_count_is_bounded_regardless_of_page_size(api_domain):
+    """reply_count/last_reply_at/thread_last_read_at must be annotated/bulk-fetched,
+    not queried per row — a page of 5 root messages (each with a reply) must not cost
+    more queries than a page of 2."""
+    _, _, conversation, users = api_domain
+    client = APIClient(); client.force_authenticate(users["author"])
+    messages_url = f"/messaging/conversations/{conversation.id}/messages/"
+
+    def _seed(count):
+        for _ in range(count):
+            root = client.post(messages_url, {"body": "root"}, format="json").data
+            client.post(messages_url, {"body": "reply", "reply_to": root["id"]}, format="json")
+
+    _seed(2)
+    with CaptureQueriesContext(connection) as small:
+        response = client.get(messages_url)
+    assert response.status_code == 200 and len(response.data["results"]) == 2
+
+    _seed(3)  # 5 root messages total now, still one page (default limit 50)
+    with CaptureQueriesContext(connection) as large:
+        response = client.get(messages_url)
+    assert response.status_code == 200 and len(response.data["results"]) == 5
+
+    assert len(large.captured_queries) == len(small.captured_queries)
