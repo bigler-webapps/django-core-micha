@@ -43,10 +43,19 @@ NOT apply to this WO.
 
 ### Chunk plan (staged commits, one independent review per chunk — operator decision 2026-07-31)
 
-0. **Pre-check:** verify OOXML/ODF vs. bare-ZIP detection (design §Attachments container-format caveat);
-   if needed, extend `validators.upload` with caller-supplied allowlist config + a content-aware container
-   check (stdlib `zipfile` member inspection preferred — **no new dependency without prior operator
-   approval**). May fold into chunk 4 if trivially resolved.
+0. **Pre-check — resolved 2026-07-31, no separate chunk needed.** Orchestrator inspected the
+   installed `filetype==1.2.0` matcher source directly (`OfficeOpenXml.match_document` /
+   `Odt`'s equivalent, via `type(t).__mro__[1]` for the `docx`/`odt` type instances): it does NOT
+   rely on the outer `PK\x03\x04` signature alone — it walks the ZIP's first several local file
+   headers and checks internal member names/paths (`[Content_Types].xml`, `_rels/.rels`,
+   `docProps`, and the OOXML/ODF-specific entries beyond that) before returning a
+   docx/xlsx/pptx/odt/ods/odp match, and a bare `zip`/`epub` is a distinct matcher that only fires
+   when those document-specific checks fail. So `validators.upload.validate_upload` already gets a
+   reliable OOXML/ODF-vs-archive distinction for free from `detect_mime` — no `validators/upload.py`
+   change and no new dependency needed. Chunk 4 just needs to pass the correct
+   `allowed_mimes` set (design §Attachments' PDF/OOXML/ODF/image list) into the existing
+   `validate_upload(file_obj, allowed_mimes=..., max_size=...)` call; the caveat added to the
+   design doc stands as documented reasoning, not as an open implementation gap.
 1. Models + migrations + `MessagingApp`/keyring registration (fail-closed; `sync-secrets` declaration
    pattern documented). Highest-risk chunk — its review must include a security pass on the crypto path.
 2. Policy hooks + services (incl. break-glass + audit).
