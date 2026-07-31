@@ -150,6 +150,31 @@ makes the realtime path work without a per-viewer refetch. The same rule governs
 `delivered` — aggregate only — and it applies retroactively to `message` and `message_edited`, which
 embed `serialize_message` and must therefore never gain a viewer-specific field.
 
+## Thread reply state and managed-conversation identity (design amendment, 2026-07-31, MSG-2d)
+
+Two more read-side gaps, found by MSG-3b when it tried to render against the contract. Both follow the
+viewer-independence split established above; neither needs a schema change.
+
+**A thread's reply state is not readable.** `MessageThreadReceipt` is written by
+`POST messages/{root_id}/thread/read/` and never read back into any payload, and `serialize_message`
+carries no reply count. A client that mounts fresh therefore cannot tell whether a root message has
+replies at all, let alone unread ones — it can only discover them by expanding every thread. The
+`thread_read_state` frame added in MSG-2c signals a *change* but gives a newly-connected client no
+starting point. `serialize_message` gains two **viewer-independent** fields: `reply_count` and
+`last_reply_at` (`null` when there are none). **A soft-deleted reply still counts**: deletion clears the
+content but keeps the row, and the thread renders it as a tombstone — excluding it would make "3 replies"
+expand into four visible items. The count must agree with what the thread shows. The viewer's own receipt, `thread_last_read_at`, is
+**viewer-specific and REST-only** — added by the same call sites that add `voted_option_ids`, never
+present on a realtime frame. A client shows an unread-replies marker when
+`last_reply_at > thread_last_read_at`, and treats a null receipt as "all unread".
+
+**Managed conversations are indistinguishable from each other.** `Conversation.external_key` carries the
+app's own identity for a managed or broadcast conversation — jg's `event_all` versus `event_team` — but
+`serialize_conversation` omits it, so a client sees only `kind: "managed"` and cannot label or
+differentiate the two. `serialize_conversation` gains `external_key` (`null` where the kind does not use
+one). It is app-supplied, non-sensitive and already visible to every participant by construction; the
+host owns what it means and how to display it, exactly as with `sender_id`.
+
 ## Realtime
 
 Every frame is `{envelope:'messaging',type,event_id,app_key,conversation_id,occurred_at,...}` and is emitted only to live policy-resolved users. Frames: `conversation_upsert`, `conversation_archived`, `message`, `message_edited`, `message_deleted`, `attachment_ready`, `reaction`, `poll_updated`, `delivered`, `read_state`, `thread_read_state`, `participant_changed`. **`attachment_ready` is reserved and deliberately unemitted (2026-07-31):** v1 has no scanner and the attachment pipeline validates, re-encodes and persists synchronously, so there is no asynchronous "ready" moment to signal. It stays in the frame vocabulary for the day a scan hook is installed; until then a client must not wait for it. Message frames carry safe serialization/API attachment URLs; receipt frames carry only aggregate unless permitted, never direct detail. All mutations commit before fan-out; handlers deduplicate `event_id`. Reconnect refetches REST state/cursors. ucm must destructure `const { subscribe } = useRealtime()` and depend on `subscribe`, never the recreated context object.

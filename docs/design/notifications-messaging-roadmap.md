@@ -209,7 +209,9 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
 | MSG-2b | dcm | **scoped first-contact DM must be possible** — drop `DirectConversationView`'s participant-existence precondition; target-side tenant safety rests on `MessagingPolicy.can_open_direct` alone. Tier 1, no migration. Depends on MSG-2; **planned, runs before MSG-3.** Envelope `work-orders/MSG-2b.md` |
 | MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity. **Envelope authored 2026-07-31** in the target repo (`ui-core-micha/work-orders/MSG-3.md`); 5 chunks, carries `ui_reviewer`. Operator decisions: **redesign permitted** for layout/interaction with "No jg feature is lost" still binding and a written deviation list as a deliverable; UI validated through the new ucm dev harness. Preconditions: dcm 2.36.1 published · ucm `DX-1` done. **✓ done 2026-07-31, published ucm 2.16.0** (5 chunks, review per chunk, `ui_reviewer` clean, 139/139). Decomposition held (largest component 110 LOC). **A post-completion audit found substantial gaps → `MSG-2c` + `MSG-3b`** |
 | MSG-2c | dcm | **contract gaps found after MSG-3:** implement the poll **read** path (the design gap is closed — see `messaging-platform.md` §"Poll read contract and conversation preview", 2026-07-31), emit the 8 missing realtime frames (`services.py` has 3 `_publish` call sites; `attachment_ready` is now recorded as reserved-and-unemitted, so 8 not 9), add `last_message` to the conversation payload. Additive, no schema change. Envelope `work-orders/MSG-2c.md`. **✓ done 2026-07-31, published dcm 2.37.0** (`1399d05`) — independent `reviewer` caught a real P1 (`open_direct` re-broadcast `conversation_upsert` on every reopen of an existing DM; fixed by gating on the `created` flag, plus a matching no-op guard on reactions, both with regression tests). **This unblocks rows 38, 51-53 and 56-58 of MSG-3b** |
-| MSG-3b | ucm | **parity + contract gaps found after MSG-3:** unread lifecycle (mark-read was never called — badges never clear), edit/delete, DM launcher, `reply_to_id`-vs-`reply_to` reply grouping, quoting, copy, image compression, and a contract-conformance test. 59-row capability checklist **is** the spec. Envelope `ui-core-micha/work-orders/MSG-3b.md` |
+| MSG-3b | ucm | **parity + contract gaps found after MSG-3:** unread lifecycle (mark-read was never called — badges never clear), edit/delete, DM launcher, `reply_to_id`-vs-`reply_to` reply grouping, quoting, copy, image compression, and a contract-conformance test. 59-row capability checklist **is** the spec. Envelope `ui-core-micha/work-orders/MSG-3b.md`. **✓ done 2026-07-31, published ucm 2.17.0** — 6 chunks, review per chunk, WO-end `ui_reviewer` row-by-row, no findings. Nine rows left BLOCKED: seven of them wrongly (dcm 2.37.0 had shipped mid-flight → `MSG-3c`), two correctly (→ `MSG-2d`) |
+| MSG-2d | dcm | **the two read-side gaps MSG-2c did not cover:** readable thread reply state (`reply_count`/`last_reply_at` viewer-independent, `thread_last_read_at` REST-only) and `external_key` on the conversation payload. Additive, no schema change. Unblocks MSG-3b rows 27 and 42. Envelope `work-orders/MSG-2d.md` |
+| MSG-3c | ucm | **the seven rows MSG-3b blocked against a stale dcm version** (38, 51-53, 56-58): last-message preview + reorder, full poll rendering, and the `reaction`/`poll_updated` handlers that have never run against a real frame. Plus the deviation-doc correction and the version-pin rule. Envelope `ui-core-micha/work-orders/MSG-3c.md` |
 | MSG-4 | spesix | spesix adopts the shared service — **deferred 2026-07-31**, backlog (no demand recorded); entry gate = the spesix demand confirmations |
 
 ### Phase C — adopters (MSG-5 pulled forward 2026-07-31; rest sketched)
@@ -260,6 +262,16 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
   than applied in passing because it changes what CI executes, and the first run may legitimately go
   red — which would itself be the finding. Root cause worth fixing beyond the one line: `testpaths` is
   an allowlist with no guard, so the next subpackage will repeat this silently.
+- **Third occurrence, one layer up: a BLOCKED row is only as true as the day it was written.** MSG-3b
+  started against dcm 2.36.1, recorded seven rows as blocked on a "future dcm work order", and closed
+  with those rows undone — while dcm 2.37.0 (MSG-2c) had shipped exactly that work **mid-flight**. Six
+  per-chunk reviews and a WO-end `ui_reviewer` row-by-row cross-check all passed, because the check read
+  *ucm's* landed code and took the dependency's state from the WO text instead of reading dcm. Same
+  shape as the two findings above, moved one level out: the seam between a WO and its dependency was
+  assumed rather than verified. **Rule now:** a BLOCKED row is re-verified against the live dependency
+  **at WO close, not at WO start**, and every BLOCKED entry names the dependency version it was blocked
+  at. MSG-3b already did the second half unprompted, which is the only reason this cost two minutes to
+  find rather than surfacing at MSG-5 — the pin is what makes the re-check cheap. Delivered as `MSG-3c`.
 - **Both sides of the seam were tested against themselves — and every gate passed anyway.** The single
   most important lesson of this workstream so far. MSG-2 shipped 146/146 green with four independent
   chunk reviews; MSG-3 shipped 139/139 green with five chunk reviews and a clean `ui_reviewer`. A
