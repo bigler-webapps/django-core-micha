@@ -168,6 +168,110 @@ Phase A closed (met 2026-07-30). No dcm/ucm publish involved in this WO (doc-onl
 
 ## Part B — Implementation map (Orchestrator)
 
-_To be filled by the Orchestrator on `git pull`, within this envelope: context package, progress
-contract, execution directive, mini-handover. The envelope above is authoritative WHAT/WHY; scope
-changes go back to the operator._
+### Execution directive
+
+Implement through `codex exec` in the background — invoked **directly via Bash** (never the
+`debugger`/`*_coder` Agent wrappers) with **both** flags `--skip-git-repo-check` and
+`--dangerously-bypass-approvals-and-sandbox`, prompt passed as a positional argument from a file;
+fall back to direct Claude implementation only on Codex quota / rate-limit / non-zero exit. This is a
+**documentation-only** WO — no application code changes anywhere. The only file this WO creates is
+`docs/design/messaging-platform.md` in `django-core-micha`, plus the `WORK_ORDERS.md` row update to
+`in-review`/`done`.
+
+### Target repo / working directory
+
+`C:\Users\biglmi\Documents\webapps\django-core-micha` (repo root — this repo has no `backend/`/
+`frontend/` split; it is the shared platform package).
+
+### Context package
+
+**Named file to produce:**
+- `docs/design/messaging-platform.md` — new file, companion to `docs/design/notifications-platform.md`.
+  Follow that file's structure/tone/heading style (skim it first) as the sibling document.
+
+**Source material to read (all read-only pointers, already verified to exist):**
+- `docs/design/notifications-platform.md` (471 lines) — sibling doc, mirror its structure/section
+  conventions (headings, contract-table style, decision framing).
+- `docs/design/notifications-messaging-roadmap.md` (218 lines) — §2 three-layer picture, §4 Phase B,
+  §5 open risks; this WO exists to close the gaps this file flags.
+- `src/django_core_micha/notifications/` — api/router/types/dispatch/delivery/consumers, `todo/`
+  (the existing shared notification service MSG-2 will extend — read to understand `notify()`,
+  `transient=`, `feed_visible`, channel/type registration).
+- `../jg-ferien/backend/messaging/models.py` (249 lines) — the 9-model jg-parity floor to generalize
+  (`Conversation.event` mandatory FK to loosen into the generic scope model; kinds
+  broadcast/event_all/event_team → policy hooks).
+- `../jg-ferien/backend/messaging/services.py` (935 lines) — business logic: read-tick semantics, DM
+  privacy carve-out, mute, unread counts, reactions, polls, moderation.
+- `../jg-ferien/backend/messaging/views.py` (874 lines) — the ~21 REST endpoints to enumerate in the
+  new contract (paths, payloads, permissions, cursor pagination — jg's pagination may be a gap per
+  deliverable #8, note explicitly if so).
+- `../jg-ferien/backend/messaging/envelope.py` (5 lines) — the `messaging` envelope registration
+  pattern (Layer-1 seam).
+- `../jg-ferien/backend/messaging/notifications.py` (61 lines) — the exact `notify()` recipe to make
+  normative (deliverable #5): type registration, `email`+`push` only, no `chip`,
+  `feed_visible=False`, sender/muted exclusion, `transaction.atomic()`.
+- `../jg-ferien/backend/messaging/event_chat_sync.py` (110 lines) — `event_all`/`event_team` signal
+  sync as the precedent for the managed-membership provisioning hook (deliverable #3).
+- `../jg-ferien/backend/messaging/fields.py` (101 lines) — `MultiFernet` encryption-at-rest precedent
+  (deliverable #4).
+- `../jg-ferien/backend/messaging/urls.py` (55 lines) — endpoint list cross-check against views.py.
+- `../jg-ferien/frontend/src/components/Messaging/` (`Thread.jsx` ~2.5k LOC, `ConversationList.jsx`,
+  `MessagingConfig.jsx`, `NewDirectMessageDialog.jsx`, `AnnouncementDialog.jsx`,
+  `EmojiPickerButton.jsx`, `conversationHelpers.js`) + `context/MessagingContext.jsx` +
+  `context/realtimeEnvelopes.js` (paths relative to `../jg-ferien/frontend/src/`) — component cut
+  reference for deliverable #8 (ucm surface architecture).
+- `../ui-core-micha/src/notifications/realtime.jsx`, `NotificationsProvider.jsx`, `PopupSurface.jsx`
+  — Layer-1 `useRealtime().subscribe(envelope, handler)` pattern; note the documented gotcha
+  (subscribe via the destructured `subscribe`, never the `useRealtime()` object).
+- This repo's `WORK_ORDERS.md` (register) and `../jg-ferien/WORK_ORDERS.md` (jg messaging history:
+  WO-MSG-1, MSG-2/3, MSG-B1..B4, MSG-UX, SEC-2, PERF-3D2, NOTIF-14/15) — read for precedent framing
+  only, do not edit jg-ferien's register.
+
+**Invariants / do-not-touch:**
+- No code changes anywhere (this repo, jg-ferien, ui-core-micha, spesix) — documentation only.
+- Do not weaken the encryption-at-rest requirement (deliverable #4) to make the doc easier to write —
+  if no clean multi-app key scheme exists, the doc must say so explicitly as a STOP with options,
+  not silently pick a weaker scheme.
+- Do not resolve the Go/No-Go gate yourself — write the confirmation questions into the doc as an
+  open gate for the operator; do not assume the answer beyond the envelope's stated assumption (all
+  three spesix forms wanted) and say clearly that this is an assumption pending confirmation.
+- Keep the two paper tests (jg shape, spesix shape) as literal validation sections inside the
+  document, worked through against the model actually proposed — not just named as a to-do.
+- Do not touch `WORK_ORDERS.md` rows for MSG-2/MSG-3/MSG-4 beyond what's already there (placeholders
+  stay placeholders; this WO does not author their envelopes).
+
+**Known pitfalls:**
+- jg's `Conversation.event` FK is mandatory today — the doc must show precisely how the generic scope
+  model (container / object-anchor / app-global) subsumes this without losing jg's event-scoped DM
+  case (Phase C parity, deliverable #2's explicit requirement).
+- The four contract questions (channels / persistent row / `feed_visible` / `content`+`dedup_key`
+  safety) must be answered for **every** notification-producing event type in the new contract, not
+  just message — reactions, polls, edits/deletes, delivered/read-state if added.
+- Volume/retention (deliverable #6) needs actual estimated numbers, not just a qualitative note —
+  reference NOTIF-20/21's dropped-at-current-volume decision and state what changes the calculus.
+
+### Required tests
+
+None (documentation WO, per the envelope). Validation = the two paper tests written into the document
+itself.
+
+### Progress contract
+
+Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+`PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (file opened,
+section drafted) and `PROGRESS: [<n>/<total>] done` on step completion, spaced so no gap exceeds
+~2 min, stdout unbuffered, and exactly one final `RESULT: DONE|BLOCKED <reason>`.
+
+### Preamble (must be appended verbatim to the Codex prompt)
+
+The text above is the COMPLETE spec — read nearest `AGENTS.md`, `.codex/skills/<role>/SKILL.md` (if
+present), and this repo's `MEMORY.md` only for conventions; stay in scope; do not touch application
+code, auth/permissions/deps/schema/CI; do not update `MEMORY.md`; do NOT `git add`/`commit`/`push` —
+leave the new file uncommitted in the working tree for the orchestrator's independent review. Write
+the design document only. Do not run any test suite (none required) and do not run any review — the
+orchestrator runs the independent review after you finish.
+
+### Mini-handover (pastable)
+
+Orchestrator: implement `work-orders/MSG-1.md` in `django-core-micha` (main). `git pull` first, read
+the WO, then follow `orchestrate-codex` (Codex-first, own review, commit on green).
