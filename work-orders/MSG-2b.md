@@ -114,4 +114,97 @@ the WO + `docs/design/messaging-platform.md` §"Tenant resolution and deletion s
 
 ## Part B — Implementation map (Orchestrator)
 
-To be filled by the Orchestrator session on `git pull`, within the envelope above.
+### Target repo / working directory
+
+`C:\Users\biglmi\Documents\webapps\django-core-micha` (repo root; current published version 2.36.0).
+
+### Context package
+
+**Named file to change:**
+- `src/django_core_micha/messaging/views.py` — `DirectConversationView.post`, currently (as of MSG-2
+  chunk 3, commit a6a4cf5):
+  ```python
+  class DirectConversationView(MessagingView):
+      def post(self, request):
+          target = get_object_or_404(get_user_model(), pk=request.data.get("target_user_id"))
+          scope_id = request.data.get("scope")
+          scope = get_object_or_404(MessagingScope.objects.select_related("app"), pk=scope_id) if scope_id else None
+          try:
+              app = resolve_messaging_app(scope=scope)
+          except MessagingTenantResolutionError as exc:
+              raise ValidationError({"detail": str(exc)}) from exc
+          if scope is not None and not ConversationParticipant.objects.filter(conversation__app=app, user=target).exists():
+              raise ValidationError({"target_user_id": "Target user is not established in the resolved tenant."})
+          # Global DMs have no User->MessagingApp relation in this schema.  The
+          # singleton registry resolution above is the accepted v1 boundary.
+          conversation = self._service(lambda: open_direct(actor=request.user, target=target, app=app, scope=scope))
+          participant = ConversationParticipant.objects.get(conversation=conversation, user=request.user)
+          return Response(serialize_conversation(conversation, participant), status=status.HTTP_201_CREATED)
+  ```
+  Delete the `if scope is not None and not ConversationParticipant.objects.filter(...)` block (the
+  four lines: the `if`, the `raise`, and the stale comment above `conversation = self._service(...)`).
+  Replace the comment with one reflecting the corrected model: tenant resolution is core-owned
+  (`resolve_messaging_app`, unchanged); who may be addressed inside that tenant is
+  `MessagingPolicy.can_open_direct`'s decision, already enforced inside `open_direct()`
+  (`services.py`) before any row is created. Nothing else in this method changes — `resolve_messaging_app`
+  call, the `try/except MessagingTenantResolutionError`, and the rest of the flow stay exactly as is.
+
+**Do not touch (unrelated to this bug, explicitly out of scope per envelope):**
+- `src/django_core_micha/messaging/models.py`'s `resolve_messaging_app` — tenant resolution logic is unchanged.
+- `src/django_core_micha/messaging/services.py`'s `open_direct` — already calls `can_open_direct`
+  correctly (services.py:78-85 as of a6a4cf5); this WO does not change it, only removes the
+  view-level check that pre-empted it.
+- Any other view class, `soft_delete_message`'s content redaction, encryption/keyrings, `urls.py`.
+
+**Source material for context (read-only, already correct — do not modify):**
+- `src/django_core_micha/messaging/services.py`'s `open_direct(*, actor, target, app, scope=None)` —
+  confirms `policy.can_open_direct(actor=actor, target=target, scope=scope)` is called and
+  `MessagingPermissionDenied` is raised on `False`, before any `Conversation`/`ConversationParticipant`
+  row is created. This is the authorization path that now runs unobstructed.
+- `src/django_core_micha/messaging/tests/test_views.py`'s existing
+  `test_direct_scope_resolves_tenant_without_reading_app_key` test (added in MSG-2 chunk 3) — the
+  tenant-resolution regression test that must stay green; extend or add alongside it, do not weaken it.
+- `src/django_core_micha/messaging/tests/test_services.py` — has `open_direct`/self-DM test precedent
+  if one exists; check before writing a new self-DM test to avoid duplication.
+
+**Invariants:**
+- No migration. If implementing this change appears to need one, stop and return to the operator —
+  the envelope is explicit this WO has no schema change.
+- `resolve_messaging_app`'s behavior (scope→scope.app; no scope→single active app else fail-closed
+  400/409; `app_key` never read from any request) must be byte-identical after this change — the
+  required test set re-asserts this explicitly, not just as a side effect.
+- Self-DM rejection (`actor.pk == target.pk` in `open_direct`) is unchanged and must still be covered.
+
+### Required tests
+
+Per envelope's "Required tests to WRITE" — scoped to `views.py`/`services.py`/`policy.py`
+(the messaging suite's affected area), not the full dcm suite:
+1. First-contact scoped DM succeeds against a target with zero participant rows, when policy permits.
+2. Same call with a policy returning `False` from `can_open_direct` → same denial as today.
+3. The hook is actually consulted (not short-circuited) for the first-contact case — e.g. assert it
+   was called, or that changing the policy's return value changes the outcome.
+4. Tenant-resolution regression set stays green: `app_key` in the request body has no effect;
+   scope-given resolves via `scope.app`; scope-omitted with 0 or N active registrations fails closed.
+5. Self-DM still rejected.
+
+### Progress contract
+
+Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+`PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (file opened, file
+edited, command/test run) and `PROGRESS: [<n>/<total>] done` on step completion, spaced so no gap
+exceeds ~2 min, stdout unbuffered, and exactly one final `RESULT: DONE|BLOCKED <reason>`.
+
+### Preamble (must be appended verbatim to the Codex prompt)
+
+The text above is the COMPLETE spec — read nearest `AGENTS.md`, `.codex/skills/<role>/SKILL.md` (if
+present), and this repo's `MEMORY.md` only for conventions; stay in scope; do not touch anything
+outside `views.py`'s `DirectConversationView.post` plus the required test additions; do not touch
+auth/CI/dependencies/schema; do not update `MEMORY.md`; do NOT `git add`/`commit`/`push` — leave the
+change uncommitted in the working tree for the orchestrator's independent review. WRITE the required
+tests AND RUN the messaging test suite (`src/django_core_micha/messaging/tests/`) to confirm they
+pass — that is your only test run: do NOT run the full dcm suite and do NOT run any review; the
+orchestrator does both after you finish.
+
+### Mini-handover
+
+(Already given verbatim by the operator — see the message that handed this WO over.)
