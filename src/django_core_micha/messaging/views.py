@@ -18,7 +18,7 @@ from rest_framework.permissions import IsAuthenticated
 from .models import (Conversation, ConversationParticipant, Message, MessagingScope,
                      Poll, resolve_messaging_app, MessagingTenantResolutionError)
 from .policy import get_messaging_policy
-from .serializers import MessageInputSerializer, PollInputSerializer, serialize_conversation, serialize_message
+from .serializers import MessageInputSerializer, PollInputSerializer, serialize_conversation, serialize_message, serialize_poll
 from .services import (MessagingPermissionDenied, add_reaction, archive_conversation,
                        close_poll, create_conversation, create_poll, edit_message, mark_read,
                        mark_thread_read, open_direct, read_status, remove_reaction,
@@ -27,6 +27,13 @@ from .services import (MessagingPermissionDenied, add_reaction, archive_conversa
 from .models import MessageAttachment
 
 CURSOR_SALT = "django_core_micha.messaging.cursor.v1"
+
+
+def _poll_response(poll, user):
+    poll = Poll.objects.select_related("message__conversation__app").prefetch_related("options__votes").get(pk=poll.pk)
+    result = serialize_poll(poll)
+    result["voted_option_ids"] = [str(option_id) for option_id in poll.options.filter(votes__user=user).values_list("id", flat=True)]
+    return result
 
 
 def _cursor(value):
@@ -151,7 +158,7 @@ class ConversationCreateView(MessagingView):
 class ConversationMessagesView(MessagingView):
     def get(self, request, conversation_id):
         conversation = self._viewer_conversation(request, conversation_id)
-        return _page(request, Message.objects.filter(conversation=conversation, reply_to__isnull=True).select_related("conversation__app", "sender").prefetch_related("attachments", "reactions"), serialize_message)
+        return _page(request, Message.objects.filter(conversation=conversation, reply_to__isnull=True).select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes"), serialize_message)
     def post(self, request, conversation_id):
         conversation = self._viewer_conversation(request, conversation_id); data = MessageInputSerializer(data=request.data); data.is_valid(raise_exception=True)
         values = _idempotency_request_id(request, data.validated_data)
@@ -194,7 +201,7 @@ class ConversationAttachmentView(MessagingView):
                     if isinstance(exc, DjangoValidationError):
                         raise ValidationError({"files": exc.messages}) from exc
                     raise
-        message = Message.objects.select_related("conversation__app", "sender").prefetch_related("attachments", "reactions").get(pk=message.pk)
+        message = Message.objects.select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes").get(pk=message.pk)
         return Response(serialize_message(message), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
@@ -215,7 +222,7 @@ class AttachmentDownloadView(MessagingView):
 
 class MessageDetailView(MessagingView):
     def _message(self, request, message_id):
-        message = get_object_or_404(Message.objects.select_related("conversation__app", "sender").prefetch_related("attachments", "reactions"), pk=message_id)
+        message = get_object_or_404(Message.objects.select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes"), pk=message_id)
         self._viewer_conversation(request, message.conversation_id); return message
     def get(self, request, message_id): return Response(serialize_message(self._message(request, message_id)))
     def patch(self, request, message_id):
@@ -232,7 +239,7 @@ class ReactionView(MessagingView):
     def post(self, request, message_id):
         message = get_object_or_404(Message, pk=message_id); self._participant_conversation(request, message.conversation_id)
         self._service(lambda: add_reaction(actor=request.user, message=message, emoji=request.data.get("emoji")))
-        return Response(serialize_message(Message.objects.prefetch_related("reactions", "attachments").get(pk=message.pk)))
+        return Response(serialize_message(Message.objects.prefetch_related("reactions", "attachments", "poll__options__votes").get(pk=message.pk)))
     def delete(self, request, message_id, emoji):
         message = get_object_or_404(Message, pk=message_id); self._participant_conversation(request, message.conversation_id)
         self._service(lambda: remove_reaction(actor=request.user, message=message, emoji=emoji)); return Response(status=status.HTTP_204_NO_CONTENT)
@@ -266,15 +273,15 @@ class ConversationPollView(MessagingView):
         data = PollInputSerializer(data=request.data); data.is_valid(raise_exception=True)
         values = _idempotency_request_id(request, data.validated_data)
         poll, created = self._service(lambda: create_poll(actor=request.user, conversation=conversation, question=values["question"], options=values["options"], allow_multiple=values.get("allow_multiple", False), client_request_id=values.get("client_request_id")))
-        return Response({"id": str(poll.id), "message_id": str(poll.message_id), "closed_at": poll.closed_at}, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        return Response(_poll_response(poll, request.user), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
 
 class PollVoteView(MessagingView):
     def post(self, request, poll_id):
         poll = get_object_or_404(Poll.objects.select_related("message__conversation__app"), pk=poll_id)
         self._participant_conversation(request, poll.message.conversation_id)
-        self._service(lambda: vote_poll(actor=request.user, poll=poll, option_ids=request.data.get("option_ids") or []))
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        poll = self._service(lambda: vote_poll(actor=request.user, poll=poll, option_ids=request.data.get("option_ids") or []))
+        return Response(_poll_response(poll, request.user))
 
 
 class PollCloseView(MessagingView):
@@ -282,14 +289,14 @@ class PollCloseView(MessagingView):
         poll = get_object_or_404(Poll.objects.select_related("message__conversation__app"), pk=poll_id)
         self._participant_conversation(request, poll.message.conversation_id)
         poll = self._service(lambda: close_poll(actor=request.user, poll=poll))
-        return Response({"id": str(poll.id), "closed_at": poll.closed_at})
+        return Response(_poll_response(poll, request.user))
 
 
 class ThreadView(MessagingView):
     def get(self, request, root_id):
         root = get_object_or_404(Message.objects.select_related("conversation__app"), pk=root_id, reply_to__isnull=True)
         self._viewer_conversation(request, root.conversation_id)
-        return _page(request, Message.objects.filter(reply_to=root).select_related("conversation__app", "sender").prefetch_related("attachments", "reactions"), serialize_message)
+        return _page(request, Message.objects.filter(reply_to=root).select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes"), serialize_message)
 
 
 class ThreadReadView(MessagingView):

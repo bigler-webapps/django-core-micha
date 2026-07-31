@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.37.0] — 2026-07-31
+
+### Added
+
+#### MSG-2c — poll read contract, conversation preview, realtime frame completion
+
+Polls now expose a viewer-independent encrypted core projection in messages and mutation responses, with REST-only `voted_option_ids`; conversations include a bounded decrypted last-message preview. Added commit-safe messaging realtime fan-out for conversation, reaction, poll, receipt, archive, and membership updates while keeping frame payloads viewer-independent.
+
 ## [2.36.1] — 2026-07-31
 
 ### Fixed

@@ -14,6 +14,6 @@ def publish_messaging_event(*, conversation, users, event_type, payload):
     if "message_id" in payload and event_type in {"message", "message_edited"}:
         from .models import Message
         from .serializers import serialize_message
-        message = Message.objects.select_related("conversation__app", "sender").prefetch_related("attachments", "reactions").get(pk=payload["message_id"])
+        message = Message.objects.select_related("conversation__app", "sender").prefetch_related("attachments", "reactions", "poll__options__votes").get(pk=payload["message_id"])
         frame["message"] = serialize_message(message)
     push_to_users(users, frame)

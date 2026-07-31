@@ -198,12 +198,67 @@ def test_thread_pagination_and_poll_permissions(api_domain):
     # Voting only requires current participation (design §REST: "participant/open poll"),
     # not can_post/moderation rights — unlike posting, which the Policy fixture denies
     # for "viewer" (see test_non_member_is_404_and_capability_failure_is_403).
-    assert client.post(f"/messaging/polls/{poll_id}/vote/", {"option_ids": [str(option.id)]}, format="json").status_code == 204
+    # MSG-2c: vote/close now return the same poll projection as create — no more 204.
+    voted = client.post(f"/messaging/polls/{poll_id}/vote/", {"option_ids": [str(option.id)]}, format="json")
+    assert voted.status_code == 200
+    assert voted.data["id"] == poll_id and voted.data["voted_option_ids"] == [str(option.id)]
+    assert "voted_option_ids" not in {**voted.data["options"][0]}
     # Closing requires being the poll's creator or holding edit_any/delete_any; "viewer"
     # has neither (Policy.rights only grants open_group/read_receipt_detail).
     assert client.post(f"/messaging/polls/{poll_id}/close/", {}, format="json").status_code == 403
     client.force_authenticate(users["author"])
-    assert client.post(f"/messaging/polls/{poll_id}/close/", {}, format="json").status_code == 200
+    closed = client.post(f"/messaging/polls/{poll_id}/close/", {}, format="json")
+    assert closed.status_code == 200
+    assert closed.data["closed_at"] is not None
+    # The poll's own creator ("author") never voted — their voted_option_ids is empty,
+    # while "viewer"'s vote above is unaffected: per-viewer, not shared state.
+    assert closed.data["voted_option_ids"] == []
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_poll_voted_option_ids_is_per_viewer_and_embedded_in_message(api_domain):
+    _, _, conversation, users = api_domain
+    client = APIClient(); client.force_authenticate(users["author"])
+    poll = client.post(f"/messaging/conversations/{conversation.id}/polls/", {"question": "q", "options": ["a", "b"]}, format="json")
+    poll_id = poll.data["id"]
+    # A freshly created poll has no votes yet from anyone.
+    assert poll.data["voted_option_ids"] == []
+    options = {option["text"]: option["id"] for option in poll.data["options"]}
+    client.post(f"/messaging/polls/{poll_id}/vote/", {"option_ids": [options["a"]]}, format="json")
+    client.force_authenticate(users["viewer"])
+    client.post(f"/messaging/polls/{poll_id}/vote/", {"option_ids": [options["b"]]}, format="json")
+
+    message_id = Poll.objects.get(pk=poll_id).message_id
+
+    author_view = client.__class__(); author_view.force_authenticate(users["author"])
+    author_message = author_view.get(f"/messaging/messages/{message_id}/")
+    viewer_message = client.get(f"/messaging/messages/{message_id}/")
+    assert author_message.data["poll"]["id"] == poll_id and viewer_message.data["poll"]["id"] == poll_id
+    # serialize_message's embedded poll is the viewer-independent core — it must never
+    # carry voted_option_ids, for either viewer, even though each voted differently above.
+    assert "voted_option_ids" not in author_message.data["poll"]
+    assert "voted_option_ids" not in viewer_message.data["poll"]
+    # The core payload itself (aggregate vote_count/voters) is byte-identical for both viewers.
+    assert author_message.data["poll"] == viewer_message.data["poll"]
+    voters_by_option = {o["text"]: set(o["voters"]) for o in author_message.data["poll"]["options"]}
+    assert voters_by_option["a"] == {users["author"].pk} and voters_by_option["b"] == {users["viewer"].pk}
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_poll_voters_are_visible_in_direct_conversations_too(api_domain):
+    app, scope, _, users = api_domain
+    direct = Conversation.objects.create(app=app, scope=scope, kind="direct", user_low=users["author"], user_high=users["viewer"])
+    for user in (users["author"], users["viewer"]):
+        ConversationParticipant.objects.create(conversation=direct, user=user)
+    client = APIClient(); client.force_authenticate(users["author"])
+    poll = client.post(f"/messaging/conversations/{direct.id}/polls/", {"question": "dm poll", "options": ["x", "y"]}, format="json")
+    option_id = poll.data["options"][0]["id"]
+    client.post(f"/messaging/polls/{poll.data['id']}/vote/", {"option_ids": [option_id]}, format="json")
+    refreshed = client.get(f"/messaging/messages/{Poll.objects.get(pk=poll.data['id']).message_id}/")
+    # No DM carve-out for poll voters (design amendment, MSG-2c) — user ids, never names.
+    assert refreshed.data["poll"]["options"][0]["voters"] == [users["author"].pk]
 
 
 @pytest.mark.django_db

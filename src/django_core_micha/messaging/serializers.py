@@ -6,7 +6,7 @@ storage keys.
 """
 from rest_framework import serializers
 
-from .models import Conversation, ConversationParticipant, Message, MessageReaction, Poll
+from .models import Poll
 from .crypto import decrypt_text
 
 
@@ -46,9 +46,27 @@ def serialize_reactions(message):
     return [{"emoji": emoji, "count": count} for emoji, count in grouped.items()]
 
 
+CONVERSATION_EXCERPT_LENGTH = 140
+
+
+def serialize_poll(poll):
+    """Viewer-independent poll projection safe for REST and realtime."""
+    app_key = poll.message.conversation.app.app_key
+    return {
+        "id": str(poll.id), "question": decrypt_text(app_key=app_key, value=poll.question),
+        "allow_multiple": poll.allow_multiple, "closed_at": poll.closed_at,
+        "created_by_id": poll.created_by_id,
+        "options": [{
+            "id": str(option.id), "text": decrypt_text(app_key=app_key, value=option.text),
+            "order": option.order, "vote_count": len(option.votes.all()),
+            "voters": [vote.user_id for vote in option.votes.all()],
+        } for option in poll.options.all()],
+    }
+
+
 def serialize_message(message):
     app_key = message.conversation.app.app_key
-    return {
+    result = {
         "id": str(message.id), "conversation_id": str(message.conversation_id),
         "sender_id": message.sender_id, "kind": message.kind,
         "title": decrypt_text(app_key=app_key, value=message.title),
@@ -60,14 +78,45 @@ def serialize_message(message):
         "created_at": message.created_at, "attachments": [serialize_attachment(a) for a in message.attachments.all()],
         "reactions": serialize_reactions(message),
     }
+    if message.kind == "poll":
+        try:
+            result["poll"] = serialize_poll(message.poll)
+        except Poll.DoesNotExist:
+            pass
+    return result
+
+
+def serialize_last_message(conversation):
+    message = conversation.messages.select_related("conversation__app", "poll").order_by("-created_at", "-id").first()
+    if message is None:
+        return None
+    app_key = conversation.app.app_key
+    if message.deleted_at is not None:
+        excerpt = ""
+    elif message.kind == "poll":
+        try:
+            excerpt = decrypt_text(app_key=app_key, value=message.poll.question)
+        except Poll.DoesNotExist:
+            excerpt = ""
+    else:
+        excerpt = decrypt_text(app_key=app_key, value=message.body) or ""
+    return {"id": str(message.id), "sender_id": message.sender_id, "kind": message.kind,
+            "excerpt": excerpt[:CONVERSATION_EXCERPT_LENGTH], "created_at": message.created_at}
+
+
+def serialize_conversation_core(conversation):
+    return {
+        "id": str(conversation.id), "app_key": conversation.app.app_key,
+        "scope_id": str(conversation.scope_id), "kind": conversation.kind,
+        "title": decrypt_text(app_key=conversation.app.app_key, value=conversation.title),
+        "last_message_at": conversation.last_message_at,
+        "last_message": serialize_last_message(conversation), "created_at": conversation.created_at,
+    }
 
 
 def serialize_conversation(conversation, participant):
     return {
-        "id": str(conversation.id), "app_key": conversation.app.app_key,
-        "scope_id": str(conversation.scope_id), "kind": conversation.kind,
-        "title": decrypt_text(app_key=conversation.app.app_key, value=conversation.title), "last_message_at": conversation.last_message_at,
-        "created_at": conversation.created_at, "archived_at": participant.archived_at,
+        **serialize_conversation_core(conversation), "archived_at": participant.archived_at,
         "muted": participant.muted, "email_enabled": participant.email_enabled,
         "push_enabled": participant.push_enabled,
     }

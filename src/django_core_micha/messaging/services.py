@@ -72,6 +72,7 @@ def reconcile_membership(*, conversation, trigger="reconcile"):
                 row.save(update_fields=["removed_at"])
         if snapshot.remove_absent:
             ConversationParticipant.objects.filter(conversation=conversation, membership_source="provider", removed_at__isnull=True).exclude(user_id__in=members).update(removed_at=now)
+        transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation), "participant_changed", {}))
     return snapshot
 
 
@@ -85,9 +86,13 @@ def open_direct(*, actor, target, app, scope=None):
         raise MessagingPermissionDenied("Opening a direct conversation is not permitted.")
     low, high = sorted((actor, target), key=lambda user: str(user.pk))
     with transaction.atomic():
-        conversation, _ = Conversation.objects.get_or_create(app=app, scope=scope, kind=Conversation.Kind.DIRECT, user_low=low, user_high=high)
+        conversation, created = Conversation.objects.get_or_create(app=app, scope=scope, kind=Conversation.Kind.DIRECT, user_low=low, user_high=high)
         for user in (actor, target):
             ConversationParticipant.objects.get_or_create(conversation=conversation, user=user, defaults={"membership_source": "manual"})
+        if created:
+            # Re-opening an existing DM is a routine no-op (get_or_create finds the row);
+            # only a genuinely new conversation is a create/open event worth a frame.
+            transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation), "conversation_upsert", _conversation_upsert_payload(conversation)))
     return conversation
 
 
@@ -112,6 +117,7 @@ def create_conversation(*, actor, app, scope, kind, title=None, participant_user
                 ConversationParticipant.objects.get_or_create(conversation=conversation, user=user)
         if kind in {Conversation.Kind.MANAGED, Conversation.Kind.OBJECT_THREAD}:
             reconcile_membership(conversation=conversation, trigger="scope_created")
+        transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation), "conversation_upsert", _conversation_upsert_payload(conversation)))
     return conversation
 
 
@@ -156,6 +162,7 @@ def send_message(*, actor, conversation, kind="chat", body=None, title=None, lin
         # captured here) so a concurrent membership/mute change committed between
         # now and commit is reflected — consistent with edit_message/soft_delete_message.
         transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation, sender=actor), "message", {"message_id": str(message.id)}))
+        transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation, sender=actor), "conversation_upsert", _conversation_upsert_payload(conversation)))
         transaction.on_commit(lambda: _notify_message(message, actor))
         return message, True
 
@@ -189,26 +196,33 @@ def soft_delete_message(*, actor, message):
 
 
 def add_reaction(*, actor, message, emoji):
-    _require_view(actor, message.conversation); _require_participant(actor, message.conversation)
-    if not emoji or len(emoji) > 16:
-        raise ValueError("Emoji must be between 1 and 16 characters.")
-    reaction, _ = MessageReaction.objects.get_or_create(message=message, user=actor, emoji=emoji)
+    with transaction.atomic():
+        _require_view(actor, message.conversation); _require_participant(actor, message.conversation)
+        if not emoji or len(emoji) > 16:
+            raise ValueError("Emoji must be between 1 and 16 characters.")
+        reaction, added = MessageReaction.objects.get_or_create(message=message, user=actor, emoji=emoji)
+        if added:
+            transaction.on_commit(lambda: _publish(message.conversation, resolve_live_recipients(conversation=message.conversation), "reaction", {"message_id": str(message.id), "reactions": _serialized_reactions(message)}))
     return reaction
 
 
 def remove_reaction(*, actor, message, emoji):
-    _require_view(actor, message.conversation); _require_participant(actor, message.conversation)
-    MessageReaction.objects.filter(message=message, user=actor, emoji=emoji).delete()
+    with transaction.atomic():
+        _require_view(actor, message.conversation); _require_participant(actor, message.conversation)
+        deleted, _ = MessageReaction.objects.filter(message=message, user=actor, emoji=emoji).delete()
+        if deleted:
+            transaction.on_commit(lambda: _publish(message.conversation, resolve_live_recipients(conversation=message.conversation), "reaction", {"message_id": str(message.id), "reactions": _serialized_reactions(message)}))
 
 
 def create_poll(*, actor, conversation, question, options, allow_multiple=False, client_request_id=None):
     if len(options) < 2:
         raise ValueError("A poll needs at least two options.")
-    message, created = send_message(actor=actor, conversation=conversation, kind="poll", client_request_id=client_request_id)
-    if not created and hasattr(message, "poll"):
-        return message.poll, False
-    poll = Poll.objects.create(message=message, question=question, allow_multiple=allow_multiple, created_by=actor)
-    PollOption.objects.bulk_create([PollOption(poll=poll, text=text, order=index) for index, text in enumerate(options)])
+    with transaction.atomic():
+        message, created = send_message(actor=actor, conversation=conversation, kind="poll", client_request_id=client_request_id)
+        if not created and hasattr(message, "poll"):
+            return message.poll, False
+        poll = Poll.objects.create(message=message, question=question, allow_multiple=allow_multiple, created_by=actor)
+        PollOption.objects.bulk_create([PollOption(poll=poll, text=text, order=index) for index, text in enumerate(options)])
     return poll, True
 
 
@@ -223,6 +237,8 @@ def vote_poll(*, actor, poll, option_ids):
         if not poll.allow_multiple:
             PollVote.objects.filter(option__poll=poll, user=actor).delete()
         PollVote.objects.bulk_create([PollVote(option=option, user=actor) for option in options], ignore_conflicts=True)
+        transaction.on_commit(lambda: _publish(poll.message.conversation, resolve_live_recipients(conversation=poll.message.conversation), "poll_updated", _poll_updated_payload(poll)))
+    return poll
 
 
 def close_poll(*, actor, poll):
@@ -231,8 +247,10 @@ def close_poll(*, actor, poll):
     rights = _policy(poll.message.conversation).moderation_rights(actor=actor, conversation=poll.message.conversation, message=poll.message)
     if poll.created_by_id != actor.pk and not rights.intersection({"edit_any", "delete_any"}):
         raise MessagingPermissionDenied("Closing is not permitted.")
-    if poll.closed_at is None:
-        poll.closed_at = timezone.now(); poll.save(update_fields=["closed_at"])
+    with transaction.atomic():
+        if poll.closed_at is None:
+            poll.closed_at = timezone.now(); poll.save(update_fields=["closed_at"])
+            transaction.on_commit(lambda: _publish(poll.message.conversation, resolve_live_recipients(conversation=poll.message.conversation), "poll_updated", _poll_updated_payload(poll)))
     return poll
 
 
@@ -254,6 +272,7 @@ def mark_read(*, actor, conversation, read_at=None):
     timestamp = min(read_at or timezone.now(), timezone.now())
     if participant.last_read_at is None or timestamp > participant.last_read_at:
         participant.last_read_at = timestamp; participant.save(update_fields=["last_read_at"])
+        transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation), "read_state", {"user_id": str(actor.pk), "last_read_at": timestamp.isoformat()}))
     return participant
 
 
@@ -262,12 +281,17 @@ def mark_delivered(*, actor, conversation, delivered_at=None):
     timestamp = min(delivered_at or timezone.now(), timezone.now())
     if participant.last_delivered_at is None or timestamp > participant.last_delivered_at:
         participant.last_delivered_at = timestamp; participant.save(update_fields=["last_delivered_at"])
+        transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation), "delivered", {"user_id": str(actor.pk), "last_delivered_at": timestamp.isoformat()}))
     return participant
 
 
 def mark_thread_read(*, actor, root, read_at=None):
     _require_view(actor, root.conversation); _require_participant(actor, root.conversation)
-    receipt, _ = MessageThreadReceipt.objects.update_or_create(root=root, user=actor, defaults={"last_read_at": min(read_at or timezone.now(), timezone.now())})
+    timestamp = min(read_at or timezone.now(), timezone.now())
+    receipt = MessageThreadReceipt.objects.filter(root=root, user=actor).first()
+    if receipt is None or timestamp > receipt.last_read_at:
+        receipt, _ = MessageThreadReceipt.objects.update_or_create(root=root, user=actor, defaults={"last_read_at": timestamp})
+        transaction.on_commit(lambda: _publish(root.conversation, resolve_live_recipients(conversation=root.conversation), "thread_read_state", {"user_id": str(actor.pk), "root_id": str(root.id), "last_read_at": timestamp.isoformat()}))
     return receipt
 
 
@@ -284,6 +308,7 @@ def archive_conversation(*, actor, conversation, archived=True):
     _require_view(actor, conversation); participant = _require_participant(actor, conversation)
     participant.archived_at = timezone.now() if archived else None
     participant.save(update_fields=["archived_at"])
+    transaction.on_commit(lambda: _publish(conversation, [actor], "conversation_archived", {"archived": bool(archived)}))
     return participant
 
 
@@ -337,6 +362,24 @@ def _publish(conversation, users, event_type, payload):
     """The views chunk supplies safe serializers; this emits only opaque IDs."""
     from .realtime import publish_messaging_event
     publish_messaging_event(conversation=conversation, users=users, event_type=event_type, payload=payload)
+
+
+def _serialized_reactions(message):
+    from .serializers import serialize_reactions
+    message = Message.objects.prefetch_related("reactions").get(pk=message.pk)
+    return serialize_reactions(message)
+
+
+def _poll_updated_payload(poll):
+    from .serializers import serialize_poll
+    poll = Poll.objects.select_related("message__conversation__app").prefetch_related("options__votes").get(pk=poll.pk)
+    return {"message_id": str(poll.message_id), "poll_id": str(poll.id), "poll": serialize_poll(poll)}
+
+
+def _conversation_upsert_payload(conversation):
+    from .serializers import serialize_conversation_core
+    conversation = Conversation.objects.select_related("app", "scope").get(pk=conversation.pk)
+    return serialize_conversation_core(conversation)
 
 
 def _notify_message(message, sender):

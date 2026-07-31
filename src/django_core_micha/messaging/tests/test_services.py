@@ -1,21 +1,35 @@
+import datetime
+
 import pytest
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
 from django.test import override_settings
+from django.utils import timezone
 
 from django_core_micha.messaging.crypto import decrypt_text, register_messaging_app
-from django_core_micha.messaging.models import Conversation, ConversationParticipant, Message, MessagingApp, MessagingAuditEvent, MessagingScope
+from django_core_micha.messaging.models import (Conversation, ConversationParticipant, Message, MessagingApp,
+                                                  MessagingAuditEvent, MessagingScope, PollVote)
 from django_core_micha.messaging.policy import MembershipSnapshot, register_messaging_policy, unregister_messaging_policy
 from django_core_micha.messaging.services import (
     MessagingPermissionDenied,
+    add_reaction,
+    archive_conversation,
     break_glass_read,
+    close_poll,
     create_conversation,
+    create_poll,
     edit_message,
+    mark_delivered,
+    mark_read,
+    mark_thread_read,
+    open_direct,
     read_status,
     reconcile_membership,
+    remove_reaction,
     resolve_live_recipients,
     send_message,
     soft_delete_message,
+    vote_poll,
 )
 from django_core_micha.messaging import services as services_module
 
@@ -193,3 +207,196 @@ def test_send_message_recovers_from_concurrent_integrity_error_without_aborting_
     assert message.pk == winner.pk
     # The outer transaction must still be usable after the recovered IntegrityError.
     assert ConversationParticipant.objects.filter(conversation=conversation).count() == 4
+
+
+def _capture_frames(monkeypatch):
+    # transaction.on_commit callbacks never fire inside pytest-django's default
+    # per-test atomic wrapper — django_capture_on_commit_callbacks(execute=True)
+    # (used by every test below) is what actually runs them.
+    sent = []
+    monkeypatch.setattr("django_core_micha.messaging.realtime.push_to_users", lambda users, frame: sent.append((list(users), frame)))
+    return sent
+
+
+@pytest.mark.django_db
+def test_reaction_add_and_remove_publish_aggregate_frame_to_live_recipients(domain, monkeypatch, django_capture_on_commit_callbacks):
+    _, conversation, users, _ = domain
+    message, _ = send_message(actor=users[0], conversation=conversation, body="react to me")
+    sent = _capture_frames(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        add_reaction(actor=users[1], message=message, emoji="\U0001F44D")
+    with django_capture_on_commit_callbacks(execute=True):
+        remove_reaction(actor=users[1], message=message, emoji="\U0001F44D")
+
+    reaction_frames = [(recipients, frame) for recipients, frame in sent if frame["type"] == "reaction"]
+    assert len(reaction_frames) == 2
+    recipients, added = reaction_frames[0]
+    assert {u.pk for u in recipients} == {users[0].pk, users[1].pk}  # sender+live; muted/removed excluded
+    assert added["reactions"] == [{"emoji": "\U0001F44D", "count": 1}]
+    assert added["message_id"] == str(message.id)
+    # Aggregate only — no per-user emoji ownership on the wire.
+    assert set(added).isdisjoint({"user_id", "users"})
+    _, removed = reaction_frames[1]
+    assert removed["reactions"] == []
+
+
+@pytest.mark.django_db
+def test_poll_vote_and_close_publish_poll_updated_without_voted_option_ids(domain, monkeypatch, django_capture_on_commit_callbacks):
+    _, conversation, users, _ = domain
+    poll, created = create_poll(actor=users[0], conversation=conversation, question="Coffee or tea?", options=["Coffee", "Tea"])
+    assert created
+    option = poll.options.first()
+    sent = _capture_frames(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        vote_poll(actor=users[1], poll=poll, option_ids=[option.id])
+    with django_capture_on_commit_callbacks(execute=True):
+        close_poll(actor=users[0], poll=poll)
+
+    poll_frames = [frame for _, frame in sent if frame["type"] == "poll_updated"]
+    assert len(poll_frames) == 2  # vote, then close
+    for frame in poll_frames:
+        assert "voted_option_ids" not in frame["poll"]
+        assert frame["poll"]["question"] == "Coffee or tea?"
+        assert frame["envelope"] == "messaging" and frame["event_id"]
+    # The load-bearing invariant: identical payload regardless of who ends up receiving it.
+    vote_frame, close_frame = poll_frames
+    assert vote_frame["poll"]["options"][0]["voters"] == [users[1].pk]
+    assert close_frame["poll"]["closed_at"] is not None
+
+
+@pytest.mark.django_db
+def test_message_and_message_edited_frames_never_gain_voted_option_ids_when_poll(domain, monkeypatch, django_capture_on_commit_callbacks):
+    """The viewer-independence rule applies retroactively to the already-shipped
+    message/message_edited frames once they embed a poll (design amendment)."""
+    _, conversation, users, _ = domain
+    poll, _ = create_poll(actor=users[0], conversation=conversation, question="q", options=["a", "b"])
+    PollVote.objects.create(option=poll.options.first(), user=users[0])
+    sent = _capture_frames(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        edit_message(actor=users[0], message=poll.message, body=None)
+
+    edited = [frame for _, frame in sent if frame["type"] == "message_edited"]
+    assert len(edited) == 1
+    assert "voted_option_ids" not in edited[0]["message"]["poll"]
+
+
+@pytest.mark.django_db
+def test_watermark_frames_fire_only_on_actual_advance(domain, monkeypatch, django_capture_on_commit_callbacks):
+    _, conversation, users, _ = domain
+    message, _ = send_message(actor=users[0], conversation=conversation, body="hi")
+    sent = _capture_frames(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        mark_read(actor=users[1], conversation=conversation)
+    with django_capture_on_commit_callbacks(execute=True):
+        mark_delivered(actor=users[1], conversation=conversation)
+    with django_capture_on_commit_callbacks(execute=True):
+        mark_thread_read(actor=users[1], root=message)
+    assert {frame["type"] for _, frame in sent} == {"read_state", "delivered", "thread_read_state"}
+    assert len(sent) == 3
+
+    sent.clear()
+    # Re-marking with an earlier or equal timestamp is a no-op — must not re-fire.
+    earlier = timezone.now() - datetime.timedelta(hours=1)
+    with django_capture_on_commit_callbacks(execute=True):
+        mark_read(actor=users[1], conversation=conversation, read_at=earlier)
+    with django_capture_on_commit_callbacks(execute=True):
+        mark_delivered(actor=users[1], conversation=conversation, delivered_at=earlier)
+    with django_capture_on_commit_callbacks(execute=True):
+        mark_thread_read(actor=users[1], root=message, read_at=earlier)
+    assert sent == []
+
+    later = timezone.now() + datetime.timedelta(hours=1)
+    with django_capture_on_commit_callbacks(execute=True):
+        mark_read(actor=users[1], conversation=conversation, read_at=later)
+    assert len([f for _, f in sent if f["type"] == "read_state"]) == 1
+
+
+@pytest.mark.django_db
+def test_archive_conversation_frame_is_participant_local(domain, monkeypatch, django_capture_on_commit_callbacks):
+    _, conversation, users, _ = domain
+    sent = _capture_frames(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        archive_conversation(actor=users[1], conversation=conversation, archived=True)
+
+    frames = [(recipients, frame) for recipients, frame in sent if frame["type"] == "conversation_archived"]
+    assert len(frames) == 1
+    recipients, frame = frames[0]
+    assert [u.pk for u in recipients] == [users[1].pk]  # only the archiving participant, not the conversation
+    assert frame["archived"] is True
+
+
+@pytest.mark.django_db
+def test_reconcile_membership_publishes_participant_changed_once(domain, monkeypatch, django_capture_on_commit_callbacks):
+    _, conversation, users, policy = domain
+    policy.snapshot = MembershipSnapshot([users[1]], external_key="all", remove_absent=False)
+    sent = _capture_frames(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        reconcile_membership(conversation=conversation)
+
+    frames = [frame for _, frame in sent if frame["type"] == "participant_changed"]
+    assert len(frames) == 1
+
+
+@pytest.mark.django_db
+def test_send_message_and_open_direct_publish_conversation_upsert_without_participant_fields(domain, monkeypatch, django_capture_on_commit_callbacks):
+    app, conversation, users, _ = domain
+    sent = _capture_frames(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        send_message(actor=users[0], conversation=conversation, body="hi")
+
+    upserts = [frame for _, frame in sent if frame["type"] == "conversation_upsert"]
+    assert len(upserts) == 1
+    # Viewer-independent projection only — no participant-scoped archived_at/muted/etc,
+    # which would otherwise leak one recipient's state to every other fanned-out recipient.
+    assert set(upserts[0]).isdisjoint({"archived_at", "muted", "email_enabled", "push_enabled"})
+    assert upserts[0]["last_message"]["excerpt"] == "hi"
+
+    sent.clear()
+    scope = MessagingScope.objects.get(app=app, kind="global")
+    with django_capture_on_commit_callbacks(execute=True):
+        open_direct(actor=users[0], target=users[1], app=app, scope=scope)
+    direct_upserts = [frame for _, frame in sent if frame["type"] == "conversation_upsert"]
+    assert len(direct_upserts) == 1
+    assert direct_upserts[0]["kind"] == "direct"
+
+
+@pytest.mark.django_db
+def test_reopening_an_existing_direct_conversation_does_not_republish_upsert(domain, monkeypatch, django_capture_on_commit_callbacks):
+    """open_direct's get_or_create is a routine no-op on every re-open of an existing DM
+    (e.g. a user reopening a chat thread) — that must not re-fire conversation_upsert on
+    every call, which would be an unbounded fan-out storm for a frequently-reopened DM."""
+    app, _, users, _ = domain
+    scope = MessagingScope.objects.get(app=app, kind="global")
+    sent = _capture_frames(monkeypatch)
+    with django_capture_on_commit_callbacks(execute=True):
+        open_direct(actor=users[0], target=users[1], app=app, scope=scope)
+    assert len([f for _, f in sent if f["type"] == "conversation_upsert"]) == 1
+    sent.clear()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        open_direct(actor=users[0], target=users[1], app=app, scope=scope)
+
+    assert [f for _, f in sent if f["type"] == "conversation_upsert"] == []
+
+
+@pytest.mark.django_db
+def test_reaction_frames_do_not_republish_on_a_no_op(domain, monkeypatch, django_capture_on_commit_callbacks):
+    _, conversation, users, _ = domain
+    message, _ = send_message(actor=users[0], conversation=conversation, body="react to me")
+    with django_capture_on_commit_callbacks(execute=True):
+        add_reaction(actor=users[1], message=message, emoji="\U0001F44D")
+    sent = _capture_frames(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        add_reaction(actor=users[1], message=message, emoji="\U0001F44D")  # already reacted — no-op
+    with django_capture_on_commit_callbacks(execute=True):
+        remove_reaction(actor=users[1], message=message, emoji="\U0001F604")  # never reacted — no-op
+
+    assert [f for _, f in sent if f["type"] == "reaction"] == []
