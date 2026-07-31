@@ -7,6 +7,7 @@ INSTALLED_APPS = [
     "django_core_micha.auditlog",
     "django_core_micha.invitations",
     "django_core_micha.notifications",
+    "django_core_micha.messaging",
     "django_core_micha.onboarding",
     "allauth",
     "allauth.account",
@@ -43,6 +44,12 @@ DATABASES = {
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 USE_TZ = True
+
+# Deliberately distinct test rings: messaging registration rejects shared rings.
+MESSAGING_KEYRINGS = {
+    "test-app": ["m6QODq43eUafIhXbCCHyjPDONKy3Q3JUM9Y9E0kxPdk="],
+    "other-app": ["Oir41I0GSn0fZpsjVLToz3WaBDtYJ4wJoYaKJpFfgQ0="],
+}
 
 # Override for test environment — no Redis available in CI
 CACHES = {

@@ -107,6 +107,7 @@ CORE_APPS = [
     "django_core_micha.auth",
     "django_core_micha.auditlog",
     "django_core_micha.notifications",
+    "django_core_micha.messaging",
     "django_core_micha.onboarding",
 ]
 
@@ -219,6 +220,12 @@ TURNSTILE_SITE_KEY = env("TURNSTILE_SITE_KEY", default="")
 TURNSTILE_SECRET_KEY = env("TURNSTILE_SECRET_KEY", default="")
 NOTIFICATION_MODEL = ""
 ONBOARDING_EXTRA_STEP_KEYS = []
+
+# Messaging consumers register their app key in their AppConfig and must provision
+# a distinct ordered Fernet ring via sync-secrets/project settings, for example:
+# MESSAGING_KEYRINGS = {"my_app": [env("MY_APP_MESSAGING_FERNET")]}
+# During rotation deploy [new_primary, old_key, ...]; omit retired/empty keys.
+# Shared rings are rejected by messaging registration.
 
 
 # -------------------------------------------------------------------
