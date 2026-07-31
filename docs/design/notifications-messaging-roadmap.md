@@ -226,15 +226,21 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
   production database; jg's messaging Fernet key must be created in Proton by the operator before
   `register_messaging_app` can succeed, which it fails closed without, by design; the migration decrypts
   and re-encrypts real user content; and retiring jg's local app is an approval-gated 40-file deletion.
-  The shape is NOTIF-9/10/11's — **5a** expand (additive, nothing cut over), **5b** migrate + reconcile,
+  The shape is NOTIF-9/10/11's — **5a** expand (additive, nothing cut over), ~~**5b** migrate~~ — **dropped 2026-08-01**,
   **5c** wire the frontend behind a default-off flag (**the night-runnable block**), **5d** flip and
   retire. The legacy-table drop stays a separate guarded step after 5d, exactly as NOTIF-11 followed
   NOTIF-10. All four carry a hard rule: read dcm/ucm, never modify them — every adoption-adjacent WO so
   far surfaced a platform gap, and an unattended session must surface it rather than patch across repos.
   Carries the CI-5 production-janitor deploy gate (first production consumer; CI-5 is now closed).
-  **Design correction found while scoping:** the Phase C sketch below says "Preserve IDs" — it cannot be
-  done. jg uses integer `AutoField` primary keys and the platform uses `UUIDModel`, so 5b must mint new
-  UUIDs and carry a durable old→new mapping table; without it, reply re-pointing, FK translation,
+  **Why 5b was dropped:** production holds 27 conversations, 7 messages and 1 attachment — only **4 written
+  by a human**, last activity 2026-07-18, staging identical to prod, and 26 of the 27 conversations are
+  empty auto-provisioned shells the platform regenerates through `provision_membership`. The migration's
+  whole apparatus was volume-justified; at four messages it costs more than the data. Operator decision:
+  no migration **and no export** — not carried forward, still readable in jg's legacy tables until the
+  separate guarded drop WO.
+  **Design correction that outlives it:** the Phase C sketch below says "Preserve IDs" — it cannot be
+  done. jg uses integer `AutoField` primary keys and the platform uses `UUIDModel`, so any future consumer migration must mint
+  new UUIDs and carry a durable old→new mapping table; without it, reply re-pointing, FK translation,
   resumability and idempotency all fail.
 - **MSG-6+ (hram/spesix/…)** — additional messaging adopters as needed.
 
