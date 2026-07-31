@@ -135,4 +135,180 @@ WO end).
 
 ## Part B — Implementation map (Orchestrator)
 
-To be filled by the Orchestrator session on `git pull`, within the envelope above.
+### Execution directive (place first when generating the Codex prompt)
+
+> Implement through `codex exec` in the background — invoked directly via Bash (never the
+> `debugger`/`*_coder` Agent wrappers) with BOTH flags `--skip-git-repo-check` and
+> `--dangerously-bypass-approvals-and-sandbox`, prompt passed as a positional argument from a file.
+> Fall back to direct Claude implementation only on Codex quota / rate-limit / non-zero exit.
+
+### Target repo working directory (absolute)
+
+`C:\Users\biglmi\Documents\webapps\django-core-micha` (repo root — package lives at
+`src/django_core_micha/messaging/`). Never `…\webapps`.
+
+### Context package
+
+**Named files to change** (all under `src/django_core_micha/messaging/`):
+
+1. **`serializers.py`**
+   - Add `serialize_poll(poll)` — viewer-independent core only, per design amendment:
+     `{id, question, allow_multiple, closed_at, created_by_id, options: [{id, text, order,
+     vote_count, voters}]}`. `question`/`option.text` decrypt via `decrypt_text(app_key=..., value=...)`
+     exactly like `serialize_message`. `voters` = list of participant user ids who voted that option
+     (query `PollVote` per option, or one query across `poll.options` and group in Python — either is
+     fine, this is a bounded list per message). **Never** include `voted_option_ids` here — that is
+     REST-only and added by the view after calling this.
+   - `serialize_message(message)`: when `message.kind == "poll"`, add a `"poll"` key =
+     `serialize_poll(message.poll)`; omit the key for every other kind (do not set it to `None`).
+     Guard the reverse one-to-one access (`message.poll` raises `Poll.DoesNotExist` if absent — only
+     relevant defensively; a `kind == "poll"` message always has a poll in practice, but callers should
+     not crash on a lookup failure — use `getattr` / `hasattr` or an explicit try/except, whichever
+     reads cleanest here). Call sites already `prefetch_related("attachments", "reactions")`
+     (`views.py`, `realtime.py`) — extend those to also prefetch the poll so this stays N+1-free:
+     `prefetch_related("attachments", "reactions", "poll__options__votes")` (the poll's
+     `options`/`votes` are what `serialize_poll` walks).
+   - `serialize_conversation(conversation, participant)`: add `last_message` = `{id, sender_id, kind,
+     excerpt, created_at}` or `null`. Compute from the conversation's newest message (there is no
+     existing `last_message` FK — query `conversation.messages.order_by("-created_at").first()`, or
+     have the call site pass it in / annotate; either is fine as long as it stays one query per
+     conversation on the list page, matching the design's "decrypts one message per conversation"
+     budget). `excerpt`: decrypted `body` truncated to a server-owned bound (pick a constant, e.g.
+     140 chars — document it as a module constant, not a magic number); empty string for a
+     soft-deleted message (`deleted_at is not None` → body is already cleared to `None` by
+     `soft_delete_message`, so excerpt is `""`); for `kind == "poll"`, excerpt is the poll's decrypted
+     `question`, not the (empty) message body.
+
+2. **`services.py`** — add realtime fan-out. Follow the existing `transaction.on_commit(lambda: _publish(...))`
+   pattern at lines 158/173/187 exactly (recipients re-resolved live inside the callback, not
+   captured before commit):
+   - `add_reaction`/`remove_reaction` (191–201): wrap body in `with transaction.atomic():`, publish
+     `"reaction"` on commit to `resolve_live_recipients(conversation=message.conversation)` — aggregate
+     payload only (e.g. `{"message_id": str(message.id), "reactions": serialize_reactions(message)}`,
+     reusing the existing aggregate helper from `serializers.py`); never per-user emoji ownership.
+   - `vote_poll`/`close_poll` (215–236): publish `"poll_updated"` on commit to
+     `resolve_live_recipients(conversation=poll.message.conversation)`, payload
+     `{"message_id": str(poll.message_id), "poll_id": str(poll.id), "poll": serialize_poll(poll)}` —
+     **never** `voted_option_ids`. `vote_poll` currently returns `None`; change it to `return poll` (or
+     the refreshed poll) so the view can build the REST response without a second query. Both already
+     run inside function bodies without an outer `transaction.atomic()` for `vote_poll` (it has one
+     internally already) — `close_poll` currently has none; add one so `on_commit` is well-defined.
+   - `mark_read`/`mark_delivered`/`mark_thread_read` (252–271): **only** publish when the watermark
+     actually advances (the existing `if ... is None or timestamp > ...:` branch is already the advance
+     guard — track whether that branch ran and only schedule the frame inside it). Frame types
+     `"read_state"`, `"delivered"`, `"thread_read_state"` respectively, fanned to
+     `resolve_live_recipients(conversation=...)` (thread-read uses `root.conversation`). Keep payloads
+     aggregate/viewer-independent — the identity of *who* advanced their own watermark is not
+     per-viewer (it's the same fact for every recipient), but never include one recipient's own
+     `last_read_at` next to another's. A `{"user_id": str(actor.pk)}` shape (plus the new watermark
+     value) is sufficient; do not add `recipient_detail`-style per-participant breakdowns here — that
+     stays REST-only (`read_status`, already gated on `read_receipt_detail` and never for `direct`).
+   - `archive_conversation` (283–287): publish `"conversation_archived"` on commit, fanned **only to
+     `actor`** (`[actor]`, not `resolve_live_recipients`) — participant-local per the design amendment.
+     Minimal payload, e.g. `{"archived": bool(archived)}`.
+   - `reconcile_membership` (47–75): publish `"participant_changed"` on commit to the conversation's
+     current live participants (query fresh after commit, same pattern as recipients elsewhere), once
+     per call — not once per changed row.
+   - `send_message` (127–160) and `open_direct`/`create_conversation` (78–116): publish
+     `"conversation_upsert"` on commit.
+     - On `send_message`: same recipient set as the existing `"message"` frame
+       (`resolve_live_recipients(conversation=conversation, sender=actor)`) — this is the
+       "last-message change" trigger. Reuse the already-updated `conversation` (its `last_message_at`
+       is already saved by this point in the function).
+     - On `open_direct`/`create_conversation`: fan to the conversation's participants at creation time
+       (open/create trigger).
+     - **Payload must be viewer-independent** — do **not** reuse `serialize_conversation(conversation,
+       participant)` verbatim, since it embeds `archived_at`/`muted`/`email_enabled`/`push_enabled`,
+       which are per-participant and would leak one recipient's mute/archive state to every other
+       recipient if fanned out as-is. Build a separate, smaller payload for the frame: `{id, app_key,
+       scope_id, kind, title, last_message_at, last_message, created_at}` (the non-participant-scoped
+       subset of `serialize_conversation`, reusing its `last_message` computation from `serializers.py`
+       so the shapes don't drift). This is the one place in this WO most likely to introduce a privacy
+       leak if implemented by literal reuse — do not shortcut it.
+   - `set_preferences`: **no frame** — not in the design's frame vocabulary (§Realtime) and not in the
+     WO's "Realtime frames" list; leave it silent, as today.
+
+3. **`realtime.py`** (`publish_messaging_event`): currently special-cases `message`/`message_edited`
+   to embed `serialize_message`. No change needed there for the new frame types **if** services.py
+   builds each frame's full payload before calling `_publish`/`publish_messaging_event` (i.e. pass the
+   already-serialized `poll`/`reactions` dict in `payload`, the same way `message_deleted` already
+   passes opaque fields without a lookup). Prefer this over adding more `event_type`-branching inside
+   `publish_messaging_event` — keep the "views/services chunk supplies safe serializers" comment at the
+   top of this file true. If a lookup-after-commit *is* needed for a frame (mirroring how `message`
+   does it), keep it minimal and viewer-independent, same discipline as the existing branch.
+
+4. **`views.py`**:
+   - `ConversationPollView.post` (263–269): response body currently `{id, message_id, closed_at}`.
+     Change to `serialize_poll(poll)` plus `voted_option_ids` (computed for `request.user` — a freshly
+     created poll has none, so this is normally `[]`, but compute it properly rather than hardcoding).
+   - `PollVoteView.post` (272–277): currently returns `204 No Content` with no body. Change to `200 OK`
+     with `serialize_poll(poll)` plus `voted_option_ids` for `request.user` (query `PollVote` for this
+     poll/user after the service call — `vote_poll` now returns the poll, see above). This is a
+     response-shape change on an existing endpoint; the design amendment explicitly calls for it
+     ("`POST polls/{id}/vote/` ... return[s] the same projection, so no mutation needs a follow-up
+     read") — implement it, it is in scope, not a regression.
+   - `PollCloseView.post` (280–285): currently returns `{id, closed_at}`. Change to `serialize_poll(poll)`
+     plus `voted_option_ids` for `request.user`, same shape as the other two.
+   - No new endpoint — **no `GET polls/{id}/`** (explicit non-goal, design amendment is explicit this
+     is not needed).
+
+### Invariants / do-not-touch / pitfalls
+
+- **Viewer-independence is the load-bearing constraint of this whole WO.** Every frame payload must be
+  byte-identical regardless of which recipient receives it. `voted_option_ids` must never appear in
+  `serialize_poll`'s return value, `poll_updated`, or in the `poll` key embedded in `message`/
+  `message_edited` (which already flow through `serialize_message` unchanged from MSG-2 — do not touch
+  those two frames' existing fields, only the new embedded `poll` key inherits this rule).
+- **`voters` is present in every conversation kind including `direct`** — no DM carve-out (design
+  amendment is explicit and corrects an earlier wrong draft; do not reintroduce the carve-out).
+- **No schema change.** If any of the above seems to need a new field/migration, stop and return to
+  the operator — do not add one.
+- **No new WS consumer, no client→server WS path.** `test_ws_inventory.py` must keep passing unchanged
+  in its assertion shape (`assert_all_consumers_secure([...]) == []` and no `consumers` module) — all
+  new frames go through the existing `publish_messaging_event`/`push_to_users` Layer-1 path.
+- **`attachment_ready` stays unemitted.** Do not add it; it is reserved, not a gap.
+- **Frame volume guard:** `read_state`/`delivered` must fire only on an actual watermark advance, never
+  on a no-op re-mark (e.g. calling `mark_read` twice with the same or earlier timestamp) — this is
+  explicitly called out as a risk in Part A and has a required test.
+- **`last_message` decryption cost:** one decrypt per conversation per list page, bounded excerpt length
+  — do not extend the preview beyond the excerpt (e.g. no full body, no attachment list).
+- Keep the existing three working frames (`message`, `message_edited`, `message_deleted`) byte-compatible
+  — the only permitted change to `message`/`message_edited` is the new embedded `poll` key when
+  `kind == "poll"`.
+
+### Required tests to WRITE (Codex writes them; the ORCHESTRATOR runs them)
+
+Per Part A "Required tests to WRITE" — write in `tests/test_services.py` (realtime fan-out, watermark
+guards, poll mutation return shape), `tests/test_serializers.py` (create if it does not exist — poll
+projection, viewer-independence of `serialize_poll`, `last_message` excerpt rules) and
+`tests/test_views.py` (poll endpoint response shapes, `voted_option_ids` per-viewer via REST) —
+whichever module already covers the neighbouring behaviour; do not invent a new test module layout if
+an existing one fits. Extend `tests/test_ws_inventory.py` only if a new frame needs an inventory-style
+assertion analogous to the existing ones — do not restructure that file.
+
+### Release (do last, after tests are written and passing)
+
+- Version bump in `pyproject.toml`: **minor** (additive contract change, matches the 2.36.0/MSG-2
+  precedent for "Added" changes vs. 2.36.1/MSG-2b's patch for a pure fix) → `2.37.0`.
+- `CHANGELOG.md` entry in the established prose style (see `[2.36.1]`/`[2.36.0]` entries) under
+  `## [2.37.0] — 2026-07-31`, `### Added`, titled `MSG-2c — poll read contract, conversation preview,
+  realtime frame completion`. Summarize: the poll read split (core vs. `voted_option_ids`), the
+  `last_message` preview field, and the newly emitted frames — in the same density as the existing
+  entries, not a line-by-line diff dump.
+
+### Preamble (append verbatim to the Codex prompt)
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`,
+> and the app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI
+> unless the spec says so; do not update `MEMORY.md`. Do NOT `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests the
+> `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute and
+> pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any review). The
+> orchestrator re-runs the authoritative set + does the independent review after you finish — those are
+> the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
