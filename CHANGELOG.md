@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.36.1] — 2026-07-31
+
+### Fixed
+
+**MSG-2b — scoped first-contact direct messages**
+
+- A scoped direct conversation can now be opened with a target who has no existing `ConversationParticipant` row in the resolved app. Tenant selection remains entirely server-side (`scope.app`, or the single active app for an omitted scope), while the registered `MessagingPolicy.can_open_direct()` hook remains the sole authorization decision for who may be addressed inside that tenant and still runs before any conversation or participant row is created. Self-DMs remain rejected by the core service.
+
 ## [2.36.0] — 2026-07-31
 
 ### Added

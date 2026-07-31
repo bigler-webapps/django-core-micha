@@ -130,10 +130,8 @@ class DirectConversationView(MessagingView):
             app = resolve_messaging_app(scope=scope)
         except MessagingTenantResolutionError as exc:
             raise ValidationError({"detail": str(exc)}) from exc
-        if scope is not None and not ConversationParticipant.objects.filter(conversation__app=app, user=target).exists():
-            raise ValidationError({"target_user_id": "Target user is not established in the resolved tenant."})
-        # Global DMs have no User->MessagingApp relation in this schema.  The
-        # singleton registry resolution above is the accepted v1 boundary.
+        # Core resolves the tenant above; the app policy decides whether this
+        # target may be addressed in it before open_direct creates any rows.
         conversation = self._service(lambda: open_direct(actor=request.user, target=target, app=app, scope=scope))
         participant = ConversationParticipant.objects.get(conversation=conversation, user=request.user)
         return Response(serialize_conversation(conversation, participant), status=status.HTTP_201_CREATED)

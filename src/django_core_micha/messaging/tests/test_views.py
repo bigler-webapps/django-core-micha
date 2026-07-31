@@ -10,7 +10,8 @@ from django_core_micha.messaging.crypto import register_messaging_app
 from django_core_micha.messaging.models import (Conversation, ConversationParticipant,
                                                  Message, MessagingApp, MessagingScope,
                                                  Poll, PollOption)
-from django_core_micha.messaging.policy import MembershipSnapshot, register_messaging_policy, unregister_messaging_policy
+from django_core_micha.messaging.policy import (MembershipSnapshot, get_messaging_policy,
+                                                register_messaging_policy, unregister_messaging_policy)
 
 
 class Policy:
@@ -84,10 +85,83 @@ def test_direct_scope_resolves_tenant_without_reading_app_key(api_domain):
     foreign = MessagingApp.objects.create(app_key="foreign-app", keyset_id="test")
     client = APIClient(); client.force_authenticate(users["author"])
     response = client.post("/messaging/conversations/direct/", {
-        "target_user_id": str(users["viewer"].pk), "scope": str(scope.pk), "app_key": foreign.app_key,
+        "target_user_id": str(users["outsider"].pk), "scope": str(scope.pk), "app_key": foreign.app_key,
     }, format="json")
     assert response.status_code == 201
     assert Conversation.objects.get(pk=response.data["id"]).app_id == app.id
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_scoped_direct_first_contact_consults_permitting_policy(api_domain, monkeypatch):
+    app, scope, _, users = api_domain
+    target = users["outsider"]
+    assert not ConversationParticipant.objects.filter(conversation__app=app, user=target).exists()
+    calls = []
+
+    def can_open_direct(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(get_messaging_policy(app.app_key), "can_open_direct", can_open_direct)
+    client = APIClient(); client.force_authenticate(users["author"])
+    response = client.post("/messaging/conversations/direct/", {
+        "target_user_id": str(target.pk), "scope": str(scope.pk),
+    }, format="json")
+
+    assert response.status_code == 201
+    assert calls == [{"actor": users["author"], "target": target, "scope": scope}]
+    assert ConversationParticipant.objects.filter(conversation_id=response.data["id"], user=target).exists()
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_scoped_direct_first_contact_denied_by_policy(api_domain, monkeypatch):
+    app, scope, _, users = api_domain
+    target = users["outsider"]
+    assert not ConversationParticipant.objects.filter(conversation__app=app, user=target).exists()
+    calls = []
+
+    def can_open_direct(**kwargs):
+        calls.append(kwargs)
+        return False
+
+    monkeypatch.setattr(get_messaging_policy(app.app_key), "can_open_direct", can_open_direct)
+    client = APIClient(); client.force_authenticate(users["author"])
+    response = client.post("/messaging/conversations/direct/", {
+        "target_user_id": str(target.pk), "scope": str(scope.pk),
+    }, format="json")
+
+    assert response.status_code == 403
+    assert len(calls) == 1
+    assert not Conversation.objects.filter(app=app, kind=Conversation.Kind.DIRECT).exists()
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_direct_self_dm_is_rejected(api_domain):
+    _, scope, _, users = api_domain
+    client = APIClient(); client.force_authenticate(users["author"])
+    response = client.post("/messaging/conversations/direct/", {
+        "target_user_id": str(users["author"].pk), "scope": str(scope.pk),
+    }, format="json")
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_global_direct_fails_closed_without_exactly_one_active_app(api_domain):
+    app, _, _, users = api_domain
+    client = APIClient(); client.force_authenticate(users["author"])
+
+    app.active = False; app.save(update_fields=["active"])
+    zero = client.post("/messaging/conversations/direct/", {"target_user_id": str(users["viewer"].pk)}, format="json")
+    assert zero.status_code == 400
+
+    app.active = True; app.save(update_fields=["active"])
+    MessagingApp.objects.create(app_key="another-app", keyset_id="test")
+    many = client.post("/messaging/conversations/direct/", {"target_user_id": str(users["viewer"].pk)}, format="json")
+    assert many.status_code == 400
 
 
 @pytest.mark.django_db
