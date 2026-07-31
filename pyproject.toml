@@ -36,7 +36,7 @@ test = [
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
 python_files = ["test_*.py"]
-testpaths = ["tests", "src/django_core_micha/notifications/tests", "src/django_core_micha/onboarding/tests"]
+testpaths = ["tests", "src/django_core_micha/notifications/tests", "src/django_core_micha/onboarding/tests", "src/django_core_micha/messaging/tests"]
 asyncio_mode = "auto"
 
 [project.scripts]
