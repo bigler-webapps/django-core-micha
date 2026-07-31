@@ -116,4 +116,92 @@ included) is the substance, not a formality. No version bump, no publish.
 
 ## Part B — Implementation map (Orchestrator)
 
-To be filled by the Orchestrator session on `git pull`, within the envelope above.
+### Execution directive (place first when generating the Codex prompt)
+
+> Implement through `codex exec` in the background — invoked directly via Bash (never the
+> `debugger`/`*_coder` Agent wrappers) with BOTH flags `--skip-git-repo-check` and
+> `--dangerously-bypass-approvals-and-sandbox`, prompt passed as a positional argument from a file.
+> Fall back to direct Claude implementation only on Codex quota / rate-limit / non-zero exit.
+
+### Target repo working directory (absolute)
+
+`C:\Users\biglmi\Documents\webapps\django-core-micha` (repo root). Never `…\webapps`.
+
+### Context package
+
+**Named files to change:**
+
+1. **`pyproject.toml`** — `[tool.pytest.ini_options]` block, currently (line ~39):
+   ```
+   testpaths = ["tests", "src/django_core_micha/notifications/tests", "src/django_core_micha/onboarding/tests"]
+   ```
+   Add `"src/django_core_micha/messaging/tests"` to the list. Do not touch `python_files`,
+   `DJANGO_SETTINGS_MODULE`, `asyncio_mode`, or anything else in this block or file.
+
+2. **New guard test — `tests/test_testpaths_coverage.py`** (repo-root `tests/` — this directory is
+   always in `testpaths`, so the guard test itself is always collected regardless of the bug it
+   guards against). Read `pyproject.toml` with `tomllib` (stdlib, `import tomllib`; the runtime here
+   is 3.13/3.14 — confirmed by `.github/workflows/publish.yml`'s `python-version: "3.14.5"` — `tomllib`
+   needs no dependency add despite the package's own `requires-python = ">=3.10"` floor, since this
+   test never ships to a consumer, it only runs in this repo's own CI/dev environment). Shape:
+   - A small pure function, e.g. `_uncovered_test_dirs(testpaths: list[str], repo_root: Path) -> list[str]`,
+     that: globs `repo_root.glob("src/django_core_micha/*/tests")` for directories (a real directory
+     named `tests` directly under a subpackage — do not overreach into a smarter/recursive glob, the
+     WO explicitly warns against a "clever generic implementation that silently matches nothing"),
+     converts each match to a POSIX-style repo-relative string (`src/django_core_micha/<name>/tests`,
+     matching the exact string form already used in `testpaths`), and returns the ones **not** present
+     verbatim in `testpaths`.
+   - **Test 1 (the actual guard):** load the real `pyproject.toml` from the repo root (locate it via
+     `Path(__file__).resolve().parents[1] / "pyproject.toml"` — this file lives at `tests/`, one level
+     below root), parse `tool.pytest.ini_options.testpaths` with `tomllib`, call the helper, and
+     `assert not uncovered, f"..." ` naming any offending directories in the failure message.
+   - **Test 2 (the "would it have caught this" case, per Required Tests — do not skip):** call the same
+     helper directly with a **hardcoded** stale list reproducing the exact bug this WO fixes —
+     `["tests", "src/django_core_micha/notifications/tests", "src/django_core_micha/onboarding/tests"]`
+     (i.e. the list literally taken from the WO's "The finding" section, pre-fix) — and assert the
+     helper reports `src/django_core_micha/messaging/tests` as uncovered. This is what proves the guard
+     is not vacuous; do not implement Test 1 alone.
+   - Use `repo_root = Path(__file__).resolve().parents[1]` for both tests (don't re-derive it
+     differently in each), so both walk the same real `src/django_core_micha/*/tests` set on disk —
+     only the `testpaths` list fed to the helper changes between the two tests.
+
+### Invariants / do-not-touch / pitfalls
+
+- **Do not touch messaging or notifications test content** to make the newly-included combined run
+  pass. If enabling `messaging/tests` alongside the rest of the suite surfaces real interference
+  (shared registry state — `register_messaging_app`/`register_messaging_policy` teardown, fixture
+  scope, DB state), that is the finding this WO exists to surface — stop and report it, do not patch
+  around it by narrowing `testpaths` back or editing an existing test's assertions.
+- **No dependency change**, no other `pyproject.toml` edit beyond the one `testpaths` line, no CI
+  workflow file change (the workflow already runs bare `pytest -q`; nothing there needs to change once
+  `testpaths` is correct).
+- The guard test path must be `tests/test_testpaths_coverage.py` or equivalent directly under the
+  root `tests/` dir — not under any subpackage's `tests/`, or it collects nowhere near universally
+  enough to guard the thing it's guarding.
+- **Verification is the substance of this WO, not a formality** (Part A, outcome 3): after the change,
+  actually run the full bare `pytest -q` (or `python -m pytest -q` with `PYTHONPATH` unset — mirror
+  however CI invokes it, no explicit path argument) from the repo root and confirm it is green with the
+  messaging tests now included, not just that the guard test and messaging tests pass in isolation.
+
+### Required tests to WRITE (Codex writes them; the ORCHESTRATOR runs them)
+
+Exactly the two guard-test cases described above (`tests/test_testpaths_coverage.py`). No other new
+test content — this WO does not add product-code tests, only the CI-coverage guard.
+
+### Preamble (append verbatim to the Codex prompt)
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`,
+> and the app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI
+> unless the spec says so (this WO explicitly authorizes the one `testpaths` line — nothing else in CI).
+> Do not update `MEMORY.md`. Do NOT `git add`/`commit`/`push` — leave every change uncommitted in the
+> working tree for the orchestrator's independent review. WRITE the tests the `Required tests` section
+> calls for AND **RUN the tests you just wrote** to confirm they execute and pass — that is the ONLY
+> test run you do (NOT the app's affected/full suite, NOT any review). The orchestrator re-runs the
+> authoritative full bare `pytest -q` + does the independent review after you finish — those are the
+> gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
