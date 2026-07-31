@@ -26,6 +26,8 @@ All public IDs are opaque UUIDs; timestamps are UTC. `app` means `MessagingApp(a
 | `Poll`, `PollOption`, `PollVote` | Poll: one-to-one message, encrypted question, `allow_multiple,created_by,closed_at`; option: encrypted text/order; vote: option/user/time. Service transaction enforces one vote for single polls. |
 | `MessagingAuditEvent` | `app,actor,action,target GenericFK,reason,request/correlation metadata,time`; mandatory for break-glass attempts, no plaintext. |
 
+**Relationship to the existing `django_core_micha.auditlog` subpackage:** deliberately a separate model, not a reuse. `auditlog.AuditEvent` is a generic *change*-audit facility — apps `register()` a model once, listing `redact_fields`, and get automatic signal-driven logging of writes to that model; it has no per-app tenant field and no target GenericFK, and one model can only be registered once process-wide. Messaging's break-glass need is an explicit *read*-access log (who viewed decrypted content and why), not a write audit, and needs per-app tenant scoping (`app`) that `auditlog.AuditEvent` does not carry — so it does not fit the registration model. `MessagingAuditEvent` is therefore its own table, populated by an explicit call from the break-glass code path (never signal-driven), not a second consumer of the generic registry.
+
 The four future seams are schema now: object thread, delivered watermark, retention fields, and participant channel/archive state. `last_delivered_at` means current authenticated realtime fan-out, not email/push acknowledgement. `last_read_at` is jg's explicit-read semantic. `all_read` excludes current non-sender participants. Only moderators see per-recipient detail for non-DMs; **DMs never expose recipient detail**, including to moderators. Archive is participant-local and clears on a new non-self message. `never` is v1's only retention policy.
 
 ## App hook contract
@@ -92,6 +94,8 @@ Delivery failure cannot roll back the durable message.
 ## Attachments
 
 Use `validators.upload.validate_upload` magic-byte validation. Accept PDF, OOXML (`docx/xlsx/pptx`), ODF (`odt/ods/odp`), legacy Office only with reliable signature, PNG/JPEG/GIF/WebP; reject MIME mismatch, archives, executables, HTML/SVG and unknown bytes. Limit is 25 MiB/file (policy may lower only). Images decode, EXIF-strip, safe re-encode and thumbnail before encryption. Other files are `attachment` download-only with `nosniff`; no foreign inline rendering.
+
+**Container-format caveat (MSG-2 pre-check):** OOXML and ODF files are themselves ZIP containers — the same leading magic bytes as a generic ZIP archive that this allowlist must reject. `validators.upload.validate_upload` currently ships only an `IMAGE_DEFAULT_MIMES` default; an Office/PDF allowlist is new caller-supplied config, not an existing capability. Before MSG-2 relies on `filetype`-based detection for OOXML/ODF, confirm it actually distinguishes them from a bare ZIP (e.g. via internal member inspection — `word/`/`xl/`/`ppt/` entries for OOXML, the `mimetype` entry for ODF), not just the outer container signature. If `filetype`'s built-in detectors do not cover this reliably, `validate_upload` needs an explicit content-aware check for these types before archives can be safely rejected without also rejecting legitimate Office files.
 
 Define, but do not install, `MessagingScanHook.scan(*, app_key, attachment_id, plaintext_path, declared_type) -> ScanResult`. It runs after validation before persistence when present; v1 has no scanner/queue and accepted files are `unscanned`.
 
