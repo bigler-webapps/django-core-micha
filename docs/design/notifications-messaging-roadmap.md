@@ -14,6 +14,11 @@ Decisions baked in (operator, 2026-07-29): messaging v1 = **full jg-parity**; jg
 sequencing = **close notifications cleanly first**; encryption-at-rest = **hard v1 requirement** for the
 shared messaging service; roadmap horizon = **near phases detailed, far phases sketched**.
 
+**Revision (operator, 2026-07-31):** "spesix is the first live greenfield consumer" is superseded — the
+platform is built **consumer-agnostic**; jg-ferien is the first intended beneficiary (MSG-5 pulled
+forward), spesix is deferred (MSG-4, backlog, no demand recorded). Binding detail:
+[`messaging-platform.md`](./messaging-platform.md) (status header + Go/no-go).
+
 ---
 
 ## 1. Must-reads (in order)
@@ -171,7 +176,11 @@ CI-3's intended staging-first gate, still awaiting its documented completion. Th
 not a notifications one, and lives as `webapp-management/work-orders/CI-5.md`. It matters here only because
 jg's `send_todo_digests` — the digest NOTIF-8/9/10 cut over to — is the single command it would switch on.
 
-### Phase B — messaging v1 (shared full-parity, greenfield, spesix-first) — prefix `MSG-*`
+### Phase B — messaging v1 (shared full-parity, greenfield, consumer-agnostic) — prefix `MSG-*`
+**Revision (operator, 2026-07-31):** built consumer-agnostic — nothing app-specific enters dcm/ucm (app
+specifics live behind the provider/policy hooks). **jg-ferien is the first intended beneficiary** (MSG-5,
+pulled forward from Phase C); **spesix (MSG-4) is deferred** — backlog, no demand recorded; its demand
+gate applies to MSG-4 only, not MSG-2/3.
 Starts **after** Phase A closes (Layer 1 extracted). Co-design from **two real shapes**: jg (reference,
 full feature set) + spesix (first live consumer).
 | WO | Repo | Scope |
@@ -179,11 +188,13 @@ full feature set) + spesix (first live consumer).
 | MSG-1 | dcm(+design) | **Requirements + design doc**: generalize jg's messaging domain (Conversation kinds, Participant/read-state, Message + reactions/polls/attachments, event-chat-sync, WhatsApp-tick receipts) off the `Event` FK onto a generic scope; reconcile against spesix's concrete needs. **Encryption-at-rest key-management for a multi-app service = explicit design-risk block, resolved here.** Rides Layer 1; produces `notify()` for "new message". |
 | MSG-2 | dcm | messaging domain models + services + S112 WS consumer (on Layer-1 transport) + `notify()` on new message |
 | MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity |
-| MSG-4 | spesix | spesix adopts the shared service (first live greenfield consumer) |
+| MSG-4 | spesix | spesix adopts the shared service — **deferred 2026-07-31**, backlog (no demand recorded); entry gate = the spesix demand confirmations |
 
 ### Phase C — far-term (sketched)
 - **MSG-5 (jg)** — migrate jg's existing messaging onto the shared service **including encrypted-at-rest
-  content** (the hard migration deliberately deferred; jg runs local until then).
+  content**. **Pulled forward (operator, 2026-07-31): jg is the first intended consumer** — dcm register
+  row MSG-5 minted; timing (directly after MSG-3 vs. later) = operator call at MSG-3 end; carries the
+  CI-5 production-janitor deploy gate (first production consumer).
 - **MSG-6+ (hram/spesix/…)** — additional messaging adopters as needed.
 
 ---

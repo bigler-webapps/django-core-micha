@@ -1,8 +1,8 @@
 # Messaging Platform — Design
 
-Status: **Proposed binding design** (MSG-1, 2026-07-31). Approval Gate #1 and the spesix demand gate remain open. `notifications-platform.md` remains authoritative for notification routing/delivery; this document defines Layer 3.
+Status: **Binding design** (MSG-1, 2026-07-31; independent review closed). **Consumer re-ordering (operator, 2026-07-31): built consumer-agnostic — jg-ferien is the first intended beneficiary (MSG-5 adoption/migration, pulled forward), spesix is deferred; the spesix demand gate no longer gates MSG-2/3 and moves to the deferred MSG-4.** `notifications-platform.md` remains authoritative for notification routing/delivery; this document defines Layer 3.
 
-> MSG-2/3/4 must not start until the operator passes the [spesix demand gate](#go--no-go). Non-confirmation shelves this design; it never authorises a weaker build.
+> Operator decision 2026-07-31: MSG-2/3 build the abstract platform and are **not** gated on spesix. The [spesix demand gate](#go--no-go) applies only to MSG-4 (deferred). The spesix paper test remains as validation of the abstraction against a hypothetical second shape; it never authorises a weaker build.
 
 ## Principle and boundary
 
@@ -101,7 +101,7 @@ Define, but do not install, `MessagingScanHook.scan(*, app_key, attachment_id, p
 
 ## Volume, retention and operations
 
-NOTIF-20/21's no-schedule decision was valid at low volume but no longer holds: 100 active users × 10 posts/day × 12 recipients = **12,000 recipient rows/day** (360k/month) and up to 720k delivery rows/month; a stress-case 500 active users × 50 posts/day × 50 recipients is **1,250,000/day** (37.5m/month). MSG-2 adds `notify(expires_at=...)`; `messaging.new_message` uses 30-day TTL for notification/delivery/recipient projections, never messages. Production janitor scheduling is a MSG-4 deploy gate, not dcm code. `scheduled_commands` is staging-only until `webapp-management/work-orders/CI-5.md`; without CI-5/equivalent scheduler MSG-4 is blocked. Monitor created/expired rows and >48h janitor lag.
+NOTIF-20/21's no-schedule decision was valid at low volume but no longer holds: 100 active users × 10 posts/day × 12 recipients = **12,000 recipient rows/day** (360k/month) and up to 720k delivery rows/month; a stress-case 500 active users × 50 posts/day × 50 recipients is **1,250,000/day** (37.5m/month). MSG-2 adds `notify(expires_at=...)`; `messaging.new_message` uses 30-day TTL for notification/delivery/recipient projections, never messages. Production janitor scheduling is a deploy gate for the **first production consumer** (MSG-5/jg after the 2026-07-31 re-ordering; formerly MSG-4), not dcm code. `scheduled_commands` is staging-only until `webapp-management/work-orders/CI-5.md`; without CI-5/equivalent scheduler the first consumer adoption is blocked. Monitor created/expired rows and >48h janitor lag.
 
 ## ucm surface
 
@@ -121,8 +121,10 @@ Expense claim `EC-42` is an object scope; its provider derives claimant, approve
 
 Before Gate #1 the operator must confirm: concrete expense-claim model/content type; participant rule and update triggers; moderation/broadcast roles; that MSG-4 ships object threads, global DMs and broadcast; timeline and volume. Any change returns to the operator. No confirmation: shelf/block MSG-1 and leave MSG-2–4 planned (or drop only by operator decision).
 
+**Update (operator, 2026-07-31):** this gate no longer blocks MSG-2/3 — the platform is built consumer-agnostic; jg-ferien is the first intended beneficiary (MSG-5). The confirmations above become the entry gate of MSG-4 whenever spesix adoption is picked up.
+
 ## Phase C and release plan
 
 Phase C maps Event→container, pairs→scoped direct, group/broadcast→same kinds, event_all/team→managed keys. Preserve IDs/times/deletes/replies/receipts/reactions/polls; decrypt under retained jg ring and re-encrypt text/blobs under jg's dcm ring; cut over only after parity/count/decrypt reconciliation. Sketch only.
 
-Phase B needs 10–14 chunks: MSG-2 4–5 (registry/keyrings/models; hooks/services; REST/WS; attachments/TTL); MSG-3 3–5 (provider/cache; list/thread pagination; composer/attachments; reactions/polls/ticks/preferences; i18n/PWA); MSG-4 3–4 (spesix provider/object scope; surfaces/notify; rollout scheduler). Staged commits and small sibling contract fixes are in-scope. For each release chunk: publish from main, independently live-check registry, then bump exact consumer pin and redeploy. Per-chunk scoped tests; assembled WO affected-area test gate plus one independent review, or explicitly staged independent reviews NOTIF-7-style. MSG-4 requires published MSG-2 then MSG-3, demand confirmation and production janitor resolution.
+Phase B needs 10–14 chunks: MSG-2 4–5 (registry/keyrings/models; hooks/services; REST/WS; attachments/TTL); MSG-3 3–5 (provider/cache; list/thread pagination; composer/attachments; reactions/polls/ticks/preferences; i18n/PWA); MSG-4 3–4 (spesix provider/object scope; surfaces/notify; rollout scheduler). Staged commits and small sibling contract fixes are in-scope. For each release chunk: publish from main, independently live-check registry, then bump exact consumer pin and redeploy. Per-chunk scoped tests; assembled WO affected-area test gate plus one independent review, or explicitly staged independent reviews NOTIF-7-style. The first consumer adoption (MSG-5/jg per the 2026-07-31 re-ordering; MSG-4/spesix when demand materialises) requires published MSG-2 then MSG-3, its entry gate, and production janitor resolution.
