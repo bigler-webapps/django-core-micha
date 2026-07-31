@@ -196,12 +196,16 @@ gate applies to MSG-4 only, not MSG-2/3.
 Starts **after** Phase A closes (Layer 1 extracted — met 2026-07-30). Design validated against two
 shapes: jg (reference, full feature set — the one *real* input) + a hypothetical spesix object-thread
 shape (paper test only; see §5).
+**One prerequisite sits outside the `MSG-*` prefix:** `ui-core-micha` `DX-1` — a minimal Vite dev
+harness, because ucm had no way to render any component at all (only `build` + `test`). Dev-only, no
+publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and is not messaging work.
+
 | WO | Repo | Scope |
 |---|---|---|
 | MSG-1 | dcm(+design) | **Requirements + design doc**: generalize jg's messaging domain (Conversation kinds, Participant/read-state, Message + reactions/polls/attachments, event-chat-sync, WhatsApp-tick receipts) off the `Event` FK onto a generic scope; reconcile against spesix's concrete needs. **Encryption-at-rest key-management for a multi-app service = explicit design-risk block, resolved here.** Rides Layer 1; produces `notify()` for "new message". **✓ done 2026-07-31** (`0b3a47d`/`576c094` → the binding `messaging-platform.md`; "spesix's concrete needs" became a hypothetical paper test per the revision above). |
 | MSG-2 | dcm | messaging domain models + services + REST/realtime on the Layer-1 transport (**no new WS consumer** — corrected per design §Realtime; rides `push_to_users`) + `notify()` on new message + `notify(expires_at=…)` API. **✓ done 2026-07-31, published dcm 2.36.0** (chunks `7df9670`/`858f705`/`a6a4cf5`/`3ad7709`, publish `1d8c60d`; independent review per chunk, chunk 3 twice after the operator design calls on `app_key` tenant resolution + soft-delete redaction — see `messaging-platform.md` §"Tenant resolution and deletion semantics"). Its one open P3 (scoped DM forecloses first contact) is decided and cut as **MSG-2b** — see §5 |
 | MSG-2b | dcm | **scoped first-contact DM must be possible** — drop `DirectConversationView`'s participant-existence precondition; target-side tenant safety rests on `MessagingPolicy.can_open_direct` alone. Tier 1, no migration. Depends on MSG-2; **planned, runs before MSG-3.** Envelope `work-orders/MSG-2b.md` |
-| MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity |
+| MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity. **Envelope authored 2026-07-31** in the target repo (`ui-core-micha/work-orders/MSG-3.md`); 5 chunks, carries `ui_reviewer`. Operator decisions: **redesign permitted** for layout/interaction with "No jg feature is lost" still binding and a written deviation list as a deliverable; UI validated through the new ucm dev harness. Preconditions: dcm 2.36.1 published · ucm `DX-1` done |
 | MSG-4 | spesix | spesix adopts the shared service — **deferred 2026-07-31**, backlog (no demand recorded); entry gate = the spesix demand confirmations |
 
 ### Phase C — adopters (MSG-5 pulled forward 2026-07-31; rest sketched)
@@ -223,6 +227,20 @@ shape (paper test only; see §5).
   already calls before creating any row, so the check was not only too strict but sat in front of the hook
   and pre-empted it. Core keeps tenant resolution and self-DM rejection. Sequenced **before MSG-3** so the
   ucm composer is not built against behaviour that would change at adoption.
+- **MSG-5 is now a visible change for jg users (operator decision 2026-07-31).** MSG-3 was granted a
+  redesign licence for layout, composition and interaction — jg's current messaging UI is no longer a
+  verbatim visual target. The feature floor is unchanged ("No jg feature is lost" stays binding, and
+  MSG-3 must ship a written deviation list), but the adoption stops being a silent swap: jg users will
+  see a different chat surface. MSG-5 therefore needs its own UX review, and the deviation list is the
+  input to it. The counter-risk to watch: "redesign permitted" is easy to over-read as licence to
+  reimplement approximately, which is exactly how a feature disappears with nobody deciding to drop it.
+- **Every ucm surface ever shipped was verified without ever being rendered.** Scoping MSG-3 surfaced
+  that `ui-core-micha` has no Storybook, no demo app and no dev page — only `build` (tsc) and `test`
+  (vitest). Auth, onboarding, notifications and charts were all validated in jsdom, or after a consuming
+  app pinned them. `DX-1` closes this for MSG-3 and everything after it, but it is worth naming what it
+  implies about the surfaces already in production: their visual and responsive behaviour was never
+  checked in this repo. NOTIF-13's real defects were found by driving staging in a browser, not by unit
+  tests.
 - **Messaging encryption key-management (multi-app).** Full-parity + hard at-rest requirement means the
   shared service must own an encryption scheme that works across tenants/apps without a single shared key
   that widens blast radius. Resolve in MSG-1 before any model lands.
