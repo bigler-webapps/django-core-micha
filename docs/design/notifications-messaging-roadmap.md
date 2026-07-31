@@ -1,7 +1,11 @@
 # Notifications & Messaging — Target Picture, Must-Reads, Roadmap
 
-Status: **Phase A CLOSED 2026-07-30.** Layer 1 built and jg fully cut over; the legacy overlay tables are
-dropped and no legacy notification producer remains. Next up is Phase B (`MSG-*`), starting with MSG-1.
+Status: **Phase A CLOSED 2026-07-30 · Phase B running.** Layer 1 built and jg fully cut over; the legacy
+overlay tables are dropped and no legacy notification producer remains. MSG-1 is **done** (2026-07-31 —
+binding design: [`messaging-platform.md`](./messaging-platform.md)); the 2026-07-31 operator revision
+makes the build **consumer-agnostic** (jg first via MSG-5, spesix deferred); MSG-2 is **in progress**
+(envelope `work-orders/MSG-2.md`, Part B filled; chunk-0 pre-check resolved 2026-07-31 — `filetype`
+already distinguishes OOXML/ODF from a bare ZIP via internal member checks, no validator change needed).
 Forward-looking companion to
 [`notifications-platform.md`](./notifications-platform.md) (the canonical, approved **notifications**
 design). This doc adds: the **must-reads** for anyone picking up the workstream, the **consolidated
@@ -181,16 +185,17 @@ jg's `send_todo_digests` — the digest NOTIF-8/9/10 cut over to — is the sing
 specifics live behind the provider/policy hooks). **jg-ferien is the first intended beneficiary** (MSG-5,
 pulled forward from Phase C); **spesix (MSG-4) is deferred** — backlog, no demand recorded; its demand
 gate applies to MSG-4 only, not MSG-2/3.
-Starts **after** Phase A closes (Layer 1 extracted). Co-design from **two real shapes**: jg (reference,
-full feature set) + spesix (first live consumer).
+Starts **after** Phase A closes (Layer 1 extracted — met 2026-07-30). Design validated against two
+shapes: jg (reference, full feature set — the one *real* input) + a hypothetical spesix object-thread
+shape (paper test only; see §5).
 | WO | Repo | Scope |
 |---|---|---|
-| MSG-1 | dcm(+design) | **Requirements + design doc**: generalize jg's messaging domain (Conversation kinds, Participant/read-state, Message + reactions/polls/attachments, event-chat-sync, WhatsApp-tick receipts) off the `Event` FK onto a generic scope; reconcile against spesix's concrete needs. **Encryption-at-rest key-management for a multi-app service = explicit design-risk block, resolved here.** Rides Layer 1; produces `notify()` for "new message". |
-| MSG-2 | dcm | messaging domain models + services + S112 WS consumer (on Layer-1 transport) + `notify()` on new message |
+| MSG-1 | dcm(+design) | **Requirements + design doc**: generalize jg's messaging domain (Conversation kinds, Participant/read-state, Message + reactions/polls/attachments, event-chat-sync, WhatsApp-tick receipts) off the `Event` FK onto a generic scope; reconcile against spesix's concrete needs. **Encryption-at-rest key-management for a multi-app service = explicit design-risk block, resolved here.** Rides Layer 1; produces `notify()` for "new message". **✓ done 2026-07-31** (`0b3a47d`/`576c094` → the binding `messaging-platform.md`; "spesix's concrete needs" became a hypothetical paper test per the revision above). |
+| MSG-2 | dcm | messaging domain models + services + REST/realtime on the Layer-1 transport (**no new WS consumer** — corrected per design §Realtime; rides `push_to_users`) + `notify()` on new message + `notify(expires_at=…)` API — **envelope authored 2026-07-31** (`work-orders/MSG-2.md`), gated on operator go |
 | MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity |
 | MSG-4 | spesix | spesix adopts the shared service — **deferred 2026-07-31**, backlog (no demand recorded); entry gate = the spesix demand confirmations |
 
-### Phase C — far-term (sketched)
+### Phase C — adopters (MSG-5 pulled forward 2026-07-31; rest sketched)
 - **MSG-5 (jg)** — migrate jg's existing messaging onto the shared service **including encrypted-at-rest
   content**. **Pulled forward (operator, 2026-07-31): jg is the first intended consumer** — dcm register
   row MSG-5 minted; timing (directly after MSG-3 vs. later) = operator call at MSG-3 end; carries the
@@ -223,7 +228,11 @@ full feature set) + spesix (first live consumer).
   scoping any WO that calls `notify()`, settle four questions **first**: which channels, whether a persistent
   notification row is wanted at all, whether it should be **feed-visible** (independent of the channels!),
   and what may be persisted in `content` and the `dedup_key`. Missing the last two is what caused NOTIF-19.
-- **Full-parity abstraction from 2 shapes.** jg + spesix are the only real inputs; rule-of-three risk is
-  accepted (operator) with the YAGNI guardrail — generalize to jg+spesix needs, not speculatively.
-- **jg data migration (Phase C).** Encrypted-at-rest content is the hard part; greenfield-first buys time
-  but the migration debt is real and must not be silently forgotten.
+- **Full-parity abstraction from 2 shapes — sharpened 2026-07-31.** jg is the only *real* input; the
+  second shape (spesix object threads) is a hypothetical paper test since the consumer-agnostic revision
+  deferred spesix. Rule-of-three risk accepted (operator) with the YAGNI guardrail — generalize to the
+  jg-parity floor + the designed seams, not speculatively; revisit when the first non-jg consumer
+  materialises.
+- **jg data migration (MSG-5 — now the first consumer track).** Encrypted-at-rest content is the hard
+  part; since the 2026-07-31 revision this debt is no longer far-term — MSG-5 is the intended first
+  adoption, timed by the operator at MSG-3 end.
