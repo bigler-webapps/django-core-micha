@@ -23,6 +23,26 @@ class MessagingApp(UUIDModel):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
+class MessagingTenantResolutionError(ValueError):
+    """Raised when a request has no unambiguous server-side messaging tenant."""
+
+
+def resolve_messaging_app(*, scope=None):
+    """Resolve the request tenant without consulting client input or a policy.
+
+    A scope is authoritative.  Global DMs are only safe in the single-active-app
+    deployment topology; a future User-to-MessagingApp binding belongs here.
+    """
+    if scope is not None:
+        return scope.app
+    apps = list(MessagingApp.objects.filter(active=True)[:2])
+    if len(apps) != 1:
+        raise MessagingTenantResolutionError(
+            "Global-scope conversation requires an explicit scope in a multi-app deployment."
+        )
+    return apps[0]
+
+
 class MessagingScope(UUIDModel):
     class Kind(models.TextChoices):
         CONTAINER = "container", "Container"

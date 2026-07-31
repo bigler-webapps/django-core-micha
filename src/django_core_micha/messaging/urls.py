@@ -1,0 +1,30 @@
+from django.urls import path
+from .views import (ConversationArchiveView, ConversationCreateView, ConversationListView,
+                    ConversationMessagesView, ConversationPreferencesView, ConversationReadView,
+                    DirectConversationView, MessageDetailView, ReactionView, ReadStatusView, UnreadCountView,
+                    ConversationPollView, PollVoteView, PollCloseView, ThreadView, ThreadReadView,
+                    ConversationConfigView)
+
+urlpatterns = [
+    path("conversations/", ConversationListView.as_view(), name="messaging-conversations"),
+    path("conversations/direct/", DirectConversationView.as_view(), name="messaging-direct"),
+    path("conversations/group/", ConversationCreateView.as_view(kind="group"), name="messaging-group"),
+    path("conversations/broadcast/", ConversationCreateView.as_view(kind="broadcast"), name="messaging-broadcast"),
+    path("conversations/managed/", ConversationCreateView.as_view(kind="managed"), name="messaging-managed"),
+    path("conversations/object-thread/", ConversationCreateView.as_view(kind="object_thread"), name="messaging-object-thread"),
+    path("conversations/<uuid:conversation_id>/messages/", ConversationMessagesView.as_view(), name="messaging-messages"),
+    path("conversations/<uuid:conversation_id>/polls/", ConversationPollView.as_view(), name="messaging-polls"),
+    path("conversations/<uuid:conversation_id>/config/", ConversationConfigView.as_view(), name="messaging-config"),
+    path("conversations/<uuid:conversation_id>/read/", ConversationReadView.as_view(), name="messaging-read"),
+    path("conversations/<uuid:conversation_id>/archive/", ConversationArchiveView.as_view(), name="messaging-archive"),
+    path("conversations/<uuid:conversation_id>/preferences/", ConversationPreferencesView.as_view(), name="messaging-preferences"),
+    path("messages/<uuid:message_id>/", MessageDetailView.as_view(), name="messaging-message"),
+    path("messages/<uuid:message_id>/reactions/", ReactionView.as_view(), name="messaging-reactions"),
+    path("messages/<uuid:message_id>/reactions/<str:emoji>/", ReactionView.as_view(), name="messaging-reaction"),
+    path("messages/<uuid:message_id>/read-status/", ReadStatusView.as_view(), name="messaging-read-status"),
+    path("messages/<uuid:root_id>/thread/", ThreadView.as_view(), name="messaging-thread"),
+    path("messages/<uuid:root_id>/thread/read/", ThreadReadView.as_view(), name="messaging-thread-read"),
+    path("polls/<uuid:poll_id>/vote/", PollVoteView.as_view(), name="messaging-poll-vote"),
+    path("polls/<uuid:poll_id>/close/", PollCloseView.as_view(), name="messaging-poll-close"),
+    path("unread-count/", UnreadCountView.as_view(), name="messaging-unread-count"),
+]

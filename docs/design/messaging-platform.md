@@ -76,6 +76,19 @@ Base `/api/messaging/`; authenticated users only. Every read uses `can_view_conv
 
 Inaccessible objects are 404; capability failure is 403. Polls are immutable except vote/close; messages cannot alter sender/conversation/kind/reply/attachments.
 
+## Tenant resolution and deletion semantics (operator decisions, 2026-07-31, MSG-2 chunk-3 review)
+
+Two questions this design left open surfaced during MSG-2 chunk 3 and are resolved here. Both are binding.
+
+**1. `app_key` is never client-supplied.** No request body, query parameter or header carries `app_key`; a client-supplied value is ignored, never cross-checked-and-trusted. The tenant is resolved server-side:
+
+- **Scope given** (container or object): `app` is derived from the `MessagingScope` row. This is the only authority.
+- **Scope omitted** (global): resolved from the `MessagingApp` registry. Exactly one active registration → that app. More than one → **fail closed** (400/409, "global-scope conversation requires an explicit scope in a multi-app deployment"). Zero → the same fail-closed error as an unregistered app.
+
+The resolution lives in one registry-level function. It cannot go through `MessagingPolicy`, which is registered *per* `app_key` and so cannot resolve one. This encodes the actual deployment topology — `MESSAGING_KEYRINGS` is a per-deployment setting and each consuming app is its own Django project and database, so a deployment holds one app — while keeping the schema's multi-tenancy honest: the ambiguous case is a server-side configuration error, not a client-supplied trust input. Binding a tenant to user identity (a `User`↔`MessagingApp` membership dimension) is the correct answer *if* one deployment ever holds two tenants; it is deliberately not built now (YAGNI guardrail, §Open design risks in the roadmap), and this function is the seam where it would land. A test must assert that a supplied `app_key` has no effect. Cross-app participant lookup stays forbidden: the target user of a direct conversation is validated against the resolved tenant.
+
+**2. Soft delete clears content.** `soft_delete_message` blanks `body`, `title` and `link_target` in addition to setting `deleted_at`/`deleted_by` — jg's precedent. Deletion is irreversible and deleted content is unreadable even through break-glass. The alternative (retain ciphertext, never serialize it) would preserve a moderation/evidence path, but no retention or evidence requirement is recorded anywhere, so it would be an unrequested privacy liability. The `message_deleted` realtime frame carries `message_id`, `deleted_at` and `deleted_by` only — never content; broadcasting the decrypted body at the moment of deletion is the exact failure this rules out.
+
 ## Realtime
 
 Every frame is `{envelope:'messaging',type,event_id,app_key,conversation_id,occurred_at,...}` and is emitted only to live policy-resolved users. Frames: `conversation_upsert`, `conversation_archived`, `message`, `message_edited`, `message_deleted`, `attachment_ready`, `reaction`, `poll_updated`, `delivered`, `read_state`, `thread_read_state`, `participant_changed`. Message frames carry safe serialization/API attachment URLs; receipt frames carry only aggregate unless permitted, never direct detail. All mutations commit before fan-out; handlers deduplicate `event_id`. Reconnect refetches REST state/cursors. ucm must destructure `const { subscribe } = useRealtime()` and depend on `subscribe`, never the recreated context object.

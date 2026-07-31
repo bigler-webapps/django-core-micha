@@ -181,8 +181,9 @@ def soft_delete_message(*, actor, message):
             raise MessagingPermissionDenied("Deletion is not permitted.")
         if message.deleted_at is None:
             message.deleted_at, message.deleted_by = timezone.now(), actor
-            message.save(update_fields=["deleted_at", "deleted_by", "updated_at"])
-            transaction.on_commit(lambda: _publish(message.conversation, resolve_live_recipients(conversation=message.conversation), "message_deleted", {"message_id": str(message.id)}))
+            message.body = message.title = message.link_target = None
+            message.save(update_fields=["body", "title", "link_target", "deleted_at", "deleted_by", "updated_at"])
+            transaction.on_commit(lambda: _publish(message.conversation, resolve_live_recipients(conversation=message.conversation), "message_deleted", {"message_id": str(message.id), "deleted_at": message.deleted_at.isoformat(), "deleted_by": str(actor.pk)}))
     return message
 
 
@@ -225,12 +226,26 @@ def vote_poll(*, actor, poll, option_ids):
 
 def close_poll(*, actor, poll):
     _require_view(actor, poll.message.conversation)
+    _require_participant(actor, poll.message.conversation)
     rights = _policy(poll.message.conversation).moderation_rights(actor=actor, conversation=poll.message.conversation, message=poll.message)
     if poll.created_by_id != actor.pk and not rights.intersection({"edit_any", "delete_any"}):
         raise MessagingPermissionDenied("Closing is not permitted.")
     if poll.closed_at is None:
         poll.closed_at = timezone.now(); poll.save(update_fields=["closed_at"])
     return poll
+
+
+def update_conversation_config(*, actor, conversation, config):
+    """Update a conversation scope's app-owned config after moderation approval."""
+    _require_view(actor, conversation)
+    rights = _policy(conversation).moderation_rights(actor=actor, conversation=conversation, message=None)
+    if "manage_config" not in rights:
+        raise MessagingPermissionDenied("Managing configuration is not permitted.")
+    if not isinstance(config, dict):
+        raise ValueError("config must be an object.")
+    conversation.scope.config = {**conversation.scope.config, **config}
+    conversation.scope.save(update_fields=["config", "updated_at"])
+    return conversation.scope
 
 
 def mark_read(*, actor, conversation, read_at=None):
