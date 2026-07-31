@@ -13,7 +13,7 @@ older work is in `git log`.
 |---|---|
 | `RES-*` | Runtime/network resilience (healthz bounding, retry on external calls) |
 | `NOTIF-*` | Shared notifications platform (canonical model, router, category×channel prefs, todo channel) |
-| `MSG-*` | Shared messaging platform, Phase B (generic scope, policy hooks, encryption-at-rest, ucm chat surfaces; spesix first consumer) |
+| `MSG-*` | Shared messaging platform, Phase B (generic scope, policy hooks, encryption-at-rest, ucm chat surfaces; jg-ferien first consumer via MSG-5, spesix deferred to MSG-4 per the 2026-07-31 re-ordering) |
 | `SEC-*` | Secrets hygiene (`sync-secrets` destination matrix, `.env`/`.env.local` handling) |
 | `DX-*` | Developer/test environment ergonomics (test-DB isolation, local run patterns) |
 

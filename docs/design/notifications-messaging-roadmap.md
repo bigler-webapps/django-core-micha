@@ -3,9 +3,10 @@
 Status: **Phase A CLOSED 2026-07-30 · Phase B running.** Layer 1 built and jg fully cut over; the legacy
 overlay tables are dropped and no legacy notification producer remains. MSG-1 is **done** (2026-07-31 —
 binding design: [`messaging-platform.md`](./messaging-platform.md)); the 2026-07-31 operator revision
-makes the build **consumer-agnostic** (jg first via MSG-5, spesix deferred); MSG-2 is **in progress**
-(envelope `work-orders/MSG-2.md`, Part B filled; chunk-0 pre-check resolved 2026-07-31 — `filetype`
-already distinguishes OOXML/ODF from a bare ZIP via internal member checks, no validator change needed).
+makes the build **consumer-agnostic** (jg first via MSG-5, spesix deferred); **MSG-2 is done — published
+dcm 2.36.0** (chunks 1–4, one independent review per chunk, 146/146 green). **MSG-3 (ucm surfaces) is the
+next block; the platform currently has zero consumers** — nothing in the estate exercises the messaging
+domain until MSG-3 + MSG-5 land.
 Forward-looking companion to
 [`notifications-platform.md`](./notifications-platform.md) (the canonical, approved **notifications**
 design). This doc adds: the **must-reads** for anyone picking up the workstream, the **consolidated
@@ -111,13 +112,13 @@ Layer 1. Nothing in Layer 1 depends on 2 or 3.
 
 | Domain | Central (dcm/ucm) | Local in jg | Verdict |
 |---|---|---|---|
-| System notifications | dcm 2.35.0: canonical model, `notify()` router, prefs matrix, 5 dispatchers (popup now real), `feed/*`, `NotificationConsumer`, `transient=` + `feed_visible`. ucm 2.14.0: provider/bell/settings/sw.js/popup surface | **NOTIF-14 landed (`37ea0a7`):** the message-notify producer is on `notify()` with a registered type; all six messaging WS payloads tagged `envelope: "messaging"`. **Correction 2026-07-30:** this row previously claimed the type is "rendered per recipient language". The *mechanism* does that, but for this type the effect is nil — its title/body msgids are bare format strings (`"{sender}"`, `"{group}: {sender}"`, `"{excerpt}"`) with `msgid == msgstr` in de/en/fr, so all three languages render identically. Behaviour parity with the pre-cutover code is preserved, which was the actual requirement; there is simply no prose to translate | central; **jg has no legacy notification producer left at all** (the last one went with NOTIF-18, `cbb14e3`) |
+| System notifications | dcm 2.36.0: canonical model, `notify()` router, prefs matrix, 5 dispatchers (popup now real), `feed/*`, `NotificationConsumer`, `transient=` + `feed_visible`, `expires_at=` (MSG-2 closed the NOTIF-21 gap). ucm 2.15.0: provider/bell/settings/sw.js/popup surface | **NOTIF-14 landed (`37ea0a7`):** the message-notify producer is on `notify()` with a registered type; all six messaging WS payloads tagged `envelope: "messaging"`. **Correction 2026-07-30:** this row previously claimed the type is "rendered per recipient language". The *mechanism* does that, but for this type the effect is nil — its title/body msgids are bare format strings (`"{sender}"`, `"{group}: {sender}"`, `"{excerpt}"`) with `msgid == msgstr` in de/en/fr, so all three languages render identically. Behaviour parity with the pre-cutover code is preserved, which was the actual requirement; there is simply no prose to translate | central; **jg has no legacy notification producer left at all** (the last one went with NOTIF-18, `cbb14e3`) |
 | Onboarding | dcm `onboarding` + ucm provider/wizard (dialog shell now shared with the popup channel) | — | fully central |
 | Task/todo engine | dcm todo channel (NOTIF-8/8b/8c, 2.32.0) | **NOTIF-10 landed (`e8d5d76`):** all live reads+writes cut over to canonical, dual-write shims retired. The 3 overlay tables still exist but are unread | cutover complete; only the drop (NOTIF-11) remains, gated on the jg promotion |
-| Messaging | none | 100% local: 9 models, 25 REST endpoints, event-chat-sync signals, ~2400-LOC `Thread.jsx`, encrypted-at-rest | greenfield centrally — unchanged, this is Phase B |
+| Messaging | **dcm 2.36.0 (MSG-2): the full Layer-3 domain** — models, per-app fail-closed keyrings, `MessagingPolicy` hooks, services, REST + `messaging` frames (no new consumer), attachments, `notify(expires_at=…)`. **ucm: nothing yet (MSG-3)** | 100% local: 9 models, 25 REST endpoints, event-chat-sync signals, ~2400-LOC `Thread.jsx`, encrypted-at-rest | **built centrally, zero consumers.** jg is untouched and stays on its local stack until MSG-5; the shared domain is unexercised by any app until then |
 | Realtime transport | **✓ extracted (NOTIF-13):** ucm `useRealtime()`/`subscribe(envelope, handler)`, unknown envelopes ignored. **One socket for the notifications stream** — verified on staging. Note the invariant is scoped to `/ws/notifications/`, not to the app: jg also runs `/ws/cook/events/…/checklist/` (`BuyChecklistConsumer`, S112-compliant), a separate pre-existing feature and the natural next candidate to ride Layer 1 | **NOTIF-15 landed (`5148677`):** local `NotificationsContext` deleted; `MessagingContext` **and** `Thread.jsx` re-subscribe via Layer 1 | done |
 | Retention | `prune_notifications` exists (NOTIF-4) | — | **deliberately not scheduled** (NOTIF-20/21 dropped 2026-07-30) — no benefit at these volumes, and `transient=` already keeps chat text out of `content`. Reactivatable if a consumer ever produces high volume |
-| Scheduled commands | role `scheduled_commands` is carried by **`staging` only** — CI-3's documented staging-first gate | jg declares `send_todo_digests`, the estate's only scheduled command | so **no app command has ever run in production**; the completion step is `webapp-management/work-orders/CI-5.md` |
+| Scheduled commands | **CI-5 done 2026-07-31:** `scheduled_commands` now on `main-prod` too, and the nightly cron is verified firing there from the job's own log (run `30610666474`) | jg declares `send_todo_digests`, the estate's only scheduled command | **runs in production — but on 0 candidates, because prod's `main` predates NOTIF-22.** Same night, same data, staging (`develop`) scanned 40 users and sent 1 digest. The `develop→main` promotion flips prod to real digest email; the observed first run is jg `OPS-1` |
 
 ---
 
@@ -174,11 +175,18 @@ hid no regression behind the legacy harness.
 **Still open, deliberately:** NOTIF-16/17 (hram/spesix `notify()` adoption) remain backlog with no demand
 recorded — nothing is broken in either app without them. They are not a Phase A prerequisite.
 
-**One thing left the workstream, deliberately.** Investigating NOTIF-20 revealed that the platform's
-`scheduled_commands` role is granted to `staging` only, so no app command has ever executed in production —
-CI-3's intended staging-first gate, still awaiting its documented completion. That is a platform concern,
-not a notifications one, and lives as `webapp-management/work-orders/CI-5.md`. It matters here only because
-jg's `send_todo_digests` — the digest NOTIF-8/9/10 cut over to — is the single command it would switch on.
+**One thing left the workstream — and came back closed (2026-07-31).** Investigating NOTIF-20 revealed that
+the platform's `scheduled_commands` role was granted to `staging` only, so no app command had ever executed
+in production — CI-3's intended staging-first gate. That was a platform concern, not a notifications one,
+and lived as `webapp-management/work-orders/CI-5.md`; it is now **done**: the role is on `main-prod` and the
+nightly cron is verified running jg's `send_todo_digests` there against `jg_prod_backend`.
+
+It still matters here, for a reason CI-5's own measurements did not show. Prod scanned **0** users while
+staging, on the same prod-synced data the same night, scanned **40** and sent a digest. The difference is
+jg application code, not the platform: prod's `main` is 27 commits behind `develop` and predates NOTIF-22's
+canonical-path task coverage. So the digest machinery this workstream built is running in production but has
+never actually produced a user-facing email — and the jg `develop→main` promotion is the moment it starts.
+That first run belongs under observation rather than under the unattended cron; it is tracked as jg `OPS-1`.
 
 ### Phase B — messaging v1 (shared full-parity, greenfield, consumer-agnostic) — prefix `MSG-*`
 **Revision (operator, 2026-07-31):** built consumer-agnostic — nothing app-specific enters dcm/ucm (app
@@ -191,7 +199,7 @@ shape (paper test only; see §5).
 | WO | Repo | Scope |
 |---|---|---|
 | MSG-1 | dcm(+design) | **Requirements + design doc**: generalize jg's messaging domain (Conversation kinds, Participant/read-state, Message + reactions/polls/attachments, event-chat-sync, WhatsApp-tick receipts) off the `Event` FK onto a generic scope; reconcile against spesix's concrete needs. **Encryption-at-rest key-management for a multi-app service = explicit design-risk block, resolved here.** Rides Layer 1; produces `notify()` for "new message". **✓ done 2026-07-31** (`0b3a47d`/`576c094` → the binding `messaging-platform.md`; "spesix's concrete needs" became a hypothetical paper test per the revision above). |
-| MSG-2 | dcm | messaging domain models + services + REST/realtime on the Layer-1 transport (**no new WS consumer** — corrected per design §Realtime; rides `push_to_users`) + `notify()` on new message + `notify(expires_at=…)` API — **envelope authored 2026-07-31** (`work-orders/MSG-2.md`), gated on operator go |
+| MSG-2 | dcm | messaging domain models + services + REST/realtime on the Layer-1 transport (**no new WS consumer** — corrected per design §Realtime; rides `push_to_users`) + `notify()` on new message + `notify(expires_at=…)` API. **✓ done 2026-07-31, published dcm 2.36.0** (chunks `7df9670`/`858f705`/`a6a4cf5`/`3ad7709`, publish `1d8c60d`; independent review per chunk, chunk 3 twice after the operator design calls on `app_key` tenant resolution + soft-delete redaction — see `messaging-platform.md` §"Tenant resolution and deletion semantics"). **Open, non-blocking:** the scoped-DM tenant check forecloses first contact with a user who has no prior conversation — see §5 |
 | MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity |
 | MSG-4 | spesix | spesix adopts the shared service — **deferred 2026-07-31**, backlog (no demand recorded); entry gate = the spesix demand confirmations |
 
@@ -205,6 +213,17 @@ shape (paper test only; see §5).
 ---
 
 ## 5. Open design risks
+- **Scoped first-contact DM is currently impossible (MSG-2 chunk 3, filed P3 — but it blocks jg parity).**
+  `DirectConversationView`'s scoped-tenant check requires the target user to already be a participant of
+  some conversation in the resolved app, so a DM can never be *started* with someone who has none. The
+  design's one-line "validated against the resolved tenant" does not settle the mechanism. This is not
+  cosmetic for MSG-5: jg's `NewDirectMessageDialog` opens DMs against arbitrary event members, most of whom
+  have no prior conversation — jg parity fails on first contact. **Proposed resolution:** drop the
+  participant-existence heuristic and let `MessagingPolicy.can_open_direct(actor, target, scope)` carry the
+  tenant safety. That hook is app-owned, already in the design, and is the only layer that actually knows
+  who belongs to the tenant; the existence check is a proxy for it that is both redundant and too strict.
+  Core keeps self-DM rejection and scope/tenant resolution. Operator call — cheapest to settle before MSG-3
+  builds a composer against the current behaviour.
 - **Messaging encryption key-management (multi-app).** Full-parity + hard at-rest requirement means the
   shared service must own an encryption scheme that works across tenants/apps without a single shared key
   that widens blast radius. Resolve in MSG-1 before any model lands.
