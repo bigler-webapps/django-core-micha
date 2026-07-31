@@ -231,7 +231,24 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
   already calls before creating any row, so the check was not only too strict but sat in front of the hook
   and pre-empted it. Core keeps tenant resolution and self-DM rejection. Sequenced **before MSG-3** so the
   ucm composer is not built against behaviour that would change at adoption.
-- **CI has never run a single messaging test. Open, needs an operator decision (found 2026-07-31).**
+- ~~**CI has never run a single messaging test.**~~ **Fixed 2026-07-31 — dcm `DX-2` (`65db4af`).**
+  `testpaths` now covers `messaging/tests`, and a guard test fails naming any
+  `src/django_core_micha/*/tests` directory left out of it, with a second test proving the guard is not
+  vacuous by reproducing the exact stale config that shipped. Reviewer verified the negative case by
+  reverting the fix and watching the guard go red; full CI-mirrored suite 461/461, no cross-module
+  interference. **Kept here as the record of what it cost:** the messaging subsystem shipped across
+  three work orders without its tests ever entering the promotion gate. The finding below stands.
+- **A second local-vs-CI divergence, found while fixing the first — documented, not fixed.** CI's
+  `publish.yml` exports `PYTHONPATH=.` and runs `pip install -e ".[test]"` before its bare `pytest -q`.
+  A plain local `pytest -q` cannot even import `tests.settings` without that — measured on `main`
+  2026-07-31, it dies with `ImportError: No module named 'tests'` followed by pytest-django's
+  "could not find a Django project" — while `python -m pytest -q` collects all 461, because `-m` puts
+  the working directory on `sys.path` itself. So "run `pytest -q`" means two different things depending
+  on who types it, and a green local run is not evidence about CI. Nothing
+  is broken today, but this is the same shape of gap as the `testpaths` allowlist: an invisible
+  precondition that makes local and CI results silently non-comparable. Worth closing the next time
+  anything touches the test entrypoint.
+- **Superseded, kept for the trail — the original finding (2026-07-31, pre-DX-2).**
   `pyproject.toml:39` sets `testpaths = ["tests", "src/django_core_micha/notifications/tests",
   "src/django_core_micha/onboarding/tests"]` — an allowlist that was never extended when the
   `messaging` subpackage was added in MSG-2. CI runs a bare `pytest -q`, which collects **401 tests and
