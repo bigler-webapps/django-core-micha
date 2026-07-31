@@ -5,14 +5,14 @@ overlay tables are dropped and no legacy notification producer remains. MSG-1 is
 binding design: [`messaging-platform.md`](./messaging-platform.md)); the 2026-07-31 operator revision
 makes the build **consumer-agnostic** (jg first via MSG-5, spesix deferred).
 
-**Phase B backend and surfaces are built (state 2026-08-01): dcm 2.38.0 · ucm 2.18.0.** MSG-2 shipped the
+**Phase B backend and surfaces are built (state 2026-08-01): dcm 2.38.0 · ucm 2.19.0.** MSG-2 shipped the
 domain and MSG-3 the surfaces; a post-completion three-way audit then found substantial parity and
 contract gaps on both sides, closed across four follow-up WOs — MSG-2b, MSG-2c, MSG-2d (dcm) and MSG-3b,
 MSG-3c (ucm). **Everything the audit found is delivered** — MSG-3d closed the last two rows on 2026-08-01 (ucm 2.19.0),
 so `messaging-deviations.md` carries zero BLOCKED entries and **MSG-5 is unblocked**. §5 records the
 systemic causes — they are the most reusable thing in this document. The platform still has **zero
-consumers**: nothing in the estate exercises the messaging domain until MSG-5 lands, and MSG-5 should
-not start while rows 27/42 are open.
+consumers**: nothing in the estate exercises the messaging domain until MSG-5 lands. **MSG-5 is next**,
+split into `MSG-5a`–`MSG-5d` in the jg repo (see Phase C).
 Forward-looking companion to
 [`notifications-platform.md`](./notifications-platform.md) (the canonical, approved **notifications**
 design). This doc adds: the **must-reads** for anyone picking up the workstream, the **consolidated
