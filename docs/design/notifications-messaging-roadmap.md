@@ -199,7 +199,8 @@ shape (paper test only; see §5).
 | WO | Repo | Scope |
 |---|---|---|
 | MSG-1 | dcm(+design) | **Requirements + design doc**: generalize jg's messaging domain (Conversation kinds, Participant/read-state, Message + reactions/polls/attachments, event-chat-sync, WhatsApp-tick receipts) off the `Event` FK onto a generic scope; reconcile against spesix's concrete needs. **Encryption-at-rest key-management for a multi-app service = explicit design-risk block, resolved here.** Rides Layer 1; produces `notify()` for "new message". **✓ done 2026-07-31** (`0b3a47d`/`576c094` → the binding `messaging-platform.md`; "spesix's concrete needs" became a hypothetical paper test per the revision above). |
-| MSG-2 | dcm | messaging domain models + services + REST/realtime on the Layer-1 transport (**no new WS consumer** — corrected per design §Realtime; rides `push_to_users`) + `notify()` on new message + `notify(expires_at=…)` API. **✓ done 2026-07-31, published dcm 2.36.0** (chunks `7df9670`/`858f705`/`a6a4cf5`/`3ad7709`, publish `1d8c60d`; independent review per chunk, chunk 3 twice after the operator design calls on `app_key` tenant resolution + soft-delete redaction — see `messaging-platform.md` §"Tenant resolution and deletion semantics"). **Open, non-blocking:** the scoped-DM tenant check forecloses first contact with a user who has no prior conversation — see §5 |
+| MSG-2 | dcm | messaging domain models + services + REST/realtime on the Layer-1 transport (**no new WS consumer** — corrected per design §Realtime; rides `push_to_users`) + `notify()` on new message + `notify(expires_at=…)` API. **✓ done 2026-07-31, published dcm 2.36.0** (chunks `7df9670`/`858f705`/`a6a4cf5`/`3ad7709`, publish `1d8c60d`; independent review per chunk, chunk 3 twice after the operator design calls on `app_key` tenant resolution + soft-delete redaction — see `messaging-platform.md` §"Tenant resolution and deletion semantics"). Its one open P3 (scoped DM forecloses first contact) is decided and cut as **MSG-2b** — see §5 |
+| MSG-2b | dcm | **scoped first-contact DM must be possible** — drop `DirectConversationView`'s participant-existence precondition; target-side tenant safety rests on `MessagingPolicy.can_open_direct` alone. Tier 1, no migration. Depends on MSG-2; **planned, runs before MSG-3.** Envelope `work-orders/MSG-2b.md` |
 | MSG-3 | ucm | messaging surfaces (Thread/ConversationList/composer/receipts/reactions/polls) — full parity |
 | MSG-4 | spesix | spesix adopts the shared service — **deferred 2026-07-31**, backlog (no demand recorded); entry gate = the spesix demand confirmations |
 
@@ -213,17 +214,15 @@ shape (paper test only; see §5).
 ---
 
 ## 5. Open design risks
-- **Scoped first-contact DM is currently impossible (MSG-2 chunk 3, filed P3 — but it blocks jg parity).**
-  `DirectConversationView`'s scoped-tenant check requires the target user to already be a participant of
-  some conversation in the resolved app, so a DM can never be *started* with someone who has none. The
-  design's one-line "validated against the resolved tenant" does not settle the mechanism. This is not
-  cosmetic for MSG-5: jg's `NewDirectMessageDialog` opens DMs against arbitrary event members, most of whom
-  have no prior conversation — jg parity fails on first contact. **Proposed resolution:** drop the
-  participant-existence heuristic and let `MessagingPolicy.can_open_direct(actor, target, scope)` carry the
-  tenant safety. That hook is app-owned, already in the design, and is the only layer that actually knows
-  who belongs to the tenant; the existence check is a proxy for it that is both redundant and too strict.
-  Core keeps self-DM rejection and scope/tenant resolution. Operator call — cheapest to settle before MSG-3
-  builds a composer against the current behaviour.
+- ~~**Scoped first-contact DM is currently impossible.**~~ **Decided 2026-07-31, cut as `MSG-2b`.**
+  `DirectConversationView` required the target to already be a participant somewhere in the resolved app,
+  so a scoped DM could only be *continued*, never *started* — and jg's `NewDirectMessageDialog` opens DMs
+  against arbitrary event members, so jg parity would have failed on first contact at MSG-5. Operator
+  decision: first contact **must** be possible. Resolution: the participant-existence check goes, and
+  target-side tenant safety rests solely on `MessagingPolicy.can_open_direct` — which `open_direct()`
+  already calls before creating any row, so the check was not only too strict but sat in front of the hook
+  and pre-empted it. Core keeps tenant resolution and self-DM rejection. Sequenced **before MSG-3** so the
+  ucm composer is not built against behaviour that would change at adoption.
 - **Messaging encryption key-management (multi-app).** Full-parity + hard at-rest requirement means the
   shared service must own an encryption scheme that works across tenants/apps without a single shared key
   that widens blast radius. Resolve in MSG-1 before any model lands.
