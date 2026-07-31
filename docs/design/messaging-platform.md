@@ -91,9 +91,68 @@ The resolution lives in one registry-level function. It cannot go through `Messa
 
 **2. Soft delete clears content.** `soft_delete_message` blanks `body`, `title` and `link_target` in addition to setting `deleted_at`/`deleted_by` — jg's precedent. Deletion is irreversible and deleted content is unreadable even through break-glass. The alternative (retain ciphertext, never serialize it) would preserve a moderation/evidence path, but no retention or evidence requirement is recorded anywhere, so it would be an unrequested privacy liability. The `message_deleted` realtime frame carries `message_id`, `deleted_at` and `deleted_by` only — never content; broadcasting the decrypted body at the moment of deletion is the exact failure this rules out.
 
+## Poll read contract and conversation preview (design amendment, 2026-07-31, MSG-2c)
+
+A gap in the original design, found by the post-MSG-3 audit: this document specified how to **create**,
+**vote on** and **close** a poll, and never how to **read** one. No GET, no serialized question, options
+or results. MSG-2 implemented the spec faithfully — `ConversationPollView` returns `{id, message_id,
+closed_at}` and nothing else — so a poll is unrenderable, and MSG-3's `PollCard` was built against
+fields no endpoint produces. Likewise `serialize_conversation` returns `last_message_at` but no
+`last_message`, so a conversation list can order by recency but cannot show a preview. Both are closed
+here.
+
+**A poll is read as part of its message, not through its own endpoint.** `serialize_message` embeds a
+`poll` object when `kind == "poll"` and omits the key otherwise; a timeline page therefore renders polls
+without an N+1 fetch. `POST conversations/{id}/polls/`, `POST polls/{id}/vote/` and `POST polls/{id}/close/`
+all return the same projection, so a mutation needs no follow-up read. No standalone `GET polls/{id}/`
+is added — nothing needs one.
+
+**The projection is split in two, and the split is load-bearing.** `serialize_poll(poll)` returns the
+**viewer-independent** core: `{id, question, allow_multiple, closed_at, created_by_id, options: [{id,
+text, order, vote_count, voters}]}`. `question` and `option.text` are decrypted under the app ring for
+authorized participants, exactly like message bodies. Only REST call sites, which know the requesting
+user, add the **viewer-specific** `voted_option_ids`.
+
+This is not a stylistic choice. `serialize_message` is embedded verbatim into the `message` and
+`message_edited` frames (`realtime.py`), computed once and fanned out identically to every recipient —
+so anything `serialize_message` embeds is, by construction, broadcast to all viewers. If the poll embed
+carried `voted_option_ids`, those two already-shipped frames would start leaking one viewer's vote to
+everyone, and would violate the viewer-independence rule stated below. **`serialize_message` embeds the
+core projection only; `voted_option_ids` is never reachable through a realtime frame.**
+
+**Voter identity is visible to participants in every conversation kind, including `direct`.**
+`option.voters` carries participant **user ids** — never names; dcm exposes `sender_id` and not a
+display name elsewhere, and resolving identity is the host's job.
+
+An earlier draft of this amendment omitted `voters` for direct conversations "per the DM carve-out".
+That was wrong twice over and is corrected here. First, it protected nothing: a direct conversation has
+exactly two participants, so a viewer subtracting their own vote from each `vote_count` recovers the
+other's vote exactly. A carve-out that the neighbouring field defeats is worse than none, because it
+reads as a guarantee. Second, it misread the carve-out. "DMs never expose recipient detail, including to
+moderators" exists to stop a **third party** from seeing who-read-what inside a DM — and a moderator
+cannot view a DM at all (`can_view_conversation`, and break-glass is denied outright for `direct`).
+Between the two people actually in the conversation there is no third party to protect from. The
+carve-out governs moderator reach, not participant-to-participant visibility, and it does not transfer
+to polls. The read-receipt rule in §Domain model is unchanged.
+
+**`serialize_conversation` gains `last_message`:** `{id, sender_id, kind, excerpt, created_at}`, or
+`null` when the conversation has none. `excerpt` is the decrypted body truncated to a bounded length
+(server-owned, not client-negotiable), empty for a soft-deleted message, and for a poll it is the poll
+question — that is what makes a "📊 question" preview possible client-side. Decryption cost is real: a
+list page decrypts one message per conversation, so the bound matters and the field is not optional
+padding.
+
+**Realtime frames carry viewer-independent data only.** A general rule the poll case forced into the
+open: one frame payload is fanned out to many recipients, so nothing viewer-specific may ride it.
+`poll_updated` carries `serialize_poll`'s core projection and never `voted_option_ids`; a client derives
+its own vote state from `voters`, which is why `voters` being present in every conversation kind also
+makes the realtime path work without a per-viewer refetch. The same rule governs `read_state` and
+`delivered` — aggregate only — and it applies retroactively to `message` and `message_edited`, which
+embed `serialize_message` and must therefore never gain a viewer-specific field.
+
 ## Realtime
 
-Every frame is `{envelope:'messaging',type,event_id,app_key,conversation_id,occurred_at,...}` and is emitted only to live policy-resolved users. Frames: `conversation_upsert`, `conversation_archived`, `message`, `message_edited`, `message_deleted`, `attachment_ready`, `reaction`, `poll_updated`, `delivered`, `read_state`, `thread_read_state`, `participant_changed`. Message frames carry safe serialization/API attachment URLs; receipt frames carry only aggregate unless permitted, never direct detail. All mutations commit before fan-out; handlers deduplicate `event_id`. Reconnect refetches REST state/cursors. ucm must destructure `const { subscribe } = useRealtime()` and depend on `subscribe`, never the recreated context object.
+Every frame is `{envelope:'messaging',type,event_id,app_key,conversation_id,occurred_at,...}` and is emitted only to live policy-resolved users. Frames: `conversation_upsert`, `conversation_archived`, `message`, `message_edited`, `message_deleted`, `attachment_ready`, `reaction`, `poll_updated`, `delivered`, `read_state`, `thread_read_state`, `participant_changed`. **`attachment_ready` is reserved and deliberately unemitted (2026-07-31):** v1 has no scanner and the attachment pipeline validates, re-encodes and persists synchronously, so there is no asynchronous "ready" moment to signal. It stays in the frame vocabulary for the day a scan hook is installed; until then a client must not wait for it. Message frames carry safe serialization/API attachment URLs; receipt frames carry only aggregate unless permitted, never direct detail. All mutations commit before fan-out; handlers deduplicate `event_id`. Reconnect refetches REST state/cursors. ucm must destructure `const { subscribe } = useRealtime()` and depend on `subscribe`, never the recreated context object.
 
 ## Notification contract
 
