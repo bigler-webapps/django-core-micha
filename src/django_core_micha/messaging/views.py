@@ -3,10 +3,13 @@ from __future__ import annotations
 
 from django.contrib.auth import get_user_model
 from django.core import signing
+from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
+from django.http import FileResponse, Http404
 from django.utils import timezone
 from rest_framework import status
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -21,6 +24,7 @@ from .services import (MessagingPermissionDenied, add_reaction, archive_conversa
                        mark_thread_read, open_direct, read_status, remove_reaction,
                        send_message, set_preferences, unread_counts, update_conversation_config,
                        vote_poll)
+from .models import MessageAttachment
 
 CURSOR_SALT = "django_core_micha.messaging.cursor.v1"
 
@@ -156,6 +160,59 @@ class ConversationMessagesView(MessagingView):
         reply = get_object_or_404(Message, pk=values.pop("reply_to")) if values.get("reply_to") else None
         message, created = self._service(lambda: send_message(actor=request.user, conversation=conversation, reply_to=reply, **values))
         return Response(serialize_message(message), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class ConversationAttachmentView(MessagingView):
+    def post(self, request, conversation_id):
+        conversation = self._viewer_conversation(request, conversation_id)
+        files = request.FILES.getlist("files[]") or request.FILES.getlist("files")
+        if not files: raise ValidationError({"files": "At least one file is required."})
+        values = _idempotency_request_id(request, {"client_request_id": request.data.get("client_request_id")})
+        reply = get_object_or_404(Message, pk=request.data["reply_to"]) if request.data.get("reply_to") else None
+        # Keep message, files, notification and realtime callbacks in one outer
+        # transaction; callbacks registered by send_message run only after every
+        # attachment is durable, and are discarded on validation/scan failure.
+        with transaction.atomic():
+            message, created = self._service(lambda: send_message(actor=request.user, conversation=conversation, body=request.data.get("body"), reply_to=reply, client_request_id=values.get("client_request_id")))
+            if created:
+                from .attachments import create_attachment
+                created_attachments = []
+                try:
+                    for order, upload in enumerate(files):
+                        created_attachments.append(create_attachment(message=message, upload=upload, order=order))
+                except Exception as exc:
+                    from django.core.files.storage import default_storage
+                    from .crypto import decrypt_text
+                    for attachment in created_attachments:
+                        for key in (attachment.blob_key, attachment.thumbnail_key):
+                            if key:
+                                default_storage.delete(decrypt_text(app_key=conversation.app.app_key, value=key))
+                    # attachments.py raises django.core.exceptions.ValidationError for every
+                    # rejection (bad MIME, oversize, mismatch, scan-hook denial). DRF's
+                    # exception handler only special-cases Http404 and
+                    # django.core.exceptions.PermissionDenied — an uncaught Django
+                    # ValidationError propagates as an unhandled 500, not a 400. Translate
+                    # it explicitly; anything else is a real bug and re-raises as-is.
+                    if isinstance(exc, DjangoValidationError):
+                        raise ValidationError({"files": exc.messages}) from exc
+                    raise
+        message = Message.objects.select_related("conversation__app", "sender").prefetch_related("attachments", "reactions").get(pk=message.pk)
+        return Response(serialize_message(message), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class AttachmentDownloadView(MessagingView):
+    thumbnail = False
+    def get(self, request, attachment_id):
+        thumbnail = self.thumbnail
+        attachment = get_object_or_404(MessageAttachment.objects.select_related("message__conversation__app"), pk=attachment_id)
+        self._viewer_conversation(request, attachment.message.conversation_id)
+        from .attachments import attachment_bytes
+        try: data = attachment_bytes(attachment, thumbnail=thumbnail)
+        except FileNotFoundError: raise Http404
+        response = FileResponse(__import__("io").BytesIO(data), as_attachment=True, filename="thumbnail.png" if thumbnail else "attachment")
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Content-Type"] = "image/png" if thumbnail else attachment.content_type
+        return response
 
 
 class MessageDetailView(MessagingView):

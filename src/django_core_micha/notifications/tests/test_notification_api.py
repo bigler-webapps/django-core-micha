@@ -1,6 +1,9 @@
+from datetime import timedelta
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.utils import timezone
 
 from django_core_micha.notifications import dispatch
 from django_core_micha.notifications.api import notify
@@ -206,6 +209,16 @@ def test_notify_without_transient_passes_none_to_dispatch_and_preserves_existing
 
     assert calls == [None]
     assert notification.content == content
+
+
+@pytest.mark.django_db
+def test_notify_persists_optional_expiry_without_affecting_dedup(monkeypatch):
+    register_notification_type(make_type(defaults=["chip"], eligible=["chip"]))
+    user = make_user("notification-expiry")
+    monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: None)
+    expiry = timezone.now() + timedelta(days=30)
+    notification = notify(type="test_notice", recipients=[user], content={"title_key": "T", "body_key": "B"}, expires_at=expiry)
+    assert notification.expires_at == expiry
 
 
 @pytest.mark.django_db

@@ -26,7 +26,7 @@ def _normalize_recipients(recipients) -> list:
     return normalized
 
 
-def _get_notification_with_retry(*, notification_type, category, notifiable, content, urgency):
+def _get_notification_with_retry(*, notification_type, category, notifiable, content, urgency, expires_at=None):
     dedup_key = Notification.build_dedup_key(notification_type, notifiable)
     try:
         with transaction.atomic():
@@ -36,6 +36,7 @@ def _get_notification_with_retry(*, notification_type, category, notifiable, con
                 notifiable=notifiable,
                 content=content,
                 urgency=urgency,
+                expires_at=expires_at,
             )
             return notification
     except IntegrityError:
@@ -65,7 +66,8 @@ def _get_delivery_with_retry(*, recipient, channel):
 
 
 def notify(
-    *, type, recipients, category=None, urgency="normal", content, notifiable=None, channels=None, transient=None
+    *, type, recipients, category=None, urgency="normal", content, notifiable=None, channels=None,
+    transient=None, expires_at=None,
 ) -> Notification:
     """Create or reuse a logical message, then dispatch it per recipient and channel."""
 
@@ -82,6 +84,7 @@ def notify(
         notifiable=notifiable,
         content=content,
         urgency=urgency,
+        expires_at=expires_at,
     )
 
     for user in _normalize_recipients(recipients):

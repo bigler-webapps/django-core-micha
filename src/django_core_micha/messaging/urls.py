@@ -4,6 +4,7 @@ from .views import (ConversationArchiveView, ConversationCreateView, Conversatio
                     DirectConversationView, MessageDetailView, ReactionView, ReadStatusView, UnreadCountView,
                     ConversationPollView, PollVoteView, PollCloseView, ThreadView, ThreadReadView,
                     ConversationConfigView)
+from .views import ConversationAttachmentView, AttachmentDownloadView
 
 urlpatterns = [
     path("conversations/", ConversationListView.as_view(), name="messaging-conversations"),
@@ -13,6 +14,7 @@ urlpatterns = [
     path("conversations/managed/", ConversationCreateView.as_view(kind="managed"), name="messaging-managed"),
     path("conversations/object-thread/", ConversationCreateView.as_view(kind="object_thread"), name="messaging-object-thread"),
     path("conversations/<uuid:conversation_id>/messages/", ConversationMessagesView.as_view(), name="messaging-messages"),
+    path("conversations/<uuid:conversation_id>/attachments/", ConversationAttachmentView.as_view(), name="messaging-attachments"),
     path("conversations/<uuid:conversation_id>/polls/", ConversationPollView.as_view(), name="messaging-polls"),
     path("conversations/<uuid:conversation_id>/config/", ConversationConfigView.as_view(), name="messaging-config"),
     path("conversations/<uuid:conversation_id>/read/", ConversationReadView.as_view(), name="messaging-read"),
@@ -26,5 +28,7 @@ urlpatterns = [
     path("messages/<uuid:root_id>/thread/read/", ThreadReadView.as_view(), name="messaging-thread-read"),
     path("polls/<uuid:poll_id>/vote/", PollVoteView.as_view(), name="messaging-poll-vote"),
     path("polls/<uuid:poll_id>/close/", PollCloseView.as_view(), name="messaging-poll-close"),
+    path("attachments/<uuid:attachment_id>/", AttachmentDownloadView.as_view(), name="messaging-attachment"),
+    path("attachments/<uuid:attachment_id>/thumbnail/", AttachmentDownloadView.as_view(thumbnail=True), name="messaging-attachment-thumbnail"),
     path("unread-count/", UnreadCountView.as_view(), name="messaging-unread-count"),
 ]

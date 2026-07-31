@@ -156,6 +156,7 @@ def send_message(*, actor, conversation, kind="chat", body=None, title=None, lin
         # captured here) so a concurrent membership/mute change committed between
         # now and commit is reflected — consistent with edit_message/soft_delete_message.
         transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation, sender=actor), "message", {"message_id": str(message.id)}))
+        transaction.on_commit(lambda: _notify_message(message, actor))
         return message, True
 
 
@@ -336,3 +337,13 @@ def _publish(conversation, users, event_type, payload):
     """The views chunk supplies safe serializers; this emits only opaque IDs."""
     from .realtime import publish_messaging_event
     publish_messaging_event(conversation=conversation, users=users, event_type=event_type, payload=payload)
+
+
+def _notify_message(message, sender):
+    """Delivery failure is intentionally isolated from the durable message."""
+    try:
+        from .notifications import notify_message
+        notify_message(message=message, recipients=resolve_live_recipients(conversation=message.conversation, sender=sender))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Messaging notification delivery failed for message %s", message.pk)
