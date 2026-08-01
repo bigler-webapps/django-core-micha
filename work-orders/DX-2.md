@@ -1,6 +1,8 @@
 # DX-2 — CI has never collected the messaging tests
 
-Status: planned · Tier 1 · **Approval-gated: changes what CI executes** (AGENTS.md → CI/CD) · Target repo: `django-core-micha` (main)
+Status: done · **Tier 2** · **Approval-gated: changes what CI executes** (AGENTS.md → CI/CD) · Target repo: `django-core-micha` (main)
+*Reclassified 2026-08-01: labelled Tier 1 at authoring, but it touches CI — a binding Tier-2 surface
+per AGENTS.md's Tiering gate — in a shared-core repo. The independent review did run and was clean.*
 Release: **no version bump, no publish** — test configuration only, nothing in the package changes.
 
 ---

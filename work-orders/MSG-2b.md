@@ -1,6 +1,9 @@
 # MSG-2b — scoped first-contact DM must be possible
 
-Status: planned · Tier 1 (bounded change, no schema) · Target repo: `django-core-micha` (main)
+Status: done · **Tier 2** · Target repo: `django-core-micha` (main)
+*Reclassified 2026-08-01: labelled Tier 1 at authoring, but `django-core-micha` is a shared-core
+surface, which AGENTS.md's Tiering gate makes Tier 2 regardless of size. The independent review
+Tier 2 requires did run and was clean — only the label was wrong.*
 **Binding spec:** `docs/design/messaging-platform.md` §"Tenant resolution and deletion semantics",
 including the 2026-07-31 MSG-2b clarification. On any conflict the design doc wins.
 
