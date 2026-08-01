@@ -155,9 +155,10 @@ class MessagingView(APIView):
 
 class ConversationListView(MessagingView):
     def get(self, request):
-        qs = Conversation.objects.select_related("app", "scope").filter(participants__user=request.user, participants__removed_at__isnull=True)
+        participant_filters = {"participants__user": request.user, "participants__removed_at__isnull": True}
         if request.query_params.get("include_archived") != "true":
-            qs = qs.filter(participants__archived_at__isnull=True)
+            participant_filters["participants__archived_at__isnull"] = True
+        qs = Conversation.objects.select_related("app", "scope").filter(**participant_filters)
         for field in ("scope_kind", "content_type", "object_id"):
             if request.query_params.get(field):
                 qs = qs.filter(**{f"scope__{field.replace('scope_', '')}": request.query_params[field]})

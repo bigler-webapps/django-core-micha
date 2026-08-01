@@ -79,6 +79,24 @@ def test_provider_member_added_on_group_creation_can_see_conversation(api_domain
 
 @pytest.mark.django_db
 @override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_conversation_list_does_not_duplicate_multi_participant_conversation(api_domain):
+    _, _, conversation, users = api_domain
+    client = APIClient(); client.force_authenticate(users["viewer"])
+
+    listed = client.get("/messaging/conversations/")
+
+    assert listed.status_code == 200
+    assert [row["id"] for row in listed.data["results"]].count(str(conversation.id)) == 1
+
+    ConversationParticipant.objects.filter(conversation=conversation, user=users["viewer"]).update(archived_at=conversation.created_at)
+    included = client.get("/messaging/conversations/?include_archived=true")
+
+    assert included.status_code == 200
+    assert [row["id"] for row in included.data["results"]].count(str(conversation.id)) == 1
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
 def test_authorized_actor_joins_keyed_group_on_reopen(api_domain):
     app, scope, _, users = api_domain
     policy = get_messaging_policy(app.app_key)

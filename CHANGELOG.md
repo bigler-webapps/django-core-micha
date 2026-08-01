@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.39.1] — 2026-08-01
+
+### Fixed
+
+#### MSG-2g — deduplicate multi-participant conversation lists correctly
+
+`GET /messaging/conversations/` now applies the requesting participant's active and archive-state
+conditions through the same relation join. Multi-participant conversations therefore appear once,
+rather than once per matching participant; `include_archived=true` continues to include the
+requesting user's archived participation row.
+
 ## [2.39.0] — 2026-08-01
 
 ### Fixed
