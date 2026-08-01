@@ -116,4 +116,52 @@ touches auth-adjacent logic beyond simple query correctness, treat as Tier 2 ins
 
 ## Part B — Implementation map (Orchestrator)
 
-To be filled by the Orchestrator session on `git pull`, within the envelope above.
+**Confirmed (Orchestrator, `git pull` + grep):** this chained-`.filter()`-on-`participants` pattern
+occurs exactly **once** in the messaging module — `ConversationListView.get()`,
+`src/django_core_micha/messaging/views.py:158-160`. No other instance to report or fix.
+
+### Step 1 — reproduce the bug as a failing test, before touching the fix
+
+Add to `src/django_core_micha/messaging/tests/test_views.py`: a conversation with 2 participants
+(reuse this file's existing fixtures/patterns for building an authenticated `api_domain` — read the
+existing `test_non_member_is_404_and_capability_failure_is_403`-style tests in this file for the
+fixture shape rather than inventing a new one), queried via `GET conversations/` by the participant
+who is NOT app-key `actor`/creator. Assert the response's `results` contains that conversation exactly
+once. Confirm this test fails on the current code (red) before applying the fix.
+
+### Step 2 — fix
+
+`ConversationListView.get()` (`views.py:157-161`): combine the `archived_at` condition into the SAME
+`.filter()` call as `user`/`removed_at` instead of chaining a second `.filter()` on the same
+multi-valued relation — e.g.:
+
+```python
+participant_filters = {"participants__user": request.user, "participants__removed_at__isnull": True}
+if request.query_params.get("include_archived") != "true":
+    participant_filters["participants__archived_at__isnull"] = True
+qs = Conversation.objects.select_related("app", "scope").filter(**participant_filters)
+```
+
+Verify this is idiomatic for this file (check nearby views for the established style) before landing
+it verbatim. Do not add `.distinct()` as an alternative/additional fix — the single-join combine is
+the correct semantic fix; layering `.distinct()` on top would mask rather than fix and is explicitly
+out of scope per Part A.
+
+### Step 3 — non-regression
+
+Re-run the existing `include_archived=true` test (if one exists — check `test_views.py`) and any
+existing single-participant list test to confirm unchanged behavior. Confirm the new test from step 1
+now passes (green).
+
+### Test gate
+
+This repo's own convention for a messaging-domain service/view change is the **full** `python -m
+pytest -q` run (per MSG-2c/2d/2e/2f precedent) — narrow is not sufficient here given this touches a
+shared list endpoint every consumer reads.
+
+### Mini-handover (pastable)
+
+Orchestrator: implement `work-orders/MSG-2g.md` in `django-core-micha` (main), Part B filled — the fix
+is a single combined `.filter()` call in `ConversationListView.get()`. Reproduce the bug as a failing
+test first, then fix, then full suite. Independent `reviewer`, then commit + publish (version bump —
+this is a real bug fix, at minimum a patch release; confirm current version on `git pull`).
