@@ -138,4 +138,127 @@ proof of a publish.
 
 ## Part B — Implementation map (Orchestrator)
 
-To be filled by the Orchestrator session on `git pull`, within the envelope above.
+Working directory: `C:\Users\biglmi\Documents\webapps\django-core-micha` (repo root — package is not split
+into backend/frontend subdirs).
+
+### Context package
+
+- `pyproject.toml:13-27` — `dependencies` list. Add two entries, alphabetised isn't enforced (existing
+  list has no strict order) but keep it readable: `"Pillow>=10"` and `"cryptography>=42"` (lower bounds
+  are the WO's ask — not exact pins; adjust the number only if a materially newer floor is needed for an
+  API already in use, but do not investigate further, these are sane conservative floors for the
+  `Image`/`ImageOps` and `Fernet`/`MultiFernet` APIs already in use).
+- `pyproject.toml:36-40` — `[tool.pytest.ini_options]`, `testpaths` already includes
+  `src/django_core_micha/messaging/tests` (DX-2's fix — do not touch).
+- `src/django_core_micha/messaging/attachments.py:59-61` — the guarded `from PIL import Image, ImageOps`
+  inside a function body (not module level) — this is exactly the "lazy import inside a function" case
+  the guard test must catch. **Leave this guard as-is** (do-not-touch per envelope) — it is defence in
+  depth, not the thing being fixed.
+- `src/django_core_micha/messaging/crypto.py:19` — `from cryptography.fernet import Fernet, InvalidToken,
+  MultiFernet` at module level. No guard here by design (fail-closed) — do not add one.
+- `src/django_core_micha/messaging/tests/test_attachments.py:1-15` — already imports
+  `from cryptography.fernet import Fernet` directly; this is the test that failed with
+  `ModuleNotFoundError: No module named 'PIL'` in CI. Once `Pillow`/`cryptography` are installed via the
+  declared deps, this file should pass unmodified — do not edit its test bodies, only make its
+  dependencies resolvable.
+- `CHANGELOG.md:3-6` — the existing `## [2.38.0] — 2026-07-31` entry (MSG-2d). Add a short "Fixed" or
+  amend "Added" bullet noting the two dependencies were declared explicitly (Pillow was always a runtime
+  requirement of the attachment image pipeline; cryptography was already required transitively via
+  `django-allauth[mfa]` and is now declared directly since it backs the messaging encryption-at-rest
+  guarantee). **Do not open a new version heading** — `pyproject.toml:7` already says `2.38.0` and it was
+  never published (confirmed via `pip index versions django-core-micha` → tops out at `2.37.0`), so this
+  is an amendment to the existing entry, not a new release.
+- No existing guard test scans `src/` for undeclared third-party imports today.
+  `tests/test_settings_base_dependencies.py` is a different, narrower pattern (subprocess-imports
+  `settings_base` and resolves MIDDLEWARE/STORAGES strings) — do not confuse the two or try to extend
+  that file; write a new, separate test module for the import-scan guard, e.g.
+  `tests/test_declared_dependencies.py`.
+- `.github/workflows/publish.yml` — do not touch. Its `version_check` step already compares
+  `pyproject.toml`'s version against the live PyPI version and publishes whenever current > published;
+  since PyPI is still on `2.37.0` and pyproject already says `2.38.0`, a green push to `main` with the
+  fixed `pytest -q` gate (line 104, `pip install -e ".[test]"` then bare `pytest -q`) is sufficient to
+  trigger a real publish. No workflow change needed — the previous run only failed because of the missing
+  test deps, not the workflow logic.
+
+### Guard test — required shape
+
+Write `tests/test_declared_dependencies.py` (or an equally clear name) that:
+
+1. Walks every `.py` file under `src/django_core_micha/`.
+2. Parses each with `ast` (not regex) and collects every `Import`/`ImportFrom` node **anywhere in the
+   file**, not just at module level — the whole point is to catch `attachments.py:59`'s
+   function-body-scoped `from PIL import Image, ImageOps`, which a module-level-only or `dir()`-based
+   scan misses.
+3. For each imported top-level module name, classifies it as: stdlib (use `sys.stdlib_module_names` on
+   3.10+, this repo targets Python 3.14 per the workflow so it's available), first-party
+   (`django_core_micha` itself, i.e. relative imports / imports starting with that package), or
+   third-party.
+4. For every third-party module name, asserts it maps to an entry in `pyproject.toml`'s
+   `project.dependencies` (parse with `tomllib`, normalise names — e.g. `PIL` module ↔ `Pillow`
+   dependency name, `cryptography` module ↔ `cryptography` dependency, `yaml` ↔ `PyYAML`, `rest_framework`
+   ↔ `djangorestframework`, `corsheaders` ↔ `django-cors-headers`, `environ` ↔ `django-environ`,
+   `allauth` ↔ `django-allauth[mfa,socialaccount]`, `psycopg2` ↔ `psycopg2-binary`, `channels_redis` ↔
+   `channels_redis`, `pywebpush`/`filetype`/`whitenoise`/`channels`/`django` map 1:1). Build this
+   module-name → distribution-name table explicitly in the test (small, hardcoded dict) rather than
+   attempting import-metadata magic — the WO's own risk note says keep it explicit and readable over
+   clever.
+5. Fails loudly, naming both the missing module and the file/line that imports it, if any third-party
+   module isn't covered.
+6. Must be shown to actually fail when a declared dependency is removed — do this as part of Codex's own
+   verification only (temporarily comment out `"Pillow>=10"`, run just this test file, confirm red,
+   restore it), not as a permanent test-of-a-test in the suite.
+
+### Invariants / do-not-touch (restated from envelope)
+
+- No messaging behaviour change.
+- No dependency beyond `Pillow` and `cryptography`.
+- Both go in `dependencies`, not the `test` extra.
+- Don't touch `testpaths` or weaken/remove the guarded `PIL` import in `attachments.py`.
+- Don't touch `crypto.py`'s unguarded `cryptography` import (fail-closed is correct).
+- Version stays `2.38.0` (already set) — no version bump.
+
+### Progress contract
+
+`PLAN: …` line, then single-line `PROGRESS: [n/total] <action>` before every relevant action and `… done`
+on completion, unbuffered stdout, no gap > ~2 min, final `RESULT: DONE|BLOCKED <reason>`.
+
+### What Codex does vs. what the Orchestrator does
+
+**Codex's job in this run:** write the guard test + amend `CHANGELOG.md` + add the two dependencies
+to `pyproject.toml`, run `python -m pytest -q` once yourself to confirm green (this is your only test
+run — not the authoritative gate). Do NOT run `codex exec` yourself, do NOT shell out to invoke Codex
+again, do NOT commit, push, or publish — leave every change uncommitted in the working tree.
+
+**The Orchestrator's job, after Codex finishes (not your concern — do not attempt any of this):** an
+independent `reviewer`, the authoritative `python -m pytest -q` (full suite — this WO's own risk
+section calls for it: a dependency change with cross-suite blast radius, not just the affected
+messaging tests), commit + push to `main` (this repo's trunk = `main`, not `develop`), watch the
+`publish.yml` GitHub Actions run to completion, and confirm with `pip index versions
+django-core-micha` that `2.38.0` is actually resolvable before marking the WO done.
+
+### Preamble (governs this run)
+
+The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there is
+no separate plan file. Read the nearest `AGENTS.md` and the app's own conventions only as needed. Stay
+in scope; do not touch auth/permissions/CI/schema, and do not add any dependency beyond `Pillow` and
+`cryptography`. Do not update `MEMORY.md`. Do NOT `git add`/`commit`/`push` — leave every change
+uncommitted in the working tree for the Orchestrator's independent review. WRITE the guard test and
+`test_attachments.py` fix this WO calls for, AND run the tests you just wrote to confirm they pass —
+that is the ONLY test run you do (not the app's affected/full suite, not any review). The Orchestrator
+re-runs the authoritative set + does the independent review after you finish — that is the gate, your
+own run does not count as it. You are the implementer in this invocation; nothing in this file is an
+instruction for you to invoke `codex exec` — that line describes how the Orchestrator (a separate,
+already-running process) launched you.
+
+Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+`PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+`RESULT: DONE|BLOCKED <reason>`.
+
+### Mini-handover (pastable)
+
+Orchestrator: implement `work-orders/MSG-2e.md` in `django-core-micha` (main). `git pull` first, read the
+WO, then follow `orchestrate-codex` (Codex-first, own independent review, commit on green, publish at WO
+end). Republish as 2.38.0 — it never reached the registry. Confirm with `pip index versions
+django-core-micha` that it is actually resolvable before calling the WO done; a green workflow is not
+proof of a publish.

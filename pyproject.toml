@@ -22,7 +22,9 @@ dependencies = [
     "djangorestframework",
     "channels",
     "channels_redis",
+    "cryptography>=42",
     "django-allauth[mfa,socialaccount]",
+    "Pillow>=10",
     "whitenoise",
 ]
 

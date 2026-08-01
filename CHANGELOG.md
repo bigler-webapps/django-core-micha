@@ -8,6 +8,12 @@
 
 Messages now carry viewer-independent `reply_count`/`last_reply_at` (a soft-deleted reply still counts, matching its tombstone rendering), so a freshly-mounted client can tell a root has replies without expanding every thread. The requesting user's own `thread_last_read_at` is added REST-only, on top of the viewer-independent projection, never on a realtime frame. `serialize_conversation` now exposes `external_key`, letting a client distinguish managed/broadcast conversations that otherwise share the same `kind`. Reply counts are annotated/aggregated and thread receipts bulk-fetched per page — no N+1 across a message list.
 
+### Fixed
+
+#### MSG-2e — declared messaging runtime dependencies
+
+Declared `Pillow>=10`, required by the attachment image decode, EXIF-strip, safe re-encode, and thumbnail pipeline, and `cryptography>=42`, which backs messaging encryption at rest. Both were already imported by the messaging package; `cryptography` had previously been supplied only transitively through `django-allauth`.
+
 ## [2.37.0] — 2026-07-31
 
 ### Added
