@@ -89,6 +89,16 @@ def test_conversation_list_does_not_duplicate_multi_participant_conversation(api
     assert [row["id"] for row in listed.data["results"]].count(str(conversation.id)) == 1
 
     ConversationParticipant.objects.filter(conversation=conversation, user=users["viewer"]).update(archived_at=conversation.created_at)
+
+    # Default (include_archived unset): the viewer's own archived participation must exclude the
+    # conversation — proves the archived_at condition genuinely constrains the SAME (viewer's)
+    # participant row rather than being silently dropped by the combined-filter fix.
+    default_response = client.get("/messaging/conversations/")
+    assert default_response.status_code == 200
+    assert str(conversation.id) not in {row["id"] for row in default_response.data["results"]}
+
+    # include_archived=true: the conversation reappears, and still exactly once — the
+    # multi-participant dedup must hold under this branch too, not only the default one.
     included = client.get("/messaging/conversations/?include_archived=true")
 
     assert included.status_code == 200
