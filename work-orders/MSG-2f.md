@@ -140,4 +140,83 @@ confirm against this repo's own AGENTS.md/test-scope convention before running.
 
 ## Part B — Implementation map (Orchestrator)
 
-To be filled by the Orchestrator session on `git pull`, within the envelope above.
+### Diagnostic fact, confirmed before implementation — do not re-derive
+
+`create_conversation()` has **exactly one caller in the entire codebase**:
+`ConversationCreateView.post()` (`src/django_core_micha/messaging/views.py:192`). No other code path
+creates a `managed`/`group`/`broadcast`/`object_thread` conversation. This means the "does `managed`
+already get hit by the idempotency bug in practice" question from Part A resolves cleanly: **no
+consumer has ever called this twice for the same `(app,scope,kind,external_key)` yet**, because dcm
+has no live `managed`-conversation consumer today (jg's MSG-5c wired the frontend but the flag is off;
+MSG-5d, which would be the first real caller, is what surfaced this gap and paused on it). This is a
+**pre-launch fix, not a live regression** — real but not urgent-for-existing-users, which should
+inform how conservative the schema/behavior change needs to be (no production data at risk yet).
+
+### Step 1 — decide and (if needed) amend the design doc
+
+Read `docs/design/messaging-platform.md`'s existing `provision_membership` trigger vocabulary
+(`scope_created`, `domain_changed`, `reconcile` — defined in the `MessagingPolicy` protocol,
+`src/django_core_micha/messaging/policy.py`) before designing anything new. Resolve, in this order:
+
+1. **Idempotency shape.** Change `create_conversation`'s `Conversation.objects.create(...)`
+   (`services.py:113`) to a `get_or_create` keyed on whatever the "reuse" identity actually is per
+   kind:
+   - `managed`/`broadcast`: `(app, scope, kind, external_key)` — the existing
+     `msg_managed_bcast_key_uniq` constraint already defines this; `get_or_create` against exactly
+     those fields, `created` tells you whether to run reconciliation vs. just return the existing row.
+   - `group`: **this is the real design question.** Two honest options, pick one and write down why:
+     (a) one group conversation per **object scope** (no `external_key` needed — mirrors
+     `object_thread`'s existing implicit 1:1 with its scope; would need a new
+     `UniqueConstraint(condition=Q(kind="group"), fields=["app","scope"], ...)` — a migration), or
+     (b) `group` keeps `external_key` as its reuse key too, same shape as `managed`/`broadcast`, no
+     new constraint needed (extend the existing `msg_managed_bcast_key_uniq` constraint's `kind__in`
+     list to include `"group"` — still a migration, but a smaller one: widening an existing
+     constraint rather than adding a new one). **(b) is very likely the lower-risk, more consistent
+     choice** — it reuses the identical mechanism `managed`/`broadcast` already have instead of
+     introducing a second reuse-key shape — but confirm against how `jg-ferien`'s own `Group` model
+     would supply a stable `external_key` (e.g. `f"group:{group.pk}"`, mirroring how jg already does
+     `event_all`/`event_team`) before committing to it; if jg's `Group` has no natural stable
+     identifier suitable for this, reconsider (a).
+2. **Membership reconciliation.** Extend `create_conversation`'s `if kind in {MANAGED, OBJECT_THREAD}`
+   gate (`services.py:118`) to also include `GROUP` and `BROADCAST` — `reconcile_membership` is
+   already fully generic (`services.py:47-76`), this is a one-line set-literal change. Confirm this
+   doesn't change behavior for a `group`/`broadcast` app that supplies `participant_users` at creation
+   but whose `MessagingPolicy.provision_membership` returns an **empty** snapshot for those kinds
+   (check `django_core_micha.messaging.policy.MembershipSnapshot`'s default and any existing
+   `provision_membership` implementations in this repo's own tests) — if a policy hasn't implemented
+   `group`/`broadcast` membership resolution, reconciliation must not silently wipe the
+   explicitly-passed `participant_users`. This is the "silent membership loss" risk from Part A:
+   `remove_absent` must default safely (false / no-op) for a policy that returns an empty snapshot
+   for a kind it doesn't actively manage, not interpret "empty snapshot" as "remove everyone."
+3. If step 1 needs the constraint widening, write the migration, and update
+   `docs/design/messaging-platform.md`'s domain-model table (`MessagingScope`/`Conversation`
+   constraints section) to match — per the MSG-2c/2d precedent, the design doc is amended in the same
+   commit as the schema change, not after.
+
+### Step 2 — implement
+
+Target file: `src/django_core_micha/messaging/services.py` (`create_conversation`, and the migration
+under `src/django_core_micha/messaging/migrations/` if step 1.3 applies). Do not touch `open_direct`
+(`:79-96`, already correct and out of scope) or `reconcile_membership` itself (`:47-76`, already
+correct and generic — only its call sites in `create_conversation` change).
+
+### Step 3 — tests (per Part A's "Required tests to WRITE")
+
+Existing test files to extend: `src/django_core_micha/messaging/tests/test_services.py` (idempotency,
+reconciliation-on-create) — read its existing `managed`/`object_thread` reconciliation tests first and
+mirror their fixture shape for the new `group`/`broadcast` cases rather than inventing a new pattern.
+
+### Test gate
+
+Per this repo's own convention (see MSG-2c/2d/2e precedent in `WORK_ORDERS.md`): a shared-domain
+service change affecting `create_conversation` (used by every conversation kind except `direct`)
+warrants the **full** `python -m pytest -q` run, not a narrow slice — same justification MSG-2e used
+for its dependency change. Confirm current green baseline count before changing anything, so the
+diff in pass count at the end is legible.
+
+### Mini-handover (pastable)
+
+Orchestrator: implement `work-orders/MSG-2f.md` in `django-core-micha` (main), Part B filled. Resolve
+the group idempotency-shape decision in step 1 (likely: widen the existing
+`msg_managed_bcast_key_uniq` constraint to include `group`) before writing code, amend
+`docs/design/messaging-platform.md` if a migration is needed. Independent `reviewer`, full suite gate.
