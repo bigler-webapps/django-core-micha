@@ -100,7 +100,7 @@ class Conversation(UUIDModel):
         ordering = [models.F("last_message_at").desc(nulls_last=True), "-created_at"]
         constraints = [
             models.UniqueConstraint(condition=Q(kind="direct"), fields=["app", "scope", "user_low", "user_high"], name="msg_direct_app_scope_pair_uniq"),
-            models.UniqueConstraint(condition=Q(kind__in=["managed", "broadcast"]), fields=["app", "scope", "kind", "external_key"], name="msg_managed_bcast_key_uniq"),
+            models.UniqueConstraint(condition=Q(kind__in=["managed", "group", "broadcast"]), fields=["app", "scope", "kind", "external_key"], name="msg_managed_bcast_key_uniq"),
             models.CheckConstraint(condition=Q(kind="direct", user_low__isnull=False, user_high__isnull=False) | ~Q(kind="direct"), name="msg_direct_has_canonical_pair"),
         ]
 

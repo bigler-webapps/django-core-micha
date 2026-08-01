@@ -1,5 +1,29 @@
 # Changelog
 
+## [2.39.0] — 2026-08-01
+
+### Fixed
+
+#### MSG-2f — group/broadcast conversation lifecycle: membership reconciliation + idempotency
+
+`create_conversation()` previously always did a blind `Conversation.objects.create(...)` for `group`/
+`broadcast`/`managed`, even though the schema already had a `(app,scope,kind,external_key)` unique
+constraint for `managed`/`broadcast` — a second call for the same key raised `IntegrityError`. Widened
+that constraint to cover `group` too and made keyed creation idempotent: an authorized actor
+re-opening an existing keyed conversation now joins it (added as a participant, `participant_users`
+processed, membership reconciled) rather than either crashing or being silently locked out. Membership
+reconciliation (`reconcile_membership`, calling the app-supplied `provision_membership` hook) now runs
+for `group`/`broadcast` too, not only `managed`/`object_thread` — both at creation and on every
+authorized re-open (`trigger="reconcile"`), so a group/broadcast conversation's membership stays live
+instead of frozen at its creation-time snapshot. The realtime `conversation_upsert` frame still
+publishes only for a genuinely new conversation, not on every re-open. A migration widens the existing
+partial unique constraint (defensive data-preservation step included; no live consumer had used this
+code path before this fix, confirmed via `create_conversation`'s single call site). Design doc updated
+to document idempotent join-on-reuse and to confirm `MessagingScope.Kind.OBJECT` already generically
+supports a per-entity object scope with no dcm change needed — an app's own group-like entity gets a
+stable scope via `get_or_create(kind=OBJECT, content_type=..., object_id=...)`, same mechanism any
+object scope already uses.
+
 ## [2.38.0] — 2026-07-31
 
 ### Added

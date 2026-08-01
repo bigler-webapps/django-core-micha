@@ -110,14 +110,32 @@ def create_conversation(*, actor, app, scope, kind, title=None, participant_user
     if kind == Conversation.Kind.OBJECT_THREAD and scope.kind != MessagingScope.Kind.OBJECT:
         raise ValueError("Object threads require an object scope.")
     with transaction.atomic():
-        conversation = Conversation.objects.create(app=app, scope=scope, kind=kind, title=title, external_key=external_key)
-        ConversationParticipant.objects.create(conversation=conversation, user=actor)
+        reuse_by_external_key = kind in {
+            Conversation.Kind.MANAGED,
+            Conversation.Kind.GROUP,
+            Conversation.Kind.BROADCAST,
+        } and external_key is not None
+        if reuse_by_external_key:
+            conversation, created = Conversation.objects.get_or_create(
+                app=app,
+                scope=scope,
+                kind=kind,
+                external_key=external_key,
+                defaults={"title": title},
+            )
+        else:
+            conversation = Conversation.objects.create(app=app, scope=scope, kind=kind, title=title, external_key=external_key)
+            created = True
+        ConversationParticipant.objects.get_or_create(conversation=conversation, user=actor)
         for user in participant_users:
             if user.pk != actor.pk:
                 ConversationParticipant.objects.get_or_create(conversation=conversation, user=user)
-        if kind in {Conversation.Kind.MANAGED, Conversation.Kind.OBJECT_THREAD}:
-            reconcile_membership(conversation=conversation, trigger="scope_created")
-        transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation), "conversation_upsert", _conversation_upsert_payload(conversation)))
+        if kind in {Conversation.Kind.MANAGED, Conversation.Kind.GROUP, Conversation.Kind.BROADCAST, Conversation.Kind.OBJECT_THREAD}:
+            reconcile_membership(conversation=conversation, trigger="scope_created" if created else "reconcile")
+        if created:
+            # Re-opening an existing keyed conversation is a routine no-op; only a
+            # genuinely new conversation is a create/open event worth a frame.
+            transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation), "conversation_upsert", _conversation_upsert_payload(conversation)))
     return conversation
 
 

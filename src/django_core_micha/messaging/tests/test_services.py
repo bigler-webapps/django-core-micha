@@ -176,6 +176,62 @@ def test_create_conversation_requires_the_matching_moderation_right(domain):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("kind", "right"),
+    [
+        (Conversation.Kind.MANAGED, "create_managed"),
+        (Conversation.Kind.GROUP, "open_group"),
+        (Conversation.Kind.BROADCAST, "open_broadcast"),
+    ],
+)
+def test_keyed_conversation_creation_is_idempotent_and_reconciles_provider_membership(domain, kind, right):
+    app, _, users, policy = domain
+    scope = MessagingScope.objects.get(app=app, kind="global")
+    policy.rights = frozenset({right})
+    policy.snapshot = MembershipSnapshot([users[1]], remove_absent=True)
+
+    first = create_conversation(
+        actor=users[0], app=app, scope=scope, kind=kind, external_key=f"{kind}:stable",
+    )
+    policy.snapshot = MembershipSnapshot([users[2]], remove_absent=True)
+    second = create_conversation(
+        actor=users[0], app=app, scope=scope, kind=kind, external_key=f"{kind}:stable", participant_users=[users[3]],
+    )
+
+    assert second.pk == first.pk
+    assert Conversation.objects.filter(app=app, scope=scope, kind=kind, external_key=f"{kind}:stable").count() == 1
+    assert ConversationParticipant.objects.get(conversation=first, user=users[1]).removed_at is not None
+    assert ConversationParticipant.objects.get(conversation=first, user=users[2]).removed_at is None
+    assert ConversationParticipant.objects.get(conversation=first, user=users[3]).membership_source == "manual"
+
+
+@pytest.mark.django_db
+def test_authorized_actor_joins_keyed_conversation_on_reopen(domain):
+    app, _, users, policy = domain
+    scope = MessagingScope.objects.get(app=app, kind="global")
+    policy.rights = frozenset({"open_group"})
+    policy.snapshot = MembershipSnapshot([])
+    first = create_conversation(actor=users[0], app=app, scope=scope, kind=Conversation.Kind.GROUP, external_key="group:stable")
+
+    second = create_conversation(actor=users[1], app=app, scope=scope, kind=Conversation.Kind.GROUP, external_key="group:stable")
+
+    assert second.pk == first.pk
+    assert ConversationParticipant.objects.filter(conversation=first, user=users[1], removed_at__isnull=True).exists()
+
+
+@pytest.mark.django_db
+def test_keyed_conversation_reopen_still_requires_moderation_right(domain):
+    app, _, users, policy = domain
+    scope = MessagingScope.objects.get(app=app, kind="global")
+    policy.rights = frozenset({"open_group"})
+    create_conversation(actor=users[0], app=app, scope=scope, kind=Conversation.Kind.GROUP, external_key="group:stable")
+
+    policy.rights = frozenset()
+    with pytest.raises(MessagingPermissionDenied):
+        create_conversation(actor=users[1], app=app, scope=scope, kind=Conversation.Kind.GROUP, external_key="group:stable")
+
+
+@pytest.mark.django_db
 def test_send_message_recovers_from_concurrent_integrity_error_without_aborting_transaction(domain, monkeypatch):
     """Simulates two racing sends for the same client_request_id past the initial
     existence check (both miss it before either commits), forcing send_message

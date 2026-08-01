@@ -23,7 +23,8 @@ class Policy:
     def can_post(self, **kwargs): return kwargs["actor"].username != "viewer"
     def moderation_rights(self, **kwargs): return self.rights
     def resolve_recipients(self, **kwargs): return []
-    def provision_membership(self, **kwargs): return MembershipSnapshot([])
+    snapshot = MembershipSnapshot([])
+    def provision_membership(self, **kwargs): return self.snapshot
     def validate_scope(self, **kwargs): return {}
 
 
@@ -55,6 +56,43 @@ def test_message_post_retries_once_with_idempotency_key(api_domain):
     assert first.status_code == 201 and second.status_code == 200
     assert first.data["id"] == second.data["id"]
     assert second.data["body"] == "sensitive"
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_provider_member_added_on_group_creation_can_see_conversation(api_domain):
+    app, scope, _, users = api_domain
+    policy = get_messaging_policy(app.app_key)
+    policy.snapshot = MembershipSnapshot([users["viewer"]], remove_absent=True)
+    client = APIClient(); client.force_authenticate(users["author"])
+
+    created = client.post("/messaging/conversations/group/", {
+        "scope": str(scope.pk), "external_key": "group:42", "participant_ids": [],
+    }, format="json")
+
+    assert created.status_code == 201
+    client.force_authenticate(users["viewer"])
+    listed = client.get("/messaging/conversations/")
+    assert listed.status_code == 200
+    assert str(created.data["id"]) in {row["id"] for row in listed.data["results"]}
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_authorized_actor_joins_keyed_group_on_reopen(api_domain):
+    app, scope, _, users = api_domain
+    policy = get_messaging_policy(app.app_key)
+    policy.snapshot = MembershipSnapshot([])
+    client = APIClient(); client.force_authenticate(users["author"])
+    payload = {"scope": str(scope.pk), "external_key": "group:private", "participant_ids": []}
+    created = client.post("/messaging/conversations/group/", payload, format="json")
+    assert created.status_code == 201
+
+    client.force_authenticate(users["outsider"])
+    reopened = client.post("/messaging/conversations/group/", payload, format="json")
+    assert reopened.status_code == 201
+    assert reopened.data["id"] == created.data["id"]
+    assert ConversationParticipant.objects.filter(conversation_id=reopened.data["id"], user=users["outsider"], removed_at__isnull=True).exists()
 
 
 @pytest.mark.django_db
