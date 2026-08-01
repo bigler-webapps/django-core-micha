@@ -285,6 +285,28 @@ publish, envelope `ui-core-micha/work-orders/DX-1.md`. It runs before MSG-3 and 
   than applied in passing because it changes what CI executes, and the first run may legitimately go
   red — which would itself be the finding. Root cause worth fixing beyond the one line: `testpaths` is
   an allowlist with no guard, so the next subpackage will repeat this silently.
+- **A published version is not a published version until the registry says so (2026-08-01).** dcm's
+  `pyproject.toml` and `CHANGELOG.md` said **2.38.0** for a full day while `pip index versions` topped out
+  at 2.37.0: the MSG-2d publish workflow failed its own pytest gate *before* the publish step ran
+  (`ModuleNotFoundError: No module named 'PIL'`), so the release silently never happened. Two lessons.
+  **First, `DX-2` worked exactly as designed** — before it, `messaging/tests` was never collected in CI, so
+  `test_attachments.py` had never run and the missing dependency was invisible; the first honest CI run
+  failed, which its envelope explicitly called the point of the exercise. No consumer was harmed because
+  the failure stopped the publish. **Second, the registry live-check earned its place**: jg's MSG-5a
+  Orchestrator hit it at step 1, changed zero files, and surfaced a dcm gap instead of patching dcm from a
+  jg session. Keep both — "publish from main, then live-check the registry before pinning" is not
+  ceremony, and a green workflow is not proof of a publish. Fixed by `MSG-2e`.
+- **Two runtime dependencies were never declared, and one of them guards the encryption.** `Pillow`
+  (`messaging/attachments.py`, the image pipeline) and `cryptography` (`messaging/crypto.py`, Fernet —
+  the encryption-at-rest gate) are imported at runtime and listed in neither `dependencies` nor the test
+  extra. `cryptography` resolves today only *transitively* through `django-allauth[mfa]`, so the
+  platform's central security guarantee has been resting on another package's optional extra. Worse for
+  `Pillow`: `attachments.py` catches the `ImportError` and raises a `ValidationError` that reads like a
+  policy decision, so a consumer without it gets silently non-functional image attachments and no
+  traceback. jg carries Pillow for its own messaging and would not have noticed; the first greenfield
+  consumer would have shipped the feature broken. `MSG-2e` declares both and adds a guard test — one that
+  must catch a **lazy in-function import**, since the first audit pass missed `PIL` for exactly that
+  reason.
 - **The version-pin rule worked on its first outing (2026-08-01).** MSG-3c re-verified the two remaining
   BLOCKED rows against dcm's committed source rather than the WO text, recorded the result *with the
   version* — "blocked as of dcm 2.37.0 … re-verified against 2.37.0: still absent" — and even noticed
