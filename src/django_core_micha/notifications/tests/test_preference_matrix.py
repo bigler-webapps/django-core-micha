@@ -1,6 +1,7 @@
 import pytest
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
@@ -79,4 +80,11 @@ def test_0003_migration_preserves_legacy_channel_behavior_without_seeding():
         NotificationPreference_current.objects.filter(user_id=user.pk).update(email_opt_in=True)
         assert is_channel_enabled(current_user, "any-category", "email") is True
     finally:
-        MigrationExecutor(connection).migrate([(APP_LABEL, MIGRATION_0003)])
+        # Restore to the actual latest migration state, not a hardcoded target —
+        # rolling back to a fixed "0003" here (as this test previously did) left
+        # the test database's schema permanently stuck at 0003 for the rest of
+        # the session once a later migration (0005, adding TodoOverride) shipped,
+        # since `flush`-based test teardown never re-runs migrations on its own.
+        # That silently broke every other test needing anything past 0003 whenever
+        # this test happened to run first in the session.
+        call_command("migrate", run_syncdb=True, verbosity=0)
