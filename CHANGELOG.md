@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.39.3] — 2026-08-02
+
+### Fixed
+
+#### Direct conversations exposed no counterpart identity
+
+`serialize_conversation` now includes `other_user_id` for direct conversations — a bare id (never a
+resolved name, matching the existing `sender_id` convention on messages) identifying the OTHER
+participant relative to whichever participant is asking. Sourced from the already-denormalized
+`user_low`/`user_high` FKs on `Conversation`, so no extra query. Deliberately NOT added to
+`serialize_conversation_core` (the realtime `conversation_upsert` fan-out payload), since that value is
+per-viewer and would leak the wrong direction across a shared broadcast frame.
+
 ## [2.39.2] — 2026-08-02
 
 ### Fixed

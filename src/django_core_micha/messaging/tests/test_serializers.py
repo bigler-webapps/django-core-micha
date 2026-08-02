@@ -129,13 +129,41 @@ def test_external_key_is_null_unless_managed_or_broadcast(serializer_domain):
 def test_conversation_upsert_style_projection_excludes_participant_fields(serializer_domain):
     """The realtime `conversation_upsert` frame reuses `serialize_conversation_core`
     (not `serialize_conversation`) precisely because the latter's archived_at/muted/
-    channel-preference fields are per-participant and would leak across a fanned-out
-    frame — see docs/design/messaging-platform.md amendment. Assert the split holds."""
+    channel-preference/other_user_id fields are per-participant (`other_user_id` is
+    the counterpart RELATIVE TO the viewer, so it differs per recipient — the same
+    reason it must never leak into the shared fanned-out frame) and would leak
+    across a fanned-out frame — see docs/design/messaging-platform.md amendment.
+    Assert the split holds."""
     from django_core_micha.messaging.serializers import serialize_conversation_core
 
     _, conversation, users = serializer_domain
     core = serialize_conversation_core(conversation)
-    assert set(core).isdisjoint({"archived_at", "muted", "email_enabled", "push_enabled"})
+    assert set(core).isdisjoint({"archived_at", "muted", "email_enabled", "push_enabled", "other_user_id"})
     participant = ConversationParticipant.objects.get(conversation=conversation, user=users[0])
     full = serialize_conversation(conversation, participant)
-    assert set(full) - set(core) == {"archived_at", "muted", "email_enabled", "push_enabled"}
+    assert set(full) - set(core) == {"archived_at", "muted", "email_enabled", "push_enabled", "other_user_id"}
+
+
+@pytest.mark.django_db
+def test_serialize_conversation_resolves_other_user_id_relative_to_the_viewer(serializer_domain):
+    """`other_user_id` is a bare id, never a resolved name — dcm has no notion of a
+    consuming app's User model shape beyond its pk (the same reason `sender_id` on
+    a message is never accompanied by a display name). It must also be genuinely
+    relative to whichever participant is asking, not a fixed low/high pick."""
+    app, _group_conversation, users = serializer_domain
+    alice, bob = users
+    low, high = sorted((alice, bob), key=lambda user: str(user.pk))
+    scope = MessagingScope.objects.get(app=app, kind="global")
+    direct = Conversation.objects.create(app=app, scope=scope, kind=Conversation.Kind.DIRECT, user_low=low, user_high=high)
+    alice_participant = ConversationParticipant.objects.create(conversation=direct, user=alice)
+    bob_participant = ConversationParticipant.objects.create(conversation=direct, user=bob)
+
+    assert serialize_conversation(direct, alice_participant)["other_user_id"] == bob.pk
+    assert serialize_conversation(direct, bob_participant)["other_user_id"] == alice.pk
+
+
+@pytest.mark.django_db
+def test_serialize_conversation_other_user_id_is_none_for_non_direct_kinds(serializer_domain):
+    _, group_conversation, users = serializer_domain
+    participant = ConversationParticipant.objects.get(conversation=group_conversation, user=users[0])
+    assert serialize_conversation(group_conversation, participant)["other_user_id"] is None

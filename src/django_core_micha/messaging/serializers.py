@@ -7,7 +7,7 @@ storage keys.
 from django.db.models import Count, Max
 from rest_framework import serializers
 
-from .models import Poll
+from .models import Conversation, Poll
 from .crypto import decrypt_text
 
 
@@ -130,9 +130,25 @@ def serialize_conversation_core(conversation):
     }
 
 
+def _other_direct_user_id(conversation, participant):
+    """The counterpart's bare user id for a direct conversation, relative to the
+    viewer (`participant`). Never a resolved name — dcm has no notion of what a
+    consuming app's User model looks like beyond its id (the same reason
+    `serialize_message` only ever exposes `sender_id`, never a display name);
+    resolving this id to something human-readable is the host's job."""
+    if conversation.kind != Conversation.Kind.DIRECT:
+        return None
+    if conversation.user_low_id == participant.user_id:
+        return conversation.user_high_id
+    if conversation.user_high_id == participant.user_id:
+        return conversation.user_low_id
+    return None
+
+
 def serialize_conversation(conversation, participant):
     return {
         **serialize_conversation_core(conversation), "archived_at": participant.archived_at,
         "muted": participant.muted, "email_enabled": participant.email_enabled,
         "push_enabled": participant.push_enabled,
+        "other_user_id": _other_direct_user_id(conversation, participant),
     }
