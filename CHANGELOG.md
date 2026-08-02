@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.39.2] — 2026-08-02
+
+### Fixed
+
+#### NOTIF-24 — batch provider-todo overlay materialization
+
+Todo derivation now resolves overrides and existing notification/recipient overlays in set queries,
+uses conflict-tolerant bulk inserts backed by the existing unique constraints, and bulk-refreshes only
+stale content. The 13-todo reference fixture falls from 39 queries on both cold and warm derivations to
+8 cold / 3 warm queries. The unread badge now counts the same live todo projection without creating
+notification overlays merely to produce its integer.
+
 ## [2.39.1] — 2026-08-01
 
 ### Fixed

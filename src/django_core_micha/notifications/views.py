@@ -29,7 +29,7 @@ from .serializers import (
     PushSubscriptionSerializer,
 )
 from .todo.registry import iter_registered_todo_types
-from .todo.service import derive_active_todos, derive_todos_for_user
+from .todo.service import count_active_todos_for_user, derive_todos_for_user
 from .types import iter_feed_hidden_type_keys
 
 
@@ -209,7 +209,7 @@ class CanonicalUnreadCountView(views.APIView):
         ).exclude(
             notification__notification_type__in=iter_feed_hidden_type_keys()
         ).count()
-        todo_count = sum(recipient.seen_at is None for recipient in derive_active_todos(request.user))
+        todo_count = count_active_todos_for_user(request.user)
         return Response({"count": event_count + todo_count})
 
 

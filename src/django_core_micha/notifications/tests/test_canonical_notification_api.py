@@ -182,6 +182,27 @@ def test_canonical_unread_count_excludes_dismissed_unseen_rows():
 
 
 @pytest.mark.django_db
+def test_unread_count_matches_the_unseen_live_feed_without_materializing_rows():
+    user = make_user("count-list-agreement")
+    emissions = {"First", "Second"}
+    widgets = {title: Widget.objects.create(name=title) for title in emissions}
+    register_toggleable_todo_provider(emissions, widgets)
+
+    # The badge follows the same live projection but does not create the overlay
+    # rows merely to count unseen actionable todos.
+    assert get_unread_count(user).data == {"count": 2}
+    assert Notification.objects.filter(category="todo").count() == 0
+
+    unseen_feed = get_feed(user, status="unseen")
+    assert len(unseen_feed.data["results"]) == 2
+    first_recipient = unseen_feed.data["results"][0]
+    NotificationRecipient.objects.filter(pk=first_recipient["id"]).update(seen_at=timezone.now())
+
+    assert get_unread_count(user).data == {"count": 1}
+    assert len(get_feed(user, status="unseen").data["results"]) == 1
+
+
+@pytest.mark.django_db
 def test_feed_visible_policy_hides_only_explicitly_hidden_registered_types():
     user = make_user("feed-visibility")
     register_notification_type(NotificationType(
