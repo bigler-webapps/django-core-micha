@@ -47,15 +47,30 @@ the count that does have a writer was reduced to a boolean.
 - Compute both in the **same** round trip as `all_read`; do not add two extra queries. An aggregate over
   the one queryset is the target.
 
-**Visibility: the aggregate goes to anyone who may already call `read-status`; it is NOT gated on
-`read_receipt_detail`.** That gate exists to protect *per-person* read timestamps — `services.py:340`
-already restricts `recipient_detail` to `kind != DIRECT and "read_receipt_detail" in rights`, and DMs
-never expose it even to moderators, a documented invariant. An ordinary sender must get the ratio for
-their own message or the feature does not exist for them. **State this explicitly in the review** —
-`sec_reviewer` should confirm the aggregate/detail split is the intended privacy line, not assume it.
+**Visibility (operator decision, 2026-08-03): the counts are TEAM-ONLY — put them inside the existing
+gated block.** `services.py:340` already reads:
 
-Do not change `recipient_detail`'s gating, and do not extend the aggregate to DMs beyond what `all_read`
-already conveys there (a 1-of-1 ratio is noise; ucm keeps the two-state tick for `direct`).
+```python
+if conversation.kind != Conversation.Kind.DIRECT and "read_receipt_detail" in rights:
+    result["recipient_detail"] = ...
+```
+
+Add `read_count` and `recipient_count` **in that same block**. Consequences, all intended:
+
+- A team member (in jg: `read_receipt_detail` ∈ `MANAGER_RIGHTS`) sees the ratio and the per-person
+  detail — one right, one privacy line, no new vocabulary.
+- An ordinary participant posting in a group gets **no counts at all**. That is the decision: the
+  operational need is a leader knowing whether the group is informed, not a participant measuring their
+  own reach.
+- DMs get no counts, which is correct — `all_read` already carries everything a two-party chat needs,
+  and a 1-of-1 ratio is noise.
+
+**This is deliberately narrower than an earlier draft of this WO**, which proposed exposing the
+aggregate to every sender. Do not re-widen it. It also means **no new permission logic and no
+`sec_reviewer` question to resolve** — the counts inherit a gate that already exists and is already
+tested.
+
+Do not change `recipient_detail`'s gating or the DM carve-out.
 
 **B. A batch read-status endpoint.**
 
@@ -103,8 +118,9 @@ Narrow and behavioural. Do NOT run the full suite.
    read, the values are `1` and `3`, and `all_read` is still `False`.
 2. When every non-sender participant has read, `read_count == recipient_count` **and** `all_read` is
    `True` — the two must not be able to disagree.
-3. An ordinary sender **without** `read_receipt_detail` gets `read_count`/`recipient_count` but **no**
-   `recipient_detail`. This is the privacy line; assert both halves.
+3. An ordinary sender **without** `read_receipt_detail` gets **neither** `read_count`/`recipient_count`
+   **nor** `recipient_detail` for a group message — assert the counts are absent, not zero. A team
+   member on the same message gets both. This is the privacy line; assert both sides.
 4. **The batch endpoint enforces per-message permission**: a caller who cannot view message X singly
    gets no data for X in a batch that includes it. Assert that X is absent/denied, not merely that the
    call succeeded.
