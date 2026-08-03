@@ -150,6 +150,100 @@ whole MSG-5 series.
 baseline failures in the messaging suite (12-13, drifting) — compare before/after via `git stash`,
 require delta = 0, and **state the baseline count you measured** rather than quoting a previous WO.
 
+## ORCHESTRATOR NOTE ON SEQUENCING (as actually run)
+This WO's own text says "land MSG-8 first." In practice `django-core-micha` MSG-7 was already in
+flight (Codex actively editing `serializers.py`/`services.py`) when this was prepared, so the two were
+**not** run concurrently against each other as the WO warns against — MSG-8 is prepared here to hand
+over **once MSG-7's diff has landed** (reviewed, tested, committed), not before and not in parallel.
+Two consequences for whoever implements this:
+- **Every `path:line` reference below and in the envelope above was taken against pre-MSG-7 code.**
+  MSG-7 adds a `sender` object to `serialize_message`/`serialize_last_message`, removes
+  `delivered_count`/`mark_delivered`, and adds `message_id` to `serialize_poll` — all in the same files
+  this WO touches. **Re-locate every cited line by content (function name, the exact snippet quoted),
+  never by line number** — they will have shifted.
+- MSG-7's own test 3 ("a realtime `message` frame carries the same `sender` shape as the REST payload")
+  was written and gated **before** MSG-8 landed. Per this WO's `:108-112`, verify after this WO ships that
+  MSG-7's test 3 actually exercises real frame delivery correctly (it almost certainly asserts on the
+  frame dict `_publish`/`push_to_users` receives, not on a client actually decoding msgpack — check which,
+  and if it were ever silently relying on the broken path succeeding, that would itself be a finding).
+
+## IMPLEMENTATION MAP (Orchestrator)
+
+### Context package
+
+**A — the chokepoint fix (`src/django_core_micha/notifications/delivery.py`)**
+- `push_to_users` (function body `:38-61` pre-MSG-7/8; re-locate by name). Add, right after `channel_layer`
+  is confirmed non-`None` and before the `for user in recipients` loop:
+  ```python
+  from django.core.serializers.json import DjangoJSONEncoder
+  payload = json.loads(json.dumps(payload, cls=DjangoJSONEncoder))
+  ```
+  `json` is already imported at `:2`. `DjangoJSONEncoder` converts `datetime`/`date`/`time`/`timedelta`/
+  `Decimal`/`UUID`/lazy-translation objects to JSON-safe primitives (datetimes → ISO-8601 strings — the
+  same shape DRF's renderer already produces for the REST path, so this is the "verify the equivalence
+  explicitly" the envelope asks for: assert a REST-serialized and a WS-serialized copy of the same message
+  produce identical `created_at`/`edited_at` strings). **No existing `DjangoJSONEncoder` usage exists
+  anywhere in this repo** (confirmed by grep) — this is a new import, not a convention to match.
+  Round-tripping through `json.dumps`/`json.loads` (rather than a hand-rolled recursive walker) is
+  deliberate: it reuses Django's own encoder instead of re-implementing type coverage, directly addressing
+  the envelope's "a hand-rolled walker will miss a type" risk.
+- Rewrite the `except Exception as exc:` branch (`:60-61`) from `logger.warning` to `logger.error`,
+  including the frame's own discriminator and the payload's keys in the message. **The discriminator key
+  differs by caller**: messaging frames use `payload["type"]` (`realtime.py`'s `frame = {"envelope":
+  "messaging", "type": event_type, ...}`), but plain notification payloads use `payload["kind"]` (see
+  `notifications/tests/test_delivery.py:126`, `push_to_users(users, {"kind": "update"})` — no `"type"` key
+  at all there). Read whichever discriminator is present generically, e.g.
+  `payload.get("type") or payload.get("kind")`, plus `list(payload.keys())`, so the log line is useful for
+  both callers, not just messaging's.
+
+**B — test infrastructure: the existing suite cannot see this bug, by construction**
+- `messaging/tests/test_services.py`'s `_capture_frames` helper (`:279-285`) monkeypatches
+  `django_core_micha.messaging.realtime.push_to_users` itself — every existing messaging realtime test
+  bypasses the function this WO fixes entirely. That is precisely why the whole MSG-5 series shipped
+  green. **Do not extend `_capture_frames` for the new regression tests** — a test built on it can never
+  exercise real encoding, by design.
+- `notifications/tests/test_delivery.py:114-131`
+  (`test_push_to_users_targets_only_each_users_group`) is the existing pattern for exercising
+  `push_to_users` itself: monkeypatch `channels.layers.get_channel_layer` to a fake in-process layer whose
+  `group_send` just records `(group, event)`, and monkeypatch `asgiref.sync.async_to_sync` the same way.
+  This test's payload (`{"kind": "update"}`) is already JSON-safe, so it must still pass unchanged after
+  scope A — that is your regression guard for test 3 (non-messaging path unaffected). **Do not modify this
+  test**; write new ones alongside it.
+- **The real serializer, with no Redis connection required:** `channels_redis.serializers.registry`
+  (`from channels_redis.serializers import registry`) exposes the exact encoder the configured layer uses
+  — `registry.get_serializer("msgpack")` returns an instance with a pure, connection-free `.serialize(obj)`
+  method (confirmed: `RedisPubSubChannelLayer.__init__` in `channels_redis/pubsub.py` builds
+  `self._serializer` via this same registry call with `serializer_format="msgpack"`, the platform's default
+  — `settings_base.py:186-193`). Required tests 1, 2 and 4 should call
+  `registry.get_serializer("msgpack").serialize(captured_payload)` on the payload captured via the
+  fake-`group_send` pattern above (built through the real `send_message`/`edit_message`/
+  `resolve_live_recipients` → `_publish` → `publish_messaging_event` → `push_to_users` chain, inside
+  `django_capture_on_commit_callbacks(execute=True)`, same as every other `services.py` test) — that
+  `.serialize()` call is what raises today (`msgpack` cannot encode a raw `datetime`) and must stop raising
+  once scope A lands. This is a real unit-level exercise of the actual production encoder, satisfying the
+  envelope's "not a mock" requirement without needing a running Redis instance.
+- Test 4 (WS/REST parity): serialize the same message both ways — `serialize_message(message)` (or the
+  REST view response) run through DRF's renderer/`json.dumps`, and the captured WS frame's `message` key
+  run through the same — compare the resulting JSON-safe dicts for equality on the datetime fields at
+  minimum.
+- Test 5 (error-level log + isolation): monkeypatch the fake layer's `group_send` to raise, assert
+  `caplog`/`logger` records an `ERROR` (not `WARNING`) mentioning the frame type/kind, and that the
+  triggering `send_message`/etc. call still returns normally (the durable write is untouched — this is
+  already true today for the exception-isolation part; you're only changing the log level and message).
+
+### Do-not-touch reminders (from the envelope, restated)
+No `sender` object here (MSG-7's job); no frame-type/payload/recipient changes; no touching
+`useRealtimeCore`/`ui-core-micha`; no new dependencies or channel-layer backend swap.
+
+### Target repo working directory
+`C:\Users\biglmi\Documents\webapps\django-core-micha` (git root — no `backend/`/`frontend/` split).
+
+### Version bump
+Unlike MSG-7 (additive/no-bump this run), this is a genuine behavioural bug fix every consuming app wants
+— a real version bump applies here per the repo's normal release flow. Current version before this WO:
+`pyproject.toml` `2.39.3` (bump target is the Orchestrator's call at publish time — patch vs minor — per
+whether scope B's log-level change counts as a public contract change; state your reasoning).
+
 ## TARGET REPO
 `C:\Users\biglmi\Documents\webapps\django-core-micha`. Branch `develop` if it exists, else `main`.
 Publish + version bump per the repo's release flow. Consuming apps' pin bumps are **not** part of this
