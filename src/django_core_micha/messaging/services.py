@@ -252,8 +252,15 @@ def vote_poll(*, actor, poll, option_ids):
     if len(options) != len(set(option_ids)) or (not poll.allow_multiple and len(options) != 1):
         raise ValueError("Invalid poll option selection.")
     with transaction.atomic():
-        if not poll.allow_multiple:
-            PollVote.objects.filter(option__poll=poll, user=actor).delete()
+        # `option_ids` is the caller's complete, authoritative vote set for both single-
+        # and multi-select polls -- not a delta. Previously only the single-choice branch
+        # cleared prior votes; multi-select only ever added rows via `bulk_create`, so a
+        # smaller `option_ids` set never retracted a previously-cast vote (untoggling an
+        # option was silently a no-op). Delete anything no longer in the set, then
+        # (re-)create the requested set; `ignore_conflicts` makes re-voting an
+        # already-selected option a no-op rather than a duplicate-row error (unique
+        # constraint on option+user).
+        PollVote.objects.filter(option__poll=poll, user=actor).exclude(option_id__in=option_ids).delete()
         PollVote.objects.bulk_create([PollVote(option=option, user=actor) for option in options], ignore_conflicts=True)
         transaction.on_commit(lambda: _publish(poll.message.conversation, resolve_live_recipients(conversation=poll.message.conversation), "poll_updated", _poll_updated_payload(poll)))
     return poll
@@ -334,7 +341,10 @@ def unread_counts(*, actor, app=None):
 def read_status(*, actor, message):
     conversation = message.conversation; _require_view(actor, conversation)
     participants = conversation.participants.filter(removed_at__isnull=True).exclude(user=message.sender)
-    all_read = not participants.exclude(last_read_at__gte=message.created_at).exists()
+    # An empty recipient set is not "read by everyone" -- `.exclude(...).exists()` on an
+    # empty queryset is vacuously False, which made a message nobody can receive report
+    # `all_read: True` immediately on send.
+    all_read = participants.exists() and not participants.exclude(last_read_at__gte=message.created_at).exists()
     result = {"all_read": all_read}
     rights = _policy(conversation).moderation_rights(actor=actor, conversation=conversation, message=message)
     if conversation.kind != Conversation.Kind.DIRECT and "read_receipt_detail" in rights:
@@ -382,10 +392,12 @@ def batch_read_status(*, actor, message_ids):
         )
         for message in conversation_messages:
             non_sender_rows = [row for row in participant_rows if row["user_id"] != message.sender_id]
-            all_read = all(
+            # Same vacuous-truth pattern as `read_status` above: `all()` over an empty
+            # generator is True, and the old `else True` made it explicit either way.
+            all_read = bool(non_sender_rows) and all(
                 row["last_read_at"] is not None and row["last_read_at"] >= message.created_at
                 for row in non_sender_rows
-            ) if non_sender_rows else True
+            )
             entry = {"all_read": all_read}
             if gated:
                 entry["recipient_count"] = len(non_sender_rows)

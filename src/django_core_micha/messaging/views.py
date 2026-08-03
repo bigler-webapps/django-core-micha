@@ -119,9 +119,23 @@ def _idempotency_request_id(request, values):
     """Make the HTTP retry key and optimistic client ID one stable identity."""
     header = request.headers.get("Idempotency-Key")
     supplied = values.get("client_request_id")
+    # `supplied` is already a `uuid.UUID` when it comes from a serializer's `UUIDField`
+    # (send-message, create-poll); the attachment upload path passes it straight from
+    # raw multipart body data as a `str`. Coerce unconditionally, independent of whether
+    # a header is present -- a malformed value must be a clear 400 here, not reach
+    # `send_message`/`Message.objects.filter(client_request_id=...)` as a raw string and
+    # 500 on Django's own uncaught `UUIDField` `ValidationError` (no header case), and
+    # not compare `str != UUID` unnormalized, which is always True in Python and
+    # rejected every attachment upload unconditionally (header case).
+    if supplied and not isinstance(supplied, uuid.UUID):
+        try:
+            supplied = uuid.UUID(str(supplied))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValidationError({"client_request_id": "Must be a UUID."}) from exc
+        values["client_request_id"] = supplied
     if header:
         try:
-            header_id = __import__("uuid").UUID(header)
+            header_id = uuid.UUID(header)
         except (ValueError, TypeError) as exc:
             raise ValidationError({"Idempotency-Key": "Must be a UUID."}) from exc
         if supplied and supplied != header_id:

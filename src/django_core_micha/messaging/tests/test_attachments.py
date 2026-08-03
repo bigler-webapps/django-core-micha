@@ -1,3 +1,4 @@
+import uuid
 from io import BytesIO
 from zipfile import ZipFile
 
@@ -139,3 +140,83 @@ def test_attachment_upload_rejection_is_a_400_not_a_500(message):
     # The message itself never persisted either — a rejected attachment must not
     # leave a bodyless "message" behind.
     assert not Message.objects.filter(conversation=conversation).exclude(pk=row.pk).exists()
+
+
+@pytest.mark.django_db
+def test_attachment_upload_with_matching_string_client_request_id_succeeds(message):
+    """MSG-10 scope A: the attachment endpoint's client_request_id arrives as an
+    unvalidated `str` from multipart body data (unlike the send-message/create-poll paths,
+    which go through a UUIDField serializer first), and was compared with `!=` directly
+    against the header's real `uuid.UUID` -- `str != UUID` is always True in Python, so
+    this failed unconditionally before the fix, on the operator's exact request shape."""
+    row, user = message
+    conversation = row.conversation
+    request_id = str(uuid.uuid4())
+    good_file = upload(b"%PDF-1.4\n", "file.pdf", "application/pdf")
+    request = APIRequestFactory().post(
+        f"/conversations/{conversation.id}/attachments/",
+        {"files[]": good_file, "client_request_id": request_id},
+        format="multipart", HTTP_IDEMPOTENCY_KEY=request_id,
+    )
+    force_authenticate(request, user=user)
+    response = ConversationAttachmentView.as_view()(request, conversation_id=conversation.id)
+    assert response.status_code == 201
+
+
+@pytest.mark.django_db
+def test_attachment_upload_with_mismatched_client_request_id_is_still_rejected(message):
+    """The coercion fix must not defeat the guard -- a genuinely mismatched id is still 400."""
+    row, user = message
+    conversation = row.conversation
+    header_id = str(uuid.uuid4())
+    other_id = str(uuid.uuid4())
+    file = upload(b"%PDF-1.4\n", "file.pdf", "application/pdf")
+    request = APIRequestFactory().post(
+        f"/conversations/{conversation.id}/attachments/",
+        {"files[]": file, "client_request_id": other_id},
+        format="multipart", HTTP_IDEMPOTENCY_KEY=header_id,
+    )
+    force_authenticate(request, user=user)
+    response = ConversationAttachmentView.as_view()(request, conversation_id=conversation.id)
+    assert response.status_code == 400
+    assert "client_request_id" in response.data
+
+
+@pytest.mark.django_db
+def test_attachment_upload_with_malformed_client_request_id_is_rejected(message):
+    """A non-UUID body value must be rejected with a clear error, not silently swallowed
+    into a pass-through (that would trade a visible outage for a silent idempotency hole)."""
+    row, user = message
+    conversation = row.conversation
+    header_id = str(uuid.uuid4())
+    file = upload(b"%PDF-1.4\n", "file.pdf", "application/pdf")
+    request = APIRequestFactory().post(
+        f"/conversations/{conversation.id}/attachments/",
+        {"files[]": file, "client_request_id": "not-a-uuid"},
+        format="multipart", HTTP_IDEMPOTENCY_KEY=header_id,
+    )
+    force_authenticate(request, user=user)
+    response = ConversationAttachmentView.as_view()(request, conversation_id=conversation.id)
+    assert response.status_code == 400
+    assert "client_request_id" in response.data
+
+
+@pytest.mark.django_db
+def test_attachment_upload_with_malformed_client_request_id_and_no_header_is_a_400_not_a_500(message):
+    """Independent-review finding: the coercion above only ran inside `if header:`, so a
+    malformed body value with NO Idempotency-Key header still reached `send_message` as a
+    raw string, which hit `Message.objects.filter(client_request_id=...)` -- a UUIDField
+    lookup that raises Django's own uncaught `ValidationError`, a 500 not a 400. Coercion
+    must be unconditional, not gated on the header's presence."""
+    row, user = message
+    conversation = row.conversation
+    file = upload(b"%PDF-1.4\n", "file.pdf", "application/pdf")
+    request = APIRequestFactory().post(
+        f"/conversations/{conversation.id}/attachments/",
+        {"files[]": file, "client_request_id": "not-a-uuid"},
+        format="multipart",
+    )
+    force_authenticate(request, user=user)
+    response = ConversationAttachmentView.as_view()(request, conversation_id=conversation.id)
+    assert response.status_code == 400
+    assert "client_request_id" in response.data

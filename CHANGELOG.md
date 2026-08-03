@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.40.1] — 2026-08-03
+
+### Fixed
+
+Attachment uploads were rejected unconditionally: `client_request_id` from raw multipart body data
+arrived as a `str`, compared with `!=` directly against the header's `uuid.UUID` — always `True` in
+Python. `_idempotency_request_id` now coerces before comparing, unconditionally (not just when an
+`Idempotency-Key` header is present), rejecting a malformed value with a clear 400 rather than either
+a silent pass-through or an uncaught 500 (MSG-10).
+
+`read_status` and `batch_read_status` both reported `all_read: True` for a message with zero
+recipients (an empty-set vacuous truth) — a message nobody can receive no longer claims to be "read by
+everyone" (MSG-10).
+
+`vote_poll` never retracted a multi-select vote: only the single-choice branch cleared prior votes
+before creating new ones, so a smaller `option_ids` set on a later call silently kept the omitted
+option's vote. `option_ids` is now the caller's complete, authoritative set for both single- and
+multi-select polls (MSG-11).
+
 ## [2.40.0] — 2026-08-03
 
 ### Added

@@ -162,6 +162,42 @@ def test_read_count_equals_recipient_count_and_all_read_agree_when_everyone_has_
 
 
 @pytest.mark.django_db
+def test_read_status_all_read_is_false_not_vacuously_true_with_zero_recipients(domain):
+    """MSG-10 scope B: `all_read = not participants.exclude(...).exists()` is vacuously True
+    when `participants` is empty -- a message nobody can receive must not report "read by
+    everyone". The fixture's shared conversation always has other participants, so this
+    needs a genuinely empty one (sender only), not a populated one filtered down."""
+    app, _, users, policy = domain
+    scope = MessagingScope.objects.get(app=app, kind="global")
+    lonely_conversation = Conversation.objects.create(app=app, scope=scope, kind="group")
+    ConversationParticipant.objects.create(conversation=lonely_conversation, user=users[0])
+    message = Message.objects.create(conversation=lonely_conversation, sender=users[0], body="alone")
+
+    policy.rights = frozenset({"read_receipt_detail"})
+    status = read_status(actor=users[0], message=message)
+
+    assert status["all_read"] is False
+    assert status["recipient_count"] == 0
+
+
+@pytest.mark.django_db
+def test_batch_read_status_all_read_is_false_not_vacuously_true_with_zero_recipients(domain):
+    """Same defect, same fix, in the batch aggregate's own independent computation
+    (`all(...) if non_sender_rows else True` is the identical vacuous-truth pattern)."""
+    app, _, users, policy = domain
+    scope = MessagingScope.objects.get(app=app, kind="global")
+    lonely_conversation = Conversation.objects.create(app=app, scope=scope, kind="group")
+    ConversationParticipant.objects.create(conversation=lonely_conversation, user=users[0])
+    message = Message.objects.create(conversation=lonely_conversation, sender=users[0], body="alone")
+
+    policy.rights = frozenset({"read_receipt_detail"})
+    result = batch_read_status(actor=users[0], message_ids=[str(message.id)])
+
+    assert result[str(message.id)]["all_read"] is False
+    assert result[str(message.id)]["recipient_count"] == 0
+
+
+@pytest.mark.django_db
 def test_read_count_and_recipient_detail_share_one_gate_absent_for_ordinary_sender(domain):
     _, conversation, users, policy = domain
     message, _ = send_message(actor=users[0], conversation=conversation, body="status")
@@ -481,6 +517,63 @@ def test_poll_vote_and_close_publish_poll_updated_without_voted_option_ids(domai
     vote_frame, close_frame = poll_frames
     assert vote_frame["poll"]["options"][0]["voters"] == [users[1].pk]
     assert close_frame["poll"]["closed_at"] is not None
+
+
+@pytest.mark.django_db
+def test_vote_poll_switching_to_a_different_option_still_clears_the_prior_one_singlechoice(domain):
+    """Regression guard: the multi-select retraction fix above must not disturb
+    single-choice's existing switch-vote behaviour."""
+    _, conversation, users, _ = domain
+    poll, _ = create_poll(actor=users[0], conversation=conversation, question="q", options=["A", "B"])
+    option_a, option_b = poll.options.order_by("order")
+
+    vote_poll(actor=users[1], poll=poll, option_ids=[option_a.id])
+    vote_poll(actor=users[1], poll=poll, option_ids=[option_b.id])
+
+    assert list(PollVote.objects.filter(option__poll=poll, user=users[1]).values_list("option_id", flat=True)) == [option_b.id]
+
+
+@pytest.mark.django_db
+def test_vote_poll_resending_a_smaller_option_set_retracts_the_omitted_vote_multiselect(domain):
+    """`option_ids` is the caller's complete authoritative vote set for both single- and
+    multi-select polls -- previously only the single-choice branch cleared prior votes
+    first; multi-select only ever `bulk_create`d, so voting [A,B] then re-voting [A] never
+    actually retracted B (untoggling an option was silently a no-op)."""
+    _, conversation, users, _ = domain
+    poll, _ = create_poll(actor=users[0], conversation=conversation, question="q", options=["A", "B", "C"], allow_multiple=True)
+    option_a, option_b, _ = poll.options.order_by("order")
+
+    vote_poll(actor=users[1], poll=poll, option_ids=[option_a.id, option_b.id])
+    assert set(PollVote.objects.filter(option__poll=poll, user=users[1]).values_list("option_id", flat=True)) == {option_a.id, option_b.id}
+
+    vote_poll(actor=users[1], poll=poll, option_ids=[option_a.id])
+    assert set(PollVote.objects.filter(option__poll=poll, user=users[1]).values_list("option_id", flat=True)) == {option_a.id}
+
+
+@pytest.mark.django_db
+def test_vote_poll_resending_an_empty_option_set_retracts_all_votes_multiselect(domain):
+    _, conversation, users, _ = domain
+    poll, _ = create_poll(actor=users[0], conversation=conversation, question="q", options=["A", "B"], allow_multiple=True)
+    option_a, option_b = poll.options.order_by("order")
+
+    vote_poll(actor=users[1], poll=poll, option_ids=[option_a.id, option_b.id])
+    vote_poll(actor=users[1], poll=poll, option_ids=[])
+
+    assert not PollVote.objects.filter(option__poll=poll, user=users[1]).exists()
+
+
+@pytest.mark.django_db
+def test_vote_poll_revoting_an_already_selected_option_does_not_duplicate(domain):
+    """Guards the `ignore_conflicts=True` re-create path against the unique (option, user)
+    constraint -- re-sending an option already voted for must stay a no-op, not error."""
+    _, conversation, users, _ = domain
+    poll, _ = create_poll(actor=users[0], conversation=conversation, question="q", options=["A", "B"], allow_multiple=True)
+    option_a, option_b = poll.options.order_by("order")
+
+    vote_poll(actor=users[1], poll=poll, option_ids=[option_a.id])
+    vote_poll(actor=users[1], poll=poll, option_ids=[option_a.id, option_b.id])
+
+    assert PollVote.objects.filter(option__poll=poll, user=users[1], option=option_a).count() == 1
 
 
 @pytest.mark.django_db
