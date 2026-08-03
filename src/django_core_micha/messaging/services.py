@@ -159,7 +159,7 @@ def send_message(*, actor, conversation, kind="chat", body=None, title=None, lin
             if reply_to.conversation_id != conversation.id or reply_to.reply_to_id is not None:
                 raise ValueError("Replies must target a root message in the same conversation.")
         if client_request_id:
-            existing = Message.objects.filter(conversation=conversation, sender=actor, client_request_id=client_request_id).first()
+            existing = Message.objects.select_related("conversation__app", "sender").filter(conversation=conversation, sender=actor, client_request_id=client_request_id).first()
             if existing:
                 return existing, False
         try:
@@ -171,7 +171,7 @@ def send_message(*, actor, conversation, kind="chat", body=None, title=None, lin
                 message = Message.objects.create(conversation=conversation, sender=actor, kind=kind, body=body, title=title, link_target=link_target, reply_to=reply_to, client_request_id=client_request_id)
         except IntegrityError:
             if client_request_id:
-                return Message.objects.get(conversation=conversation, sender=actor, client_request_id=client_request_id), False
+                return Message.objects.select_related("conversation__app", "sender").get(conversation=conversation, sender=actor, client_request_id=client_request_id), False
             raise
         conversation.last_message_at = message.created_at
         conversation.save(update_fields=["last_message_at", "updated_at"])
@@ -294,15 +294,6 @@ def mark_read(*, actor, conversation, read_at=None):
     return participant
 
 
-def mark_delivered(*, actor, conversation, delivered_at=None):
-    _require_view(actor, conversation); participant = _require_participant(actor, conversation)
-    timestamp = min(delivered_at or timezone.now(), timezone.now())
-    if participant.last_delivered_at is None or timestamp > participant.last_delivered_at:
-        participant.last_delivered_at = timestamp; participant.save(update_fields=["last_delivered_at"])
-        transaction.on_commit(lambda: _publish(conversation, resolve_live_recipients(conversation=conversation), "delivered", {"user_id": str(actor.pk), "last_delivered_at": timestamp.isoformat()}))
-    return participant
-
-
 def mark_thread_read(*, actor, root, read_at=None):
     _require_view(actor, root.conversation); _require_participant(actor, root.conversation)
     timestamp = min(read_at or timezone.now(), timezone.now())
@@ -343,9 +334,8 @@ def unread_counts(*, actor, app=None):
 def read_status(*, actor, message):
     conversation = message.conversation; _require_view(actor, conversation)
     participants = conversation.participants.filter(removed_at__isnull=True).exclude(user=message.sender)
-    delivered_count = participants.filter(last_delivered_at__gte=message.created_at).count()
     all_read = not participants.exclude(last_read_at__gte=message.created_at).exists()
-    result = {"all_read": all_read, "delivered_count": delivered_count}
+    result = {"all_read": all_read}
     rights = _policy(conversation).moderation_rights(actor=actor, conversation=conversation, message=message)
     if conversation.kind != Conversation.Kind.DIRECT and "read_receipt_detail" in rights:
         result["recipient_detail"] = list(participants.values("user_id", "last_read_at", "last_delivered_at"))

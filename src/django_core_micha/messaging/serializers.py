@@ -50,11 +50,26 @@ def serialize_reactions(message):
 CONVERSATION_EXCERPT_LENGTH = 140
 
 
+def _serialize_sender(message):
+    """Safe, presentational sender identity for message consumers.
+
+    Email is deliberately not a fallback: messages can be visible to every
+    participant in a broadcast conversation.
+    """
+    user = message.sender
+    if user is None:
+        return None
+    get_full_name = getattr(user, "get_full_name", None)
+    display_name = get_full_name().strip() if callable(get_full_name) else ""
+    return {"id": message.sender_id, "display_name": display_name or None}
+
+
 def serialize_poll(poll):
     """Viewer-independent poll projection safe for REST and realtime."""
     app_key = poll.message.conversation.app.app_key
     return {
-        "id": str(poll.id), "question": decrypt_text(app_key=app_key, value=poll.question),
+        "id": str(poll.id), "message_id": str(poll.message_id),
+        "question": decrypt_text(app_key=app_key, value=poll.question),
         "allow_multiple": poll.allow_multiple, "closed_at": poll.closed_at,
         "created_by_id": poll.created_by_id,
         "options": [{
@@ -82,7 +97,7 @@ def serialize_message(message):
     reply_count, last_reply_at = _reply_stats(message)
     result = {
         "id": str(message.id), "conversation_id": str(message.conversation_id),
-        "sender_id": message.sender_id, "kind": message.kind,
+        "sender_id": message.sender_id, "sender": _serialize_sender(message), "kind": message.kind,
         "title": decrypt_text(app_key=app_key, value=message.title),
         "body": decrypt_text(app_key=app_key, value=message.body),
         "link_target": decrypt_text(app_key=app_key, value=message.link_target),
@@ -102,7 +117,7 @@ def serialize_message(message):
 
 
 def serialize_last_message(conversation):
-    message = conversation.messages.select_related("conversation__app", "poll").order_by("-created_at", "-id").first()
+    message = conversation.messages.select_related("conversation__app", "poll", "sender").order_by("-created_at", "-id").first()
     if message is None:
         return None
     app_key = conversation.app.app_key
@@ -115,7 +130,7 @@ def serialize_last_message(conversation):
             excerpt = ""
     else:
         excerpt = decrypt_text(app_key=app_key, value=message.body) or ""
-    return {"id": str(message.id), "sender_id": message.sender_id, "kind": message.kind,
+    return {"id": str(message.id), "sender_id": message.sender_id, "sender": _serialize_sender(message), "kind": message.kind,
             "excerpt": excerpt[:CONVERSATION_EXCERPT_LENGTH], "created_at": message.created_at}
 
 
@@ -133,9 +148,9 @@ def serialize_conversation_core(conversation):
 def _other_direct_user_id(conversation, participant):
     """The counterpart's bare user id for a direct conversation, relative to the
     viewer (`participant`). Never a resolved name — dcm has no notion of what a
-    consuming app's User model looks like beyond its id (the same reason
-    `serialize_message` only ever exposes `sender_id`, never a display name);
-    resolving this id to something human-readable is the host's job."""
+    consuming app uses to resolve a conversation counterpart. That identity is
+    host-resolved; unlike the message sender's narrower, additive presentational
+    projection, resolving this id to something human-readable is the host's job."""
     if conversation.kind != Conversation.Kind.DIRECT:
         return None
     if conversation.user_low_id == participant.user_id:

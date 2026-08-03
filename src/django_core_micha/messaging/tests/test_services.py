@@ -19,7 +19,6 @@ from django_core_micha.messaging.services import (
     create_conversation,
     create_poll,
     edit_message,
-    mark_delivered,
     mark_read,
     mark_thread_read,
     open_direct,
@@ -110,6 +109,18 @@ def test_direct_read_status_never_exposes_recipient_detail(domain):
     message = Message.objects.create(conversation=direct, sender=users[0], body="private")
     policy.rights = frozenset({"read_receipt_detail"})
     assert "recipient_detail" not in read_status(actor=users[1], message=message)
+
+
+@pytest.mark.django_db
+def test_read_status_has_no_delivered_count_and_all_read_flips_when_all_recipients_read(domain):
+    _, conversation, users, _ = domain
+    message, _ = send_message(actor=users[0], conversation=conversation, body="status")
+
+    initial = read_status(actor=users[0], message=message)
+    assert initial["all_read"] is False and "delivered_count" not in initial
+    mark_read(actor=users[1], conversation=conversation)
+    mark_read(actor=users[2], conversation=conversation)
+    assert read_status(actor=users[0], message=message)["all_read"] is True
 
 
 @pytest.mark.django_db
@@ -380,19 +391,15 @@ def test_watermark_frames_fire_only_on_actual_advance(domain, monkeypatch, djang
     with django_capture_on_commit_callbacks(execute=True):
         mark_read(actor=users[1], conversation=conversation)
     with django_capture_on_commit_callbacks(execute=True):
-        mark_delivered(actor=users[1], conversation=conversation)
-    with django_capture_on_commit_callbacks(execute=True):
         mark_thread_read(actor=users[1], root=message)
-    assert {frame["type"] for _, frame in sent} == {"read_state", "delivered", "thread_read_state"}
-    assert len(sent) == 3
+    assert {frame["type"] for _, frame in sent} == {"read_state", "thread_read_state"}
+    assert len(sent) == 2
 
     sent.clear()
     # Re-marking with an earlier or equal timestamp is a no-op — must not re-fire.
     earlier = timezone.now() - datetime.timedelta(hours=1)
     with django_capture_on_commit_callbacks(execute=True):
         mark_read(actor=users[1], conversation=conversation, read_at=earlier)
-    with django_capture_on_commit_callbacks(execute=True):
-        mark_delivered(actor=users[1], conversation=conversation, delivered_at=earlier)
     with django_capture_on_commit_callbacks(execute=True):
         mark_thread_read(actor=users[1], root=message, read_at=earlier)
     assert sent == []

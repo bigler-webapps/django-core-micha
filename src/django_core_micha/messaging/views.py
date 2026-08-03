@@ -279,7 +279,8 @@ class ReactionView(MessagingView):
     def post(self, request, message_id):
         message = get_object_or_404(Message, pk=message_id); self._participant_conversation(request, message.conversation_id)
         self._service(lambda: add_reaction(actor=request.user, message=message, emoji=request.data.get("emoji")))
-        return Response(_message_response(Message.objects.prefetch_related("reactions", "attachments", "poll__options__votes").get(pk=message.pk), request.user))
+        refreshed = Message.objects.select_related("conversation__app", "sender").prefetch_related("reactions", "attachments", "poll__options__votes").get(pk=message.pk)
+        return Response(_message_response(refreshed, request.user))
     def delete(self, request, message_id, emoji):
         message = get_object_or_404(Message, pk=message_id); self._participant_conversation(request, message.conversation_id)
         self._service(lambda: remove_reaction(actor=request.user, message=message, emoji=emoji)); return Response(status=status.HTTP_204_NO_CONTENT)

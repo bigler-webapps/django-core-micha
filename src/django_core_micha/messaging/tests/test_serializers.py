@@ -46,6 +46,7 @@ def test_serialize_poll_decrypts_and_never_carries_voted_option_ids(serializer_d
     assert projection["options"][0]["voters"] == [users[1].pk]
     assert projection["options"][1]["vote_count"] == 0 and projection["options"][1]["voters"] == []
     assert projection["created_by_id"] == users[0].pk
+    assert projection["message_id"] == str(poll.message_id)
     assert "voted_option_ids" not in projection
 
 
@@ -57,6 +58,57 @@ def test_serialize_message_embeds_poll_only_for_poll_kind(serializer_domain):
 
     assert "poll" in serialize_message(poll_message)
     assert "poll" not in serialize_message(chat_message)
+
+
+@pytest.mark.django_db
+def test_message_sender_projection_is_loaded_from_database_and_matches_compact_variant(serializer_domain):
+    _, conversation, users = serializer_domain
+    users[0].first_name = "Alice"; users[0].last_name = "Sender"
+    users[0].save(update_fields=["first_name", "last_name"])
+    message = Message.objects.create(conversation=conversation, sender=users[0], body="hello")
+
+    # Reload rather than serializing the just-constructed object: the production bug
+    # only appears when the sender relation has to be read from persisted data.
+    loaded = Message.objects.select_related("conversation__app", "sender").get(pk=message.pk)
+    payload = serialize_message(loaded)
+    compact = serialize_conversation(
+        Conversation.objects.select_related("app").get(pk=conversation.pk),
+        ConversationParticipant.objects.get(conversation=conversation, user=users[0]),
+    )["last_message"]
+    expected = {"id": users[0].pk, "display_name": "Alice Sender"}
+
+    for projection in (payload, compact):
+        assert projection["sender"] == expected
+        assert projection["sender"]["id"] == projection["sender_id"]
+        assert type(projection["sender"]["id"]) is type(projection["sender_id"])
+
+
+@pytest.mark.django_db
+def test_message_sender_projection_does_not_expose_username_when_name_is_blank(serializer_domain):
+    _, conversation, users = serializer_domain
+    user = users[0]
+    user.first_name = ""; user.last_name = ""
+    user.save(update_fields=["first_name", "last_name"])
+    message = Message.objects.create(conversation=conversation, sender=user, body="hello")
+
+    loaded = Message.objects.select_related("conversation__app", "sender").get(pk=message.pk)
+    projection = serialize_message(loaded)
+
+    assert projection["sender"]["display_name"] is None
+    assert "username" not in projection["sender"]
+    assert user.username not in projection["sender"].values()
+    assert user.email not in projection["sender"].values()
+
+
+@pytest.mark.django_db
+def test_message_sender_projection_is_null_safe_for_persisted_deleted_users(serializer_domain):
+    _, conversation, users = serializer_domain
+    message = Message.objects.create(conversation=conversation, sender=users[0], body="historical")
+    Message.objects.filter(pk=message.pk).update(sender=None)
+
+    loaded = Message.objects.select_related("conversation__app", "sender").get(pk=message.pk)
+    assert loaded.sender_id is None
+    assert serialize_message(loaded)["sender"] is None
 
 
 @pytest.mark.django_db

@@ -261,6 +261,8 @@ def test_thread_pagination_and_poll_permissions(api_domain):
     poll = client.post(f"/messaging/conversations/{conversation.id}/polls/", {"question": "q", "options": ["a", "b"]}, format="json")
     assert poll.status_code == 201
     poll_id = poll.data["id"]
+    message_id = str(Poll.objects.get(pk=poll_id).message_id)
+    assert poll.data["message_id"] == message_id
     option = PollOption.objects.filter(poll_id=poll_id).first()
     client.force_authenticate(users["viewer"])
     # Voting only requires current participation (design §REST: "participant/open poll"),
@@ -270,6 +272,7 @@ def test_thread_pagination_and_poll_permissions(api_domain):
     voted = client.post(f"/messaging/polls/{poll_id}/vote/", {"option_ids": [str(option.id)]}, format="json")
     assert voted.status_code == 200
     assert voted.data["id"] == poll_id and voted.data["voted_option_ids"] == [str(option.id)]
+    assert voted.data["message_id"] == message_id
     assert "voted_option_ids" not in {**voted.data["options"][0]}
     # Closing requires being the poll's creator or holding edit_any/delete_any; "viewer"
     # has neither (Policy.rights only grants open_group/read_receipt_detail).
@@ -278,6 +281,7 @@ def test_thread_pagination_and_poll_permissions(api_domain):
     closed = client.post(f"/messaging/polls/{poll_id}/close/", {}, format="json")
     assert closed.status_code == 200
     assert closed.data["closed_at"] is not None
+    assert closed.data["message_id"] == message_id
     # The poll's own creator ("author") never voted — their voted_option_ids is empty,
     # while "viewer"'s vote above is unaffected: per-viewer, not shared state.
     assert closed.data["voted_option_ids"] == []
@@ -477,10 +481,28 @@ def test_message_list_query_count_is_bounded_regardless_of_page_size(api_domain)
     with CaptureQueriesContext(connection) as small:
         response = client.get(messages_url)
     assert response.status_code == 200 and len(response.data["results"]) == 2
+    assert all(row["sender"]["id"] == row["sender_id"] for row in response.data["results"])
 
     _seed(3)  # 5 root messages total now, still one page (default limit 50)
     with CaptureQueriesContext(connection) as large:
         response = client.get(messages_url)
     assert response.status_code == 200 and len(response.data["results"]) == 5
+    assert all(set(row["sender"]) == {"id", "display_name"} for row in response.data["results"])
 
     assert len(large.captured_queries) == len(small.captured_queries)
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_realtime_message_sender_matches_rest_payload(api_domain, monkeypatch, django_capture_on_commit_callbacks):
+    _, _, conversation, users = api_domain
+    sent = []
+    monkeypatch.setattr("django_core_micha.messaging.realtime.push_to_users", lambda recipients, frame: sent.append(frame))
+    client = APIClient(); client.force_authenticate(users["author"])
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.post(f"/messaging/conversations/{conversation.id}/messages/", {"body": "hello"}, format="json")
+
+    frame = next(frame for frame in sent if frame["type"] == "message")
+    assert response.status_code == 201
+    assert frame["message"]["sender"] == response.data["sender"]

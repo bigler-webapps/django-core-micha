@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+Messages and compact conversation last-message projections now include a `sender` object with `id` and
+`display_name`. Poll REST projections now include their stable `message_id`.
+
+### Breaking changes
+
+`read_status` no longer returns the permanently-zero `delivered_count`, and the unused
+`mark_delivered` service has been removed. This change is intentionally not accompanied by a version
+bump in this work order.
+
 ## [2.39.3] — 2026-08-02
 
 ### Fixed
