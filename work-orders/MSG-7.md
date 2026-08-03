@@ -131,6 +131,76 @@ change reverted.
 compare before/after via `git stash` and require delta = 0, and **state the baseline count you measured**
 rather than quoting a previous WO's number.
 
+## OPERATOR DECISIONS (this run)
+- **Scope C is approved to implement now, without a version bump.** Drop `delivered_count` from
+  `read_status`'s response and delete `mark_delivered` per the WO text. Record it as a breaking change
+  in `CHANGELOG.md` under an "Unreleased" heading (do not touch `pyproject.toml`'s `version`). Do not
+  publish/tag this repo — that is a separate step outside this WO.
+- **Scope F (new, operator-approved extension of this WO, additive only): add `message_id` to the poll
+  REST response.** `serialize_poll` (`serializers.py:53-65`) and `_poll_response` (`views.py:32-36`) never
+  emit the poll's message id, even though `Poll.message` is a `OneToOneField` (`models.py:209`) — confirmed
+  by direct inspection, not assumed. `ui-core-micha` MSG-6e scope B needs a stable way to key a freshly
+  created/voted/closed poll to its message; today there is none, which is exactly the contract gap that
+  WO's scope B anticipates and is instructed to "stop and report" on. Add `"message_id": str(poll.message_id)`
+  to `serialize_poll`'s returned dict (or add it in `_poll_response` if you judge the realtime `poll_updated`
+  frame — which already carries `message_id` at the frame level via `_poll_updated_payload`, see
+  `services.py:391-394` — should not duplicate it inside the embedded `poll` object; use your judgment, but
+  state which you chose and why). This is additive (a new key), so it needs no version bump either. Add one
+  narrow test: creating/voting/closing a poll returns a `message_id` equal to the message it was created on.
+
+## IMPLEMENTATION MAP (Orchestrator)
+
+### Context package
+- **`src/django_core_micha/messaging/serializers.py`**
+  - `serialize_message` (function starts `:80`, returned dict `:83-95`): add a `"sender"` key —
+    `{"id": message.sender_id, "display_name": <derived>, "username": message.sender.username}`. `id` must
+    be `message.sender_id` itself (already an int) — do not read `message.sender.id` separately, they are
+    the same value but this avoids a second attribute touch and keeps the type identical to `sender_id`.
+  - `serialize_last_message` (`:104-119`, the "compact variant" the WO's `:118` line number refers to —
+    that is the `"sender_id": message.sender_id` line inside this function, not a second `serialize_message`
+    copy): add the same `"sender"` shape. Its queryset at `:105`
+    (`conversation.messages.select_related("conversation__app", "poll")`) must also
+    `select_related("sender")` — it already does one query per conversation for this `.first()` call, so
+    this is a free join, not a new query; without it, adding `sender` here reintroduces exactly the N+1
+    scope B warns about, just in `serialize_conversation_core`'s conversation-list path instead of the
+    message-list path.
+  - **No existing `display_name` helper exists anywhere in this repo** (verified: `grep -rn display_name
+    --include=*.py` across the whole tree returns nothing). The closest analog, `get_greeting_name`
+    (`emails/__init__.py:39-47`), is email-greeting-specific (falls back to "there"), not a UI presentational
+    name — do not reuse it verbatim. Write a small local helper in `serializers.py`: prefer
+    `user.get_full_name().strip()`, then fall back to `user.username` — do NOT fall back to email (a
+    message sender's display name reaching every conversation participant, incl. broadcast, must not leak
+    an email address). State in your final report that you wrote a new helper here, since none existed.
+  - **Scope F**: `serialize_poll` (`:53-65`) — add `message_id` per the operator decision above.
+- **`src/django_core_micha/messaging/views.py`**
+  - `ConversationMessagesView.get` (`:198-201`) and `ThreadView.get` (`:335-339`, read the surrounding
+    lines yourself) **already** `select_related("conversation__app", "sender")` on their querysets — the
+    N+1 guard for scope B's list endpoints is already in place; you do not need to add it there. Write the
+    regression test (required test 2) against the existing call, not a new `select_related`.
+  - `realtime.py`'s `publish_messaging_event` (`:9-19`) also already `select_related(..., "sender")` at
+    `:17` before calling `serialize_message` — the realtime `message`/`message_edited` frame path needs no
+    change either; this is what required test 3 (REST/frame parity) exercises.
+- **`src/django_core_micha/messaging/services.py`**
+  - `read_status` (`:343-352`): remove the `delivered_count` line (`:346`) and its key from the returned
+    dict (`:348`). Leave `all_read` and `recipient_detail` untouched.
+  - `mark_delivered` (`:297-303`): delete the whole function. Confirmed zero production callers — no view,
+    URL, WS handler, or signal reaches it (`grep -rn mark_delivered --include=*.py` outside
+    `services.py`/`tests/test_services.py` returns nothing).
+  - `src/django_core_micha/messaging/tests/test_services.py`: `test_watermark_frames_fire_only_on_actual_advance`
+    (around `:374-401`) calls `mark_delivered` three times and asserts the frame-type set includes
+    `"delivered"` and `len(sent) == 3` in two places. Remove the `mark_delivered`/`delivered_at` calls and
+    update the set/length assertions to `{"read_state", "thread_read_state"}` / `2` — this is a direct,
+    expected consequence of deleting the function, not new test-writing scope.
+- **`CHANGELOG.md`**: add an entry for the `sender` addition (additive) and the `delivered_count` removal
+  + `mark_delivered` deletion (breaking, no version bump this run — note that explicitly).
+
+### Do-not-touch reminders (from the envelope, restated)
+`serialize_conversation`/`serialize_conversation_core` beyond the `select_related` addition above; no new
+models/migrations; no realtime frame-type changes; no touching `encryption`/`policy`/`resolve_recipients`.
+
+### Target repo working directory
+`C:\Users\biglmi\Documents\webapps\django-core-micha` (git root — no `backend/`/`frontend/` split in this repo).
+
 ## TARGET REPO
 `C:\Users\biglmi\Documents\webapps\django-core-micha`. Branch `develop` if it exists, else `main`.
 Publish + version bump per the repo's release flow; jg's pin bump is **not** part of this WO.
