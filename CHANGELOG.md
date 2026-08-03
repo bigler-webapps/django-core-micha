@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.40.2] — 2026-08-03
+
+### Fixed
+
+`serialize_attachment` never returned `filename`, even though `MessageAttachment` already stores the
+real, sanitized upload name (distinct from `blob_key`, the obfuscated storage path) — every client
+fell back to displaying the raw attachment id (MSG-12).
+
 ## [2.40.1] — 2026-08-03
 
 ### Fixed

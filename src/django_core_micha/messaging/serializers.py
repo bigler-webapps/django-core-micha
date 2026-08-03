@@ -32,8 +32,10 @@ class PollInputSerializer(serializers.Serializer):
 
 def serialize_attachment(attachment):
     # File access is always authenticated through the dedicated endpoint.
+    # `filename` is the sanitized upload name (attachments.py's create_attachment) --
+    # display-only, never the storage key (`blob_key` stays unexposed).
     base = f"/api/messaging/attachments/{attachment.id}/"
-    return {"id": str(attachment.id), "content_type": attachment.content_type,
+    return {"id": str(attachment.id), "filename": attachment.filename, "content_type": attachment.content_type,
             "byte_size": attachment.byte_size, "order": attachment.order,
             "scan_state": attachment.scan_state, "url": base,
             "thumbnail_url": f"{base}thumbnail/" if attachment.thumbnail_key else None}

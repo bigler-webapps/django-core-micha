@@ -220,3 +220,31 @@ def test_attachment_upload_with_malformed_client_request_id_and_no_header_is_a_4
     response = ConversationAttachmentView.as_view()(request, conversation_id=conversation.id)
     assert response.status_code == 400
     assert "client_request_id" in response.data
+
+
+@pytest.mark.django_db
+def test_serialize_attachment_includes_the_sanitized_upload_filename(message):
+    """MSG-12: the model already stores the real, sanitized upload name (`filename`,
+    distinct from `blob_key`, the obfuscated storage path) -- the serializer just never
+    returned it, so every client fell back to displaying the raw attachment id."""
+    from django_core_micha.messaging.serializers import serialize_attachment
+    row, _ = message
+    attachment = create_attachment(message=row, upload=upload(b"%PDF-1.4\n", "My Report.pdf", "application/pdf"), order=0)
+    result = serialize_attachment(attachment)
+    assert result["filename"] == attachment.filename
+    assert result["filename"] not in (None, "")
+    assert result["filename"] != str(attachment.id)
+
+
+@pytest.mark.django_db
+def test_attachment_upload_response_includes_filename_for_the_client_to_render(message):
+    row, user = message
+    conversation = row.conversation
+    file = upload(b"%PDF-1.4\n", "vacation-photo.pdf", "application/pdf")
+    request = APIRequestFactory().post(f"/conversations/{conversation.id}/attachments/", {"files[]": file}, format="multipart")
+    force_authenticate(request, user=user)
+    response = ConversationAttachmentView.as_view()(request, conversation_id=conversation.id)
+    assert response.status_code == 201
+    [attachment_data] = response.data["attachments"]
+    assert attachment_data["filename"]
+    assert attachment_data["filename"] != attachment_data["id"]
