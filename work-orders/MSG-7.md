@@ -209,3 +209,58 @@ Publish + version bump per the repo's release flow; jg's pin bump is **not** par
 Emit `PLAN: <steps>` up front, then a single-line `PROGRESS: [<n>/<total>] <action>` before every
 relevant action and `PROGRESS: [<n>/<total>] done` on completion, spaced so no gap exceeds ~2 min,
 stdout unbuffered, and exactly one final `RESULT: DONE|BLOCKED <reason>`.
+
+## FIX ROUND 1 (Orchestrator, post-review — read this if you are resuming this WO)
+
+Your prior chunk (`RESULT: DONE`, 78/78 messaging tests passing) is already in the working tree,
+uncommitted. Do NOT redo or re-verify what already works — the independent `reviewer` and `sec_reviewer`
+passes confirmed the rest is correct. Fix only the following, then re-run the `messaging/` test gate
+yourself and report `RESULT: DONE` again.
+
+**[P1, blocking — confirmed independently by both reviewers] `_serialize_sender` leaks the sender's email
+address.** On this platform `username` is set to the user's raw email at account creation — confirmed at
+`src/django_core_micha/auth/views.py:238` (`defaults={"username": email, "email": email}`) and `:584`
+(`User.objects.create_user(username=email, email=email, ...)`). Your current code
+(`serializers.py`, `_serialize_sender`) does `display_name = user.get_full_name().strip() or user.username`
+and returns `"username": user.username` **unconditionally** in the `sender` dict — so every message
+exposes its sender's email address to every conversation participant (including broadcast), which is
+exactly what your own docstring says it avoids ("Email is deliberately not a fallback"). The `username`
+field defeats that intent regardless of whether `display_name` needed it as a fallback.
+
+Fix:
+- Drop `"username"` from the returned dict entirely — it carries no information beyond the email on this
+  platform, so there is nothing safe left to expose under that key.
+- Do not fall back `display_name` to `user.username` either. If `get_full_name()` is blank, return
+  `display_name: None` (or omit the key — your choice, document which) rather than guessing at something
+  presentable. ucm's `senderName()` (`MessageBubble.jsx`) already falls through to
+  `t('MessagingThread.UNKNOWN_SENDER')` when no name is available — that is the correct behavior for a
+  user with no profile name set, not a regression.
+- **[P2, same fix, do together]** Guard the `get_full_name` access the same way this repo's own
+  `emails/__init__.py:39-47` (`get_greeting_name`) already does — `getattr(user, "get_full_name", None)`
+  called only if present — since dcm has no control over a consuming app's swapped `AUTH_USER_MODEL`
+  (some app could plug in a User model without `get_full_name`). Your current unconditional
+  `user.get_full_name()` call would hard-crash every message response for such an app.
+- Update `test_message_sender_projection_is_loaded_from_database_and_matches_compact_variant` (drop
+  `username` from the `expected` dict) and add one more case: a sender **with a persisted row but no
+  first/last name set** must produce `display_name: None` (or your chosen absent-key shape) and, critically,
+  must **not** contain the user's `username`/email anywhere in the payload — assert `"username" not in
+  projection["sender"]` and that no value in `projection["sender"]` equals `user.username`/`user.email`.
+- Update the `CHANGELOG.md` "Unreleased" entry to say `sender` now carries `id` and `display_name` (drop
+  the "username" mention).
+
+**[P2] Stale comment.** `_other_direct_user_id`'s docstring (unmodified by your prior chunk, a few lines
+below `serialize_message`) still says "the same reason `sender_id` on a message is never accompanied by a
+display name" — that's now false. Correct it to explain, accurately, why `other_user_id` still stays a
+bare id (a conversation counterpart's identity is host-resolved; the message sender's presentational name
+is now dcm's own, narrower, additive projection) without overstating either side.
+
+**[P3, informational only — do NOT fix, just confirm you're leaving it]** `read_status`'s
+`recipient_detail` (`services.py`) still includes `last_delivered_at`, permanently null now that
+`mark_delivered` is gone — this was already dead before your change (zero callers pre-existed) and is
+explicitly out of this WO's stated scope (only the top-level `delivered_count` aggregate was named). Leave
+it; the Orchestrator will track it as a separate follow-up note, not part of this WO.
+
+Re-run `messaging/` tests after these changes (expect the same 78, or 79 if you added the no-name test
+case as a new one rather than extending an existing test) and confirm delta = 0 against the 74-baseline.
+Do not touch anything outside `_serialize_sender`, the one docstring, the two/three test files, and the
+CHANGELOG line named above.
