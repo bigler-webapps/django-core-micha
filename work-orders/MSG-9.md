@@ -141,6 +141,24 @@ than quoting a previous WO's number.
 Publish + version bump per the repo's release flow. `ui-core-micha` MSG-6f scope B consumes this and is
 blocked until it is published.
 
+## MINI-HANDOVER (pastable)
+
+> Repo: `C:\Users\biglmi\Documents\webapps\django-core-micha` (branch `develop` if it exists, else
+> `main`). Work order: `work-orders/MSG-9.md` — read it fully, then follow the `orchestrate-codex`
+> skill. This is **dcm's own MSG-9**; jg-ferien has an unrelated MSG-9, do not confuse them.
+>
+> Tier 2, shared-core. No open decisions — the operator settled the visibility question on 2026-08-03:
+> the counts are **team-only** and go **inside** the existing `read_receipt_detail` block at
+> `services.py:340`, so there is no new permission logic and no privacy question to resolve. Do not
+> re-widen it.
+>
+> Two things that are easy to get wrong and are called out in the WO: the counts must not cost extra
+> queries on the single-message endpoint, and the batch endpoint must enforce the **same per-message
+> view permission** as the single one (test 4 — an IDOR otherwise). Do not fold the counts into
+> `serialize_message`; `views.py:50-54` documents why.
+>
+> Blocks `ui-core-micha` MSG-6f scope B, which cannot start until this is published.
+
 ## PROGRESS CONTRACT
 Emit `PLAN: <steps>` up front, then a single-line `PROGRESS: [<n>/<total>] <action>` before every
 relevant action and `PROGRESS: [<n>/<total>] done` on completion, spaced so no gap exceeds ~2 min,
