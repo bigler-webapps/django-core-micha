@@ -150,6 +150,35 @@ def test_push_to_users_logs_delivery_failures_at_error_with_frame_type(monkeypat
     assert "ERROR" in caplog.text
 
 
+def test_push_to_users_logs_encoding_failure_and_sends_to_no_one(monkeypatch, caplog):
+    """The pre-loop JSON-safe round-trip (MSG-8) has its own failure path, distinct
+    from a per-user group_send failure -- a payload that cannot be encoded is
+    loop-invariant, so the correct behaviour is one error log and zero group_send
+    calls, not one failure per recipient."""
+    recorded = []
+
+    class Layer:
+        async def group_send(self, group, event):
+            recorded.append((group, event))
+
+    monkeypatch.setattr("channels.layers.get_channel_layer", lambda: Layer())
+    monkeypatch.setattr("asgiref.sync.async_to_sync", lambda fn: lambda *args, **kwargs: recorded.append((args[0], args[1])))
+
+    class ExplodingRenderer:
+        def render(self, payload):
+            raise TypeError("Object of type object is not JSON serializable")
+
+    monkeypatch.setattr(delivery, "JSONRenderer", ExplodingRenderer)
+    users = [type("User", (), {"id": 1})(), type("User", (), {"id": 2})()]
+
+    delivery.push_to_users(users, {"type": "message", "unserializable": object()})
+
+    assert recorded == []
+    assert "ERROR" in caplog.text
+    assert "encoding failed" in caplog.text
+    assert "message" in caplog.text
+
+
 def test_notification_envelope_is_additive_and_does_not_mutate_input():
     payload = {"type": "notification.status", "notification_id": 1}
 

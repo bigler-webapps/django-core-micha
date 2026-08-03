@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## [2.39.5] — 2026-08-03
+
+### Testing
+
+Added regression coverage for the payload-encoding failure path introduced in 2.39.4 (a payload that
+cannot be JSON-encoded now has a dedicated test proving it logs once at error level and reaches no
+recipient, rather than being encoded per-user) — closed a gap found in 2.39.4's independent review. No
+behavioural change.
+
+## [2.39.4] — 2026-08-03
 
 ### Added
 
@@ -17,8 +26,7 @@ keys at error level while leaving durable writes isolated.
 ### Breaking changes
 
 `read_status` no longer returns the permanently-zero `delivered_count`, and the unused
-`mark_delivered` service has been removed. This change is intentionally not accompanied by a version
-bump in this work order.
+`mark_delivered` service has been removed.
 
 ## [2.39.3] — 2026-08-02
 
