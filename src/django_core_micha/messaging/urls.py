@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import (ConversationArchiveView, ConversationCreateView, ConversationListView,
+from .views import (BatchReadStatusView, ConversationArchiveView, ConversationCreateView, ConversationListView,
                     ConversationMessagesView, ConversationPreferencesView, ConversationReadView,
                     DirectConversationView, MessageDetailView, ReactionView, ReadStatusView, UnreadCountView,
                     ConversationPollView, PollVoteView, PollCloseView, ThreadView, ThreadReadView,
@@ -7,6 +7,7 @@ from .views import (ConversationArchiveView, ConversationCreateView, Conversatio
 from .views import ConversationAttachmentView, AttachmentDownloadView
 
 urlpatterns = [
+    path("messages/read-status/batch/", BatchReadStatusView.as_view(), name="messaging-read-status-batch"),
     path("conversations/", ConversationListView.as_view(), name="messaging-conversations"),
     path("conversations/direct/", DirectConversationView.as_view(), name="messaging-direct"),
     path("conversations/group/", ConversationCreateView.as_view(kind="group"), name="messaging-group"),

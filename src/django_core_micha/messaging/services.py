@@ -339,6 +339,61 @@ def read_status(*, actor, message):
     rights = _policy(conversation).moderation_rights(actor=actor, conversation=conversation, message=message)
     if conversation.kind != Conversation.Kind.DIRECT and "read_receipt_detail" in rights:
         result["recipient_detail"] = list(participants.values("user_id", "last_read_at", "last_delivered_at"))
+        counts = participants.aggregate(
+            recipient_count=Count("pk"),
+            read_count=Count("pk", filter=Q(last_read_at__gte=message.created_at)),
+        )
+        result["recipient_count"] = counts["recipient_count"]
+        result["read_count"] = counts["read_count"]
+    return result
+
+
+def batch_read_status(*, actor, message_ids):
+    """Same per-message aggregate as `read_status`, for many messages in a bounded
+    number of queries. A message whose conversation the actor cannot view is
+    silently absent from the result -- never a denied/null placeholder, since
+    that would reveal the message id exists at all, which is more than the
+    single-message endpoint's 404 reveals."""
+    messages = list(
+        Message.objects.filter(pk__in=message_ids).select_related("conversation__app", "sender")
+    )
+    conversations_by_id = {}
+    for message in messages:
+        conversations_by_id.setdefault(message.conversation_id, message.conversation)
+
+    viewable_conversation_ids = {
+        conversation_id
+        for conversation_id, conversation in conversations_by_id.items()
+        if get_messaging_policy(conversation.app.app_key).can_view_conversation(actor=actor, conversation=conversation)
+    }
+
+    messages_by_conversation = {}
+    for message in messages:
+        if message.conversation_id in viewable_conversation_ids:
+            messages_by_conversation.setdefault(message.conversation_id, []).append(message)
+
+    result = {}
+    for conversation_id, conversation_messages in messages_by_conversation.items():
+        conversation = conversations_by_id[conversation_id]
+        rights = _policy(conversation).moderation_rights(actor=actor, conversation=conversation, message=None)
+        gated = conversation.kind != Conversation.Kind.DIRECT and "read_receipt_detail" in rights
+        participant_rows = list(
+            conversation.participants.filter(removed_at__isnull=True).values("user_id", "last_read_at")
+        )
+        for message in conversation_messages:
+            non_sender_rows = [row for row in participant_rows if row["user_id"] != message.sender_id]
+            all_read = all(
+                row["last_read_at"] is not None and row["last_read_at"] >= message.created_at
+                for row in non_sender_rows
+            ) if non_sender_rows else True
+            entry = {"all_read": all_read}
+            if gated:
+                entry["recipient_count"] = len(non_sender_rows)
+                entry["read_count"] = sum(
+                    1 for row in non_sender_rows
+                    if row["last_read_at"] is not None and row["last_read_at"] >= message.created_at
+                )
+            result[str(message.id)] = entry
     return result
 
 

@@ -17,6 +17,7 @@ from django_core_micha.messaging.services import (
     MessagingPermissionDenied,
     add_reaction,
     archive_conversation,
+    batch_read_status,
     break_glass_read,
     close_poll,
     create_conversation,
@@ -125,6 +126,57 @@ def test_read_status_has_no_delivered_count_and_all_read_flips_when_all_recipien
     mark_read(actor=users[1], conversation=conversation)
     mark_read(actor=users[2], conversation=conversation)
     assert read_status(actor=users[0], message=message)["all_read"] is True
+
+
+@pytest.mark.django_db
+def test_read_status_exposes_read_count_and_recipient_count_to_a_team_member(domain):
+    _, conversation, users, policy = domain
+    third = get_user_model().objects.create_user(username="third-reader")
+    ConversationParticipant.objects.create(conversation=conversation, user=third)
+    message, _ = send_message(actor=users[0], conversation=conversation, body="bus leaves at 14:00")
+    mark_read(actor=users[1], conversation=conversation)
+
+    policy.rights = frozenset({"read_receipt_detail"})
+    status = read_status(actor=users[0], message=message)
+
+    # Non-sender, non-removed participants: users[1], users[2] (muted, still counted), third = 3.
+    assert status["recipient_count"] == 3
+    assert status["read_count"] == 1
+    assert status["all_read"] is False
+
+
+@pytest.mark.django_db
+def test_read_count_equals_recipient_count_and_all_read_agree_when_everyone_has_read(domain):
+    _, conversation, users, policy = domain
+    third = get_user_model().objects.create_user(username="third-reader-2")
+    ConversationParticipant.objects.create(conversation=conversation, user=third)
+    message, _ = send_message(actor=users[0], conversation=conversation, body="status")
+    for reader in (users[1], users[2], third):
+        mark_read(actor=reader, conversation=conversation)
+
+    policy.rights = frozenset({"read_receipt_detail"})
+    status = read_status(actor=users[0], message=message)
+
+    assert status["read_count"] == status["recipient_count"] == 3
+    assert status["all_read"] is True
+
+
+@pytest.mark.django_db
+def test_read_count_and_recipient_detail_share_one_gate_absent_for_ordinary_sender(domain):
+    _, conversation, users, policy = domain
+    message, _ = send_message(actor=users[0], conversation=conversation, body="status")
+
+    policy.rights = frozenset()
+    ordinary_view = read_status(actor=users[0], message=message)
+    assert "read_count" not in ordinary_view
+    assert "recipient_count" not in ordinary_view
+    assert "recipient_detail" not in ordinary_view
+
+    policy.rights = frozenset({"read_receipt_detail"})
+    team_view = read_status(actor=users[0], message=message)
+    assert "read_count" in team_view
+    assert "recipient_count" in team_view
+    assert "recipient_detail" in team_view
 
 
 @pytest.mark.django_db

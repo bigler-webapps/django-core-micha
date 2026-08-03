@@ -506,3 +506,90 @@ def test_realtime_message_sender_matches_rest_payload(api_domain, monkeypatch, d
     frame = next(frame for frame in sent if frame["type"] == "message")
     assert response.status_code == 201
     assert frame["message"]["sender"] == response.data["sender"]
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_batch_read_status_denies_a_message_the_caller_cannot_view_singly(api_domain):
+    """IDOR guard: a batch request must not become a way to read status for a message
+    the caller could not fetch through the single-message endpoint. `outsider` fails
+    `can_view_conversation` for every conversation in this fixture's Policy."""
+    _, _, conversation, users = api_domain
+    message = Message.objects.create(conversation=conversation, sender=users["author"], body="team only")
+    client = APIClient(); client.force_authenticate(users["outsider"])
+
+    response = client.post("/messaging/messages/read-status/batch/", {"message_ids": [str(message.id)]}, format="json")
+
+    assert response.status_code == 200
+    assert str(message.id) not in response.data
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_batch_read_status_query_count_does_not_scale_with_message_count(api_domain):
+    """All requested messages live in one conversation (ucm's actual call pattern --
+    every own message in one open thread) -- the fix must collapse to one participants
+    query for that conversation, not one read_status per message id."""
+    _, _, conversation, users = api_domain
+    client = APIClient(); client.force_authenticate(users["author"])
+
+    def _ids(count):
+        return [str(Message.objects.create(conversation=conversation, sender=users["author"], body=f"m{i}").id) for i in range(count)]
+
+    small_ids = _ids(2)
+    with CaptureQueriesContext(connection) as small:
+        response = client.post("/messaging/messages/read-status/batch/", {"message_ids": small_ids}, format="json")
+    assert response.status_code == 200 and len(response.data) == 2
+
+    large_ids = _ids(8)
+    with CaptureQueriesContext(connection) as large:
+        response = client.post("/messaging/messages/read-status/batch/", {"message_ids": large_ids}, format="json")
+    assert response.status_code == 200 and len(response.data) == 8
+
+    assert len(large.captured_queries) == len(small.captured_queries)
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_batch_read_status_rejects_oversized_id_list(api_domain):
+    _, _, conversation, users = api_domain
+    client = APIClient(); client.force_authenticate(users["author"])
+    oversized = [str(uuid.uuid4()) for _ in range(101)]
+
+    response = client.post("/messaging/messages/read-status/batch/", {"message_ids": oversized}, format="json")
+
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_batch_read_status_rejects_a_malformed_id_with_400_not_500(api_domain):
+    """Every other message-id input in this module arrives via a `<uuid:...>` URL
+    converter and 404s cleanly on a bad value; this endpoint takes ids from the POST
+    body and must reject a malformed one the same clean way, not 500."""
+    _, _, conversation, users = api_domain
+    client = APIClient(); client.force_authenticate(users["author"])
+
+    response = client.post("/messaging/messages/read-status/batch/", {"message_ids": ["not-a-uuid"]}, format="json")
+
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
+@override_settings(ROOT_URLCONF="django_core_micha.api_urls")
+def test_batch_read_status_never_returns_counts_for_a_direct_conversation(api_domain):
+    """The single-message endpoint's DM carve-out (no recipient_detail/counts, ever,
+    even for a moderator) must hold in the batch path too."""
+    app, scope, _, users = api_domain
+    direct = Conversation.objects.create(app=app, scope=scope, kind="direct", user_low=users["author"], user_high=users["viewer"])
+    for user in (users["author"], users["viewer"]):
+        ConversationParticipant.objects.create(conversation=direct, user=user)
+    message = Message.objects.create(conversation=direct, sender=users["author"], body="private")
+    client = APIClient(); client.force_authenticate(users["author"])
+
+    response = client.post("/messaging/messages/read-status/batch/", {"message_ids": [str(message.id)]}, format="json")
+
+    assert response.status_code == 200
+    entry = response.data[str(message.id)]
+    assert "recipient_count" not in entry
+    assert "read_count" not in entry

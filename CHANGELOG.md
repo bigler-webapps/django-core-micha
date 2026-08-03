@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.40.0] — 2026-08-03
+
+### Added
+
+`read_status` now includes `read_count` and `recipient_count` alongside `all_read`, inside the same
+`read_receipt_detail`-gated block as `recipient_detail` — team-only, same as the existing gate, no new
+permission logic. A new batch endpoint, `POST /messaging/messages/read-status/batch/`
+(`{"message_ids": [...]}`, capped at 100), returns the same per-message aggregate for many messages in a
+bounded number of queries (one per distinct conversation among the requested ids, not one per message) —
+enforces the same per-message view permission as the single endpoint; a message the caller cannot view
+is silently absent from the response, never a denied placeholder.
+
 ## [2.39.5] — 2026-08-03
 
 ### Testing

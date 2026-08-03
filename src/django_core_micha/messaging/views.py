@@ -1,6 +1,8 @@
 """Authenticated REST surface for the consumer-agnostic messaging domain."""
 from __future__ import annotations
 
+import uuid
+
 from django.contrib.auth import get_user_model
 from django.core import signing
 from django.db import transaction
@@ -20,7 +22,7 @@ from .models import (Conversation, ConversationParticipant, Message, MessagingSc
 from .policy import get_messaging_policy
 from .serializers import MessageInputSerializer, PollInputSerializer, serialize_conversation, serialize_message, serialize_poll
 from .services import (MessagingPermissionDenied, add_reaction, archive_conversation,
-                       close_poll, create_conversation, create_poll, edit_message, mark_read,
+                       batch_read_status, close_poll, create_conversation, create_poll, edit_message, mark_read,
                        mark_thread_read, open_direct, read_status, remove_reaction,
                        send_message, set_preferences, unread_counts, update_conversation_config,
                        vote_poll)
@@ -295,6 +297,28 @@ class ReadStatusView(MessagingView):
     def get(self, request, message_id):
         message = get_object_or_404(Message.objects.select_related("conversation__app"), pk=message_id); self._viewer_conversation(request, message.conversation_id)
         return Response(self._service(lambda: read_status(actor=request.user, message=message)))
+
+
+class BatchReadStatusView(MessagingView):
+    MAX_IDS = 100
+
+    def post(self, request):
+        message_ids = request.data.get("message_ids")
+        if not isinstance(message_ids, list) or not message_ids:
+            raise ValidationError({"message_ids": "Must be a non-empty list."})
+        if len(message_ids) > self.MAX_IDS:
+            raise ValidationError({"message_ids": f"Must not exceed {self.MAX_IDS} ids."})
+        # Every other message-id input in this module arrives through a `<uuid:...>` URL
+        # converter, which 404s cleanly on a malformed value before the view ever runs.
+        # This endpoint takes ids from the POST body instead, so the same shape check must
+        # happen explicitly -- an unvalidated id reaching `Message.objects.filter(pk__in=...)`
+        # raises Django's `core.exceptions.ValidationError` (a different class from the
+        # `ValueError` `_service` catches), which is unhandled and 500s.
+        try:
+            message_ids = [str(uuid.UUID(str(value))) for value in message_ids]
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValidationError({"message_ids": "Every id must be a valid UUID."}) from exc
+        return Response(self._service(lambda: batch_read_status(actor=request.user, message_ids=message_ids)))
 
 
 class ConversationArchiveView(MessagingView):
