@@ -1,10 +1,13 @@
 import datetime
+import json
 
 import pytest
+from channels_redis.serializers import registry
 from cryptography.fernet import Fernet
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.utils import timezone
+from rest_framework.renderers import JSONRenderer
 
 from django_core_micha.messaging.crypto import decrypt_text, register_messaging_app
 from django_core_micha.messaging.models import (Conversation, ConversationParticipant, Message, MessagingApp,
@@ -31,6 +34,7 @@ from django_core_micha.messaging.services import (
     vote_poll,
 )
 from django_core_micha.messaging import services as services_module
+from django_core_micha.messaging.serializers import serialize_message
 
 
 class TestPolicy:
@@ -283,6 +287,100 @@ def _capture_frames(monkeypatch):
     sent = []
     monkeypatch.setattr("django_core_micha.messaging.realtime.push_to_users", lambda users, frame: sent.append((list(users), frame)))
     return sent
+
+
+def _capture_delivered_events(monkeypatch):
+    """Capture events after the shared delivery chokepoint without Redis."""
+    delivered = []
+
+    class Layer:
+        async def group_send(self, group, event):
+            delivered.append((group, event))
+
+    layer = Layer()
+    monkeypatch.setattr("channels.layers.get_channel_layer", lambda: layer)
+    monkeypatch.setattr(
+        "asgiref.sync.async_to_sync",
+        lambda fn: lambda *args, **kwargs: delivered.append((args[0], args[1])),
+    )
+    return delivered
+
+
+def _messaging_frames(delivered, frame_type):
+    return [event["payload"] for _, event in delivered if event["payload"]["type"] == frame_type]
+
+
+@pytest.mark.django_db
+def test_message_and_conversation_upsert_frames_survive_production_msgpack_encoding(
+    domain, monkeypatch, django_capture_on_commit_callbacks,
+):
+    _, conversation, users, _ = domain
+    delivered = _capture_delivered_events(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        send_message(actor=users[0], conversation=conversation, body="serializable")
+
+    serializer = registry.get_serializer("msgpack")
+    for frame_type in ("message", "conversation_upsert"):
+        frames = _messaging_frames(delivered, frame_type)
+        assert frames
+        serializer.serialize(frames[0])
+
+
+@pytest.mark.django_db
+def test_message_edited_frame_survives_production_msgpack_encoding(
+    domain, monkeypatch, django_capture_on_commit_callbacks,
+):
+    _, conversation, users, _ = domain
+    message, _ = send_message(actor=users[0], conversation=conversation, body="original")
+    delivered = _capture_delivered_events(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        edit_message(actor=users[0], message=message, body="edited")
+
+    frame = _messaging_frames(delivered, "message_edited")[0]
+    registry.get_serializer("msgpack").serialize(frame)
+
+
+@pytest.mark.django_db
+def test_message_websocket_payload_matches_rest_json_shape(
+    domain, monkeypatch, django_capture_on_commit_callbacks,
+):
+    _, conversation, users, _ = domain
+    delivered = _capture_delivered_events(monkeypatch)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        message, _ = send_message(actor=users[0], conversation=conversation, body="same shape")
+
+    websocket_message = _messaging_frames(delivered, "message")[0]["message"]
+    rest_message = serialize_message(message)
+    registry.get_serializer("msgpack").serialize(_messaging_frames(delivered, "message")[0])
+    assert websocket_message == json.loads(JSONRenderer().render(rest_message))
+
+
+@pytest.mark.django_db
+def test_delivery_failure_is_error_logged_without_rolling_back_message(
+    domain, monkeypatch, django_capture_on_commit_callbacks, caplog,
+):
+    _, conversation, users, _ = domain
+
+    class Layer:
+        async def group_send(self, group, event):
+            raise RuntimeError("channel unavailable")
+
+    monkeypatch.setattr("channels.layers.get_channel_layer", lambda: Layer())
+    monkeypatch.setattr(
+        "asgiref.sync.async_to_sync",
+        lambda fn: lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("channel unavailable")),
+    )
+
+    with django_capture_on_commit_callbacks(execute=True):
+        message, created = send_message(actor=users[0], conversation=conversation, body="durable")
+
+    assert created
+    assert Message.objects.filter(pk=message.pk).exists()
+    assert "ERROR" in caplog.text
+    assert "frame_type='message'" in caplog.text
 
 
 @pytest.mark.django_db

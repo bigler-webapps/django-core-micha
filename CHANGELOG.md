@@ -7,6 +7,13 @@
 Messages and compact conversation last-message projections now include a `sender` object with `id` and
 `display_name`. Poll REST projections now include their stable `message_id`.
 
+### Fixed
+
+WebSocket fan-out now normalizes every payload through the same JSON renderer as REST before it reaches
+the Redis msgpack serializer. Messaging frames containing datetimes therefore deliver in the same
+ISO-8601 shape as REST responses, and encoding/delivery errors now log their frame type and payload
+keys at error level while leaving durable writes isolated.
+
 ### Breaking changes
 
 `read_status` no longer returns the permanently-zero `delivered_count`, and the unused

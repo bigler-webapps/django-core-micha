@@ -5,6 +5,7 @@ from html import escape
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
+from rest_framework.renderers import JSONRenderer
 
 from .models import NotificationPreference, PushSubscription
 
@@ -51,6 +52,21 @@ def push_to_users(users, payload):
     if channel_layer is None:
         return
 
+    # The Redis channel layer uses msgpack, which cannot encode Django-native
+    # values such as datetime, Decimal, UUID, or lazy translation objects.
+    # Use the same encoder as REST so the WebSocket and HTTP contracts match.
+    try:
+        payload = json.loads(JSONRenderer().render(payload))
+    except Exception as exc:
+        logger.error(
+            "WebSocket notification payload encoding failed (frame_type=%r, payload_keys=%s): %s",
+            payload.get("type") or payload.get("kind"),
+            list(payload.keys()),
+            exc,
+            exc_info=True,
+        )
+        return
+
     for user in recipients:
         try:
             async_to_sync(channel_layer.group_send)(
@@ -58,7 +74,14 @@ def push_to_users(users, payload):
                 {"type": "message", "payload": payload},
             )
         except Exception as exc:
-            logger.warning("WebSocket notification failed for user %s: %s", user.id, exc)
+            logger.error(
+                "WebSocket notification failed for user %s (frame_type=%r, payload_keys=%s): %s",
+                user.id,
+                payload.get("type") or payload.get("kind"),
+                list(payload.keys()),
+                exc,
+                exc_info=True,
+            )
 
 
 def deliver_push_email(*, title, body, url, users):

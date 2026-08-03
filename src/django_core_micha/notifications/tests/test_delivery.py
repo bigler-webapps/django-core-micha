@@ -131,6 +131,25 @@ def test_push_to_users_targets_only_each_users_group(monkeypatch):
     ]
 
 
+def test_push_to_users_logs_delivery_failures_at_error_with_frame_type(monkeypatch, caplog):
+    class Layer:
+        async def group_send(self, group, event):
+            raise RuntimeError("unavailable")
+
+    layer = Layer()
+    monkeypatch.setattr("channels.layers.get_channel_layer", lambda: layer)
+    monkeypatch.setattr(
+        "asgiref.sync.async_to_sync",
+        lambda fn: lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("unavailable")),
+    )
+
+    delivery.push_to_users([type("User", (), {"id": 1})()], {"type": "message", "created_at": "now"})
+
+    assert "WebSocket notification failed" in caplog.text
+    assert "message" in caplog.text
+    assert "ERROR" in caplog.text
+
+
 def test_notification_envelope_is_additive_and_does_not_mutate_input():
     payload = {"type": "notification.status", "notification_id": 1}
 
