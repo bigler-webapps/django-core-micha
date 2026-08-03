@@ -150,3 +150,73 @@ Publish + version bump (patch on 2.40.0) per the repo's release flow.
 Emit `PLAN: <steps>` up front, then a single-line `PROGRESS: [<n>/<total>] <action>` before every
 relevant action and `PROGRESS: [<n>/<total>] done` on completion, spaced so no gap exceeds ~2 min,
 stdout unbuffered, and exactly one final `RESULT: DONE|BLOCKED <reason>`.
+
+---
+
+## Part B — Implementation map (Orchestrator)
+
+### Context package
+
+**Scope A — `src/django_core_micha/messaging/views.py`:**
+- `_idempotency_request_id(request, values)` (`:118-130`): the helper. `header_id` is a real
+  `uuid.UUID` (parsed from the header at `:124`). `supplied = values.get("client_request_id")` at
+  `:121` is compared with `!=` at `:127` with NO type normalization first.
+- Three call sites, exactly as the envelope states:
+  - `:206` `ConversationMessagesView.post` — passes `data.validated_data` from
+    `MessageInputSerializer` (`serializers.py:20`, `UUIDField`) → `client_request_id` is already a
+    `UUID` instance here.
+  - `:339`-equivalent create-poll path — same serializer pattern, already a `UUID`.
+  - `:217` `ConversationAttachmentView.post` — passes a **raw dict literal**
+    `{"client_request_id": request.data.get("client_request_id")}`, straight from multipart form
+    data, so `supplied` is a `str` (or `None`). No serializer in between.
+- Fix goes **inside `_idempotency_request_id`**, not at `:217`: before the `!=` comparison,
+  normalize `supplied` to a `UUID` if it isn't already one. `isinstance(supplied, uuid.UUID)` →
+  use as-is; otherwise `uuid.UUID(str(supplied))` inside the same `try/except (ValueError,
+  TypeError, AttributeError)` shape already used for `header_id` at `:123-126`, raising
+  `ValidationError({"client_request_id": "Must be a UUID."})` on failure — do not silently coerce a
+  malformed value to `None`/skip the check (the WO's risk note: a lenient parse trades a visible
+  outage for a silent idempotency hole).
+- `uuid` is already imported at module level (used at `:318` in `BatchReadStatusView`) — reuse that
+  import, don't add the inline `__import__("uuid")` pattern used ad hoc at `:124`/`:259`.
+
+**Scope B — `src/django_core_micha/messaging/services.py`:**
+- `read_status()` (`:334-348`): `all_read = not participants.exclude(last_read_at__gte=...).exists()`
+  at `:337`. With `participants` empty, `.exclude(...).exists()` is `False` → `all_read = True`.
+  Fix: `all_read = participants.exists() and not participants.exclude(...).exists()`.
+- `batch_read_status()` (`:351-397`) has the **identical bug**, not called out verbatim in the
+  envelope's code excerpt but present at `:385-388`:
+  ```python
+  all_read = all(...) if non_sender_rows else True
+  ```
+  `all(...) if non_sender_rows else True` is the same vacuous-truth pattern (`all()` over an empty
+  generator is also `True`, and the `else True` makes it explicit either way). **Fix this one too** —
+  same failure class, same conversation-with-zero-recipients scenario, and this WO's own framing
+  ("this is the same failure class... an assertion trivially satisfied by an empty set") applies
+  identically. Change to `all_read = bool(non_sender_rows) and all(...)`.
+- Both functions already compute `recipient_count` (or `len(non_sender_rows)`) in the gated branch —
+  scope B does not need a new field, `recipient_count: 0` is already observable alongside the
+  corrected `all_read: False`. No decision to "signal no receipt at all" is needed beyond this: a
+  zero-recipient conversation now reports `all_read: False, recipient_count: 0` (when gated) or just
+  `all_read: False` (ungated, direct conversations can't have zero non-sender participants in
+  practice) — ucm's `ReadTicks.jsx` already renders nothing for `hasCounts` false + non-direct, and
+  for the direct case `all_read: False` renders the existing `SENT` tick, which is the correct
+  "nobody has read this" state, not a new rendering case.
+
+### Test files (existing, extend — don't create new files for this)
+- `src/django_core_micha/messaging/tests/test_views.py` — attachment upload tests live near
+  `test_message_post_retries_once_with_idempotency_key` (`:49`); add the attachment-idempotency
+  cases there (multipart client + `Idempotency-Key` header, matching/mismatched/malformed body
+  `client_request_id`).
+- `src/django_core_micha/messaging/tests/test_services.py` — `all_read`/`read_count` tests live near
+  `:120` and `:149`; add the zero-recipient case for both `read_status` and `batch_read_status`
+  there. Use a conversation created via the test domain fixture with the sender as sole participant
+  (no other `ConversationParticipant` row) — do not add a participant and then filter it out, that
+  would not reproduce the vacuous-`all()`/`exists()` pattern.
+
+### Invariants / do-not-touch
+Per the envelope's NON-GOALS: `mark_read`, `last_read_at`, `unread_counts`, `read_receipt_detail`
+gating, `read_count`/`recipient_count` semantics, `delivered_count` (stays removed), batch endpoint
+permission logic, no model/migration changes.
+
+### Progress contract
+As stated above in the envelope — `PLAN:`/`PROGRESS: [n/total]`/`RESULT: DONE|BLOCKED`.
