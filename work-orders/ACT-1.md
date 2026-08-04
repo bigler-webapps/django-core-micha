@@ -66,9 +66,20 @@ build a configurable metric registry.
 uniqueness on (app, scope, user, bucket_start). Index for the read pattern (scope + bucket range), which
 is what every chart query does.
 
-**B. Bucket width, per app (operator decision).** dcm ships a default; each app configures its own via
-settings. jg's current fixed `ACTIVITY_BUCKET_HOURS = 4` (`events/activity.py:9`) becomes jg's
-configured value, not a platform constant.
+**B. Storage granularity: one hour, fixed platform-wide (operator, 2026-08-04).**
+
+An earlier draft of this WO made bucket width per-app configurable. **The operator dropped that** — the
+user's range choice determines the displayed resolution, and an app-level knob adds a dimension nobody
+needs. There is one storage width for everyone.
+
+It must be **one hour**, because the finest view the operator wants is a single day on an hourly grid
+(scope D). A coarser store cannot serve it: jg's current 4-hour buckets cannot be decomposed into hours
+after the fact.
+
+**Consequence to plan for, not discover:** hourly storage is **four times** the rows jg writes today —
+24 per user per day per scope instead of 6. That makes retention (scope E) and the read index
+(scope A) load-bearing rather than tidy-up. State the expected row volume for a realistic scope in the
+completion note.
 
 **C. The ping endpoint.** Port jg's `activity-ping` behaviour: upsert the bucket for (scope, user,
 current bucket start), accumulate `active_seconds`, stamp `last_ping_at`. Take jg's implementation as
@@ -83,14 +94,28 @@ This is not optional convenience. The operator wants the user to pick **1 week /
 a 4-hour storage bucket, one year is **~2190 buckets per user** — returning raw rows would ship an
 unusable payload and force the client to aggregate what SQL should. **Roll up in the database.**
 
-**Supported granularities (operator, 2026-08-04):** 4 hours, 1 day, 1 month. Consumers pick one per
-range — a week maps to 4 hours, a month to 1 day, a year to 1 month, so every request returns roughly a
-dozen to fifty points.
+**Supported granularities (operator, 2026-08-04) — the resolution follows the range, and is not an
+independent control:**
 
-State how a requested granularity **finer than the stored bucket width** is handled — refusing is fine,
-silently returning something coarser is not. Note that per-app bucket width (scope B) means an app
-configured at, say, 1 day cannot serve a 4-hour request; that combination must fail clearly rather than
-appear to work.
+| Range | Resolution | Points |
+|---|---|---|
+| 1 day | 1 hour | 24 |
+| 1 week | 4 hours | ~42 |
+| 1 month | 1 day | ~30 |
+| 1 year | 1 month | 12 |
+
+Every preset returns between a dozen and fifty points, which is what keeps the chart readable at any
+range. A request for a granularity **finer than the one-hour store** must fail clearly rather than
+silently return something coarser.
+
+**Anchoring (operator, 2026-08-04 — keep it simple or drop it).** A range relative to *now* is useless
+for a finished scope: a camp that ran in July shows an empty "last 7 days" when opened in August. So
+anchor the range's end at **the scope's most recent bucket with data**, falling back to now when the
+scope has none.
+
+That is deliberately one rule with no per-app logic and no heuristics. **If the implementation starts
+growing cases, drop the anchoring and return ranges relative to now** — the operator gated this on it
+staying simple, and a clever version is worse than none.
 
 **E. Retention.** jg has `cleanup_activity_buckets` (`events/management/commands/`). Port it; a
 per-user-per-bucket table grows with users × time, and an app with a thousand users will notice. Make
@@ -108,9 +133,9 @@ analogy with `read_receipt_detail` in messaging? `sec_reviewer` rules on this; d
 - Do not change `MessagingScope` or messaging in any way; borrow the pattern, do not extend the model.
 
 ## RISKS
-- **Row volume.** One row per user per bucket per scope. At 4-hour buckets that is 6 rows/user/day/scope.
-  Retention (scope E) and the read index (scope A) are what keep this sane; treat them as part of the
-  feature, not afterthoughts.
+- **Row volume, and it grew.** One row per user per hour per scope — 24/user/day/scope, four times
+  what jg writes today at 4-hour buckets. That is the direct cost of the hourly view. Retention
+  (scope E) and the read index (scope A) are load-bearing here, not tidy-up.
 - **Reading is a privacy surface** — scope F. Getting it wrong exposes per-user presence to anyone who
   can see the scope.
 - **Over-generalising from jg.** The design is anchored on three named cases; if a fourth need appears
