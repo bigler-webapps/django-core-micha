@@ -58,12 +58,28 @@ emits must be covered — audit them, do not fix only `messaging.new_message`.**
 
 **C. Useful `params` — and this is a PRIVACY decision, not a UX one.**
 
-A push notification is delivered through a **third-party push service** and rendered by the operating
-system, typically on a lock screen. Putting message content into it means that content:
+**CORRECTION 2026-08-04 — an earlier version of this section overstated the exposure and would have
+given `sec_reviewer` the wrong threat model.** It claimed the content "transits a third party" and
+"leaves the encrypted domain", implying the push provider can read it. **It cannot.**
 
-- leaves the encrypted domain (messaging bodies are encrypted at rest via the app's Fernet ring),
-- transits a third party,
-- is displayed without authentication to anyone holding the device.
+dcm sends via `pywebpush` with the subscription's `p256dh`/`auth` keys and VAPID
+(`notifications/delivery.py:187-193`) — that is RFC 8291 Web Push payload encryption. The payload is
+encrypted with keys the **browser** generated; the push service (Mozilla autopush, FCM, APNs) relays an
+opaque ciphertext it has no key for.
+
+The real exposure is **device-local**, and it is genuinely smaller:
+
+- the service worker decrypts the payload and hands plaintext to the OS notification system,
+- the OS renders it on a **lock screen without authentication** — anyone glancing at the device reads it,
+- it may persist in the OS notification history and in device backups.
+
+Two things follow that put this in proportion:
+
+- **Fernet-at-rest is not breached by this.** dcm decrypts the body anyway to serve REST and to compose
+  the digest email; the app decrypts on every read. Push is not a new decryption boundary.
+- **The digest email is the weaker channel, not push.** A digest transits SMTP and sits in a mailbox in
+  plaintext, readable by the mail provider. Content in an end-to-end-encrypted push is strictly safer
+  than the same content in an email the project already sends.
 
 **RULED BY THE OPERATOR, 2026-08-04: show the sender name and the message text.** This is settled — do
 not re-open it, and do not narrow it on your own judgement.
@@ -91,8 +107,19 @@ Implementation requirements that follow from it:
   — verify the sender name and body cannot leak across recipients, and that a recipient only ever
   receives content from a conversation they participate in.
 
-If a future operator wants a per-user "hide preview" setting, that is a separate WO — do not build a
-toggle here.
+**E. A per-user "hide preview" toggle — operator-requested 2026-08-04, IN scope.**
+
+Add it to ucm's existing notification settings (`ui-core-micha`
+`notifications/NotificationSettings.jsx`, which already renders `Switch`es over a preferences object,
+e.g. `email_opt_in` at `:164`). Persist it on dcm's existing `NotificationPreference`
+(`notifications/models.py:26`) — **do not introduce a new model or a second preferences mechanism.**
+
+When the preference is off, the push falls back to a content-free body (the scope-B wording for "new
+message" without sender or text). The **title may keep the sender name or not — state which you chose**;
+"hide preview" is ambiguous about the title and an unstated reading will be wrong for someone.
+
+**Default: preview ON**, matching the operator's ruling. A user opting out is the exception, not the
+baseline.
 
 **D. A missing catalogue entry must not be silent.** The `except` branches were written to log a
 fallback but cannot fire for the actual failure mode. Detect the real case — a rendered string identical
@@ -108,7 +135,7 @@ missing key ships to users exactly as this one did.
 - Do not change `_recipient_language` or the per-recipient override.
 - Do not touch the in-app notification feed's own rendering beyond what shares `_render_content`; if a
   change would affect it, say so explicitly rather than discovering it in review.
-- Do not narrow scope C's ruling, and do not build a per-user preview toggle — both are out of scope.
+- Do not narrow scope C's ruling. (The preview toggle is now scope E, in scope.)
 
 ## RISKS
 - **Scope C is the one that can do lasting harm, and the operator has accepted that risk.** A push
