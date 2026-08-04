@@ -219,6 +219,71 @@ Publish + version bump per the repo's release flow.
 >
 > Fix **all** emitted keys, not just this one, or the next report is identical.
 
+## IMPLEMENTATION MAP (Orchestrator, part B — within the envelope above; do not pre-solve, this points at seams)
+
+**Target repo confirmed:** `develop` does not exist in this repo (only `main` + short-lived `feat/*`/`fix/*`
+remote branches, none checked out). Work on `main` per the WO's own fallback rule.
+
+**Route decision for scope A — steer, do not dictate:** there is **no gettext catalogue infrastructure
+anywhere in this repo** (`find -iname '*.po'` / `*.mo` → nothing; the only `LOCALE_PATHS`/`.po` machinery
+is Django's own admin translations). But there IS a working precedent for exactly this problem, already
+shipped and presumably tested: `emails/email_texts.py` — `SUPPORTED_LANGUAGES = ("de", "fr", "en")`,
+`get_preferred_language(user)` resolving `user.profile.language` with an `en` fallback, and per-language
+text built in plain Python (dicts / f-strings), no `gettext`, no `.po` compile step. Route 2 (stop using
+`gettext`, resolve keys through a small in-repo language table, same shape as `email_texts.py`) fits the
+codebase as it already stands; Route 1 (ship `.po`/`.mo` + wire compilation into the build) would be the
+first gettext catalogue in the repo with no existing build step to hook into. Pick the route, but if you
+pick Route 1 explain why the `email_texts.py` precedent doesn't apply.
+
+**Files to touch:**
+
+- `notifications/dispatch.py:35-64` — `_recipient_language(user)` (existing, reads
+  `user.contact_profile.language`, defaults `"de"`, already validates against `{"de","en","fr"}` — reuse
+  as-is) and `_render_content(content, user, transient)` (existing, currently does
+  `gettext(title_key).format(**params)` — this is the function that must stop returning the raw key).
+  `params = {**params, **(transient or {})}` already exists — `transient` is where per-message dynamic
+  data (sender name, message text) belongs; `content["params"]` is only `{"message_id": ...}` today.
+  The `except Exception` fallback-to-key branches at `:55-57`/`:60-62` are the ones scope D must make
+  distinguishable from a genuine render (a caught exception vs. a silently-unresolved key look the same
+  today — a missing catalogue entry hits neither branch, it just returns the key with no exception at all).
+- `messaging/notifications.py:34-51` — `notify_message()` is the sole caller for the messaging type. It
+  already computes `transient={"title": decrypt_text(...), "body": decrypt_text(...)}` from
+  `message.title`/`message.body` (**note: `Message.title` is an optional message title field, e.g. for
+  polls/announcements — NOT the sender's name**; sender name must come from `message.sender`, the FK at
+  `messaging/models.py:137`, e.g. `message.sender.get_full_name()` with a fallback for a null/deleted
+  sender). This is the function to change for scope B (distinct title/body keys) and scope C (pass
+  sender name + truncated body text into `transient`/`params`, respecting the preview preference). Check
+  `message.deleted_at` (`messaging/models.py:145`) before building body text — a soft-deleted message
+  must not have its text pulled into a push composed after deletion.
+- `messaging/notifications.py:15-31` — `register_messaging_notification_type()` — audit for any other
+  emitted keys in this app; scope A/D must cover **every** key dcm emits, not just `messaging.new_message`
+  — grep the whole repo for other `notify(type=..., content={"title_key": ...})` call sites (this is the
+  only one in `messaging/`, but check `notifications/` and any other app module for its own event types).
+- `notifications/models.py:26-31` — `NotificationPreference` (`email_opt_in`, `push_opt_in` booleans,
+  no migration surprises — straightforward `BooleanField` additions elsewhere in this model). Add the
+  scope-E field here, e.g. `push_preview_opt_in = models.BooleanField(default=True)` — **default True**
+  per the ruling. New migration required.
+- `notifications/serializers.py:7-10` — `NotificationPreferenceSerializer.Meta.fields = ["email_opt_in",
+  "push_opt_in"]` — add the new field so `notifications/views.py:36` `NotificationPreferenceView`
+  (`RetrieveUpdateAPIView`, `get_or_create(user=self.request.user)`) exposes it on the existing
+  `preferences/` endpoint with no new view/URL needed.
+- `notifications/delivery.py:153-183` `_send_push(...)` — no change expected (payload shape
+  `{"title", "body", "url"}` stays the same); confirm scope C's truncation happens before this, not here.
+- `notifications/admin.py:12-14` — cosmetic, add the new field to `list_display` if trivial, not required.
+
+**Do not touch:** `notifications/prefs.py` (a *different*, apparently-legacy preference-resolution path
+mentioned in its own comments — the WO's target is the live `NotificationPreference.push_opt_in`/new field
+that `_send_push`/the serializer actually use; if `prefs.py` turns out to be load-bearing for scope E,
+flag it rather than silently expanding scope).
+
+**Migration:** one new Django migration for the `NotificationPreference` field addition — check existing
+migration numbering in `notifications/migrations/` before naming it.
+
+**Test layout convention:** find the existing test file(s) for `notifications/dispatch.py` and
+`messaging/notifications.py` (search `tests/` for `_render_content`, `notify_message`, or
+`NotificationPreference`) and extend them — do not create a parallel test module if one already covers
+this code.
+
 ## PROGRESS CONTRACT
 Emit `PLAN: <steps>` up front, then a single-line `PROGRESS: [<n>/<total>] <action>` before every
 relevant action and `PROGRESS: [<n>/<total>] done` on completion, spaced so no gap exceeds ~2 min,
