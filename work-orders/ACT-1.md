@@ -83,8 +83,14 @@ This is not optional convenience. The operator wants the user to pick **1 week /
 a 4-hour storage bucket, one year is **~2190 buckets per user** — returning raw rows would ship an
 unusable payload and force the client to aggregate what SQL should. **Roll up in the database.**
 
-State which granularities are supported and how a requested granularity that is finer than the stored
-bucket width is handled — refusing is fine, silently returning something coarser is not.
+**Supported granularities (operator, 2026-08-04):** 4 hours, 1 day, 1 month. Consumers pick one per
+range — a week maps to 4 hours, a month to 1 day, a year to 1 month, so every request returns roughly a
+dozen to fifty points.
+
+State how a requested granularity **finer than the stored bucket width** is handled — refusing is fine,
+silently returning something coarser is not. Note that per-app bucket width (scope B) means an app
+configured at, say, 1 day cannot serve a 4-hour request; that combination must fail clearly rather than
+appear to work.
 
 **E. Retention.** jg has `cleanup_activity_buckets` (`events/management/commands/`). Port it; a
 per-user-per-bucket table grows with users × time, and an app with a thousand users will notice. Make
