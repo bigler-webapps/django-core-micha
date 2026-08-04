@@ -12,8 +12,8 @@ browser push notification whose **title and body both read `messaging.new_messag
 
 ## TIER
 Tier 2 — shared-core, user-facing on every app with push enabled. Independent `reviewer` mandatory.
-**`sec_reviewer` mandatory for scope C** — it decides whether message content leaves the encrypted
-domain.
+**`sec_reviewer` mandatory for scope C** — the operator has ruled that message content may go into the
+push; `sec_reviewer` confirms the implementation honours the ruling's limits.
 
 ## THE DEFECT — three layered problems, all verified 2026-08-04
 
@@ -65,14 +65,34 @@ system, typically on a lock screen. Putting message content into it means that c
 - transits a third party,
 - is displayed without authentication to anyone holding the device.
 
-**`sec_reviewer` must rule on what may appear**, and this WO does not pre-empt it. The realistic
-options, from safest: sender name only · sender + conversation name · sender + excerpt. **Do not add an
-excerpt on the implementer's own judgement.** If the ruling is "no content at all", then scope B's body
-must work without one, and that is a fine outcome.
+**RULED BY THE OPERATOR, 2026-08-04: show the sender name and the message text.** This is settled — do
+not re-open it, and do not narrow it on your own judgement.
 
-Whatever is chosen must be **per-recipient safe**: `_render_content` already runs under
-`translation.override(_recipient_language(user))`, so the same content dict is rendered per recipient —
-verify nothing recipient-specific leaks across recipients.
+Concretely: title = sender name, body = the message text (see scope B for the exact split).
+
+The operator was told, and accepted, what this means: the message body becomes visible on a locked
+device without authentication, and transits a third-party push service. **Note explicitly for the
+record** that jg encrypts message bodies at rest under a Fernet ring — this decision deliberately
+places the same content outside that boundary for the push channel. `sec_reviewer` should confirm the
+implementation matches this ruling, not re-litigate the ruling itself.
+
+Implementation requirements that follow from it:
+
+- **Truncate the body.** A push has no useful length budget and a long message would be clipped
+  arbitrarily by the OS. Truncate deliberately (state the limit) with an ellipsis, so the cut is the
+  product's decision rather than the platform's.
+- **Non-text messages need a sensible body**, not an empty string: an attachment-only send, a poll, an
+  announcement. Decide the fallback wording per kind and route it through the same catalogue as scope A.
+- **A deleted or edited message must not resurface its old text.** A push already delivered cannot be
+  recalled, but do not construct new pushes from soft-deleted content — check `deleted_at` before
+  composing.
+- **Per-recipient safety**: `_render_content` runs under
+  `translation.override(_recipient_language(user))` and the same content dict is rendered per recipient
+  — verify the sender name and body cannot leak across recipients, and that a recipient only ever
+  receives content from a conversation they participate in.
+
+If a future operator wants a per-user "hide preview" setting, that is a separate WO — do not build a
+toggle here.
 
 **D. A missing catalogue entry must not be silent.** The `except` branches were written to log a
 fallback but cannot fire for the actual failure mode. Detect the real case — a rendered string identical
@@ -109,11 +129,12 @@ Narrow and behavioural. Do NOT run the full suite.
 3. Every notification key dcm emits renders to a non-key string in de, en and fr — parametrise over the
    emitted keys rather than asserting one.
 4. Scope D: a missing catalogue entry produces a warning naming the key.
-5. Scope C, once ruled: the payload contains exactly what was approved and **nothing more** — assert the
-   absence of message body text if the ruling excludes it. This is the privacy line; assert it
-   explicitly rather than trusting the implementation.
+5. Scope C: the push payload contains the sender name and the message text, **truncated at the stated
+   limit**, and a soft-deleted message never produces a body carrying its old text.
+6. Scope C: a recipient never receives a push whose body comes from a conversation they do not
+   participate in — the cross-recipient leakage guard.
 
-**Non-vacuity:** test 1 must fail today, and test 5 must fail if the excluded field is added back.
+**Non-vacuity:** test 1 must fail today; test 5's truncation assertion must fail if the limit is removed; test 6 must fail if the participation check is dropped.
 
 ## TEST SCOPE FOR THE GATE (orchestrator)
 `notifications/` and `messaging/`. Compare before/after via `git stash` and state the measured baseline.
@@ -136,10 +157,14 @@ Publish + version bump per the repo's release flow.
 > **Push delivery itself works — do not touch the transport or the service worker.** ucm reads
 > `payload.title`/`payload.body` correctly; they simply arrive unrendered.
 >
-> **Scope C is a privacy decision and `sec_reviewer` rules on it, not the implementer:** a push goes
-> through a third-party service and renders on a lock screen, so putting message content there takes it
-> out of the encrypted domain and shows it without authentication. Do not add an excerpt on your own
-> judgement. And fix **all** emitted keys, not just this one, or the next report is identical.
+> **Scope C is RULED — no gate stop:** the operator decided 2026-08-04 to show **sender name + message
+> text**, having been told it makes the body readable on a locked device and puts it through a
+> third-party service, outside the Fernet boundary that protects it at rest. Implement that; do not
+> narrow it yourself and do not build a preview toggle. `sec_reviewer` confirms the implementation
+> matches the ruling — truncation, non-text fallbacks, no resurrection of soft-deleted text, and no
+> cross-recipient leakage — rather than re-litigating the ruling.
+>
+> Fix **all** emitted keys, not just this one, or the next report is identical.
 
 ## PROGRESS CONTRACT
 Emit `PLAN: <steps>` up front, then a single-line `PROGRESS: [<n>/<total>] <action>` before every
