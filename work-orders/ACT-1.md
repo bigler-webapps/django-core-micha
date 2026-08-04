@@ -131,6 +131,21 @@ Every preset returns between a dozen and fifty points, which is what keeps the c
 range. A request for a granularity **finer than the one-hour store** must fail clearly rather than
 silently return something coarser.
 
+### Where the scope comes from — the host's existing context, never a picker
+
+The consuming app already knows which scope the user is in: jg's `selectedEventId` (`StructureContext`),
+spesix's `activeSchoolId` (`SchoolContext`). **The host reads its own context and passes
+`content_type` + `object_id`.** There is no scope selector to build, in dcm or in ucm.
+
+**Activity therefore belongs where the context lives, not on an account page.** `/account` answers "who
+am I"; activity answers "what is happening in this scope" — the same split that keeps the context picker
+out of SHELL-1's user menu. jg already places it correctly (`EventInfoHub/ActivitySection.jsx`, rendered
+for the selected event); spesix's belongs on the school surface, survey_app's on the site surface.
+
+A long scope dropdown would only be needed for a view standing *outside* any context. **Do not build
+one.** A cross-scope overview ("activity across all my events") is a different feature, it needs
+app-side aggregation because dcm has no hierarchy, and it is out of scope here.
+
 ### Anchoring (operator, 2026-08-04 — keep it simple or drop it)
 
 A range relative to *now* is useless for a finished scope: a camp that ran in July shows an empty
