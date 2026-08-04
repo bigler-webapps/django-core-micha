@@ -56,7 +56,7 @@ emits must be covered — audit them, do not fix only `messaging.new_message`.**
 **B. Distinct title and body.** A push needs a short title and an informative body. Decide the shape
 (what the title says, what the body says) and give them separate keys.
 
-**C. Useful `params` — and this is a PRIVACY decision, not a UX one.**
+**C. Useful `params` — what the push is allowed to say.**
 
 **CORRECTION 2026-08-04 — an earlier version of this section overstated the exposure and would have
 given `sec_reviewer` the wrong threat model.** It claimed the content "transits a third party" and
@@ -86,11 +86,10 @@ not re-open it, and do not narrow it on your own judgement.
 
 Concretely: title = sender name, body = the message text (see scope B for the exact split).
 
-The operator was told, and accepted, what this means: the message body becomes visible on a locked
-device without authentication, and transits a third-party push service. **Note explicitly for the
-record** that jg encrypts message bodies at rest under a Fernet ring — this decision deliberately
-places the same content outside that boundary for the push channel. `sec_reviewer` should confirm the
-implementation matches this ruling, not re-litigate the ruling itself.
+The operator was told, and accepted, the exposure as corrected above: the body is readable on a locked
+device and may persist in OS notification history. It is **not** readable by the push service, and it
+is not a new decryption boundary. `sec_reviewer` confirms the implementation honours the ruling's
+limits; it does not re-litigate the ruling.
 
 Implementation requirements that follow from it:
 
@@ -107,6 +106,11 @@ Implementation requirements that follow from it:
   — verify the sender name and body cannot leak across recipients, and that a recipient only ever
   receives content from a conversation they participate in.
 
+**D. A missing catalogue entry must not be silent.** The `except` branches were written to log a
+fallback but cannot fire for the actual failure mode. Detect the real case — a rendered string identical
+to its key is the cheap signal — and log it at warning level with the key. Without this, the next
+missing key ships to users exactly as this one did.
+
 **E. A per-user "hide preview" toggle — operator-requested 2026-08-04, IN scope.**
 
 Add it to ucm's existing notification settings (`ui-core-micha`
@@ -121,10 +125,12 @@ message" without sender or text). The **title may keep the sender name or not �
 **Default: preview ON**, matching the operator's ruling. A user opting out is the exception, not the
 baseline.
 
-**D. A missing catalogue entry must not be silent.** The `except` branches were written to log a
-fallback but cannot fire for the actual failure mode. Detect the real case — a rendered string identical
-to its key is the cheap signal — and log it at warning level with the key. Without this, the next
-missing key ships to users exactly as this one did.
+**Scope E spans two repos and this WO owns only the dcm half.** dcm ships the preference field on
+`NotificationPreference`, exposes it on the preferences API, and makes push composition respect it —
+that half must be independently correct, with preview ON as the default, so dcm is shippable before any
+UI exists. **The `Switch` in `ui-core-micha`'s `NotificationSettings.jsx` is a companion change and is
+NOT deliverable from this repo** — flag it in the completion note so a `ui-core-micha` WO gets written.
+Do not mark scope E complete on the dcm side and let the UI silently never arrive.
 
 ## NON-GOALS / DO NOT TOUCH
 - Do not change the service worker's rendering (`ui-core-micha` `notifications/serviceWorker`,
@@ -163,7 +169,14 @@ Narrow and behavioural. Do NOT run the full suite.
 6. Scope C: a recipient never receives a push whose body comes from a conversation they do not
    participate in — the cross-recipient leakage guard.
 
-**Non-vacuity:** test 1 must fail today; test 5's truncation assertion must fail if the limit is removed; test 6 must fail if the participation check is dropped.
+7. Scope E: with the preference **off**, the push body carries **no** message text and no sender name
+   in the body — assert the absence, not merely that the body differs.
+8. Scope E: the preference **defaults to on** for a user who has never set it, and an existing
+   `NotificationPreference` row without the field behaves as on.
+
+**Non-vacuity:** test 1 must fail today; test 5's truncation assertion must fail if the limit is
+removed; test 6 must fail if the participation check is dropped; test 7 must fail if the preference is
+ignored during composition.
 
 ## TEST SCOPE FOR THE GATE (orchestrator)
 `notifications/` and `messaging/`. Compare before/after via `git stash` and state the measured baseline.
@@ -187,11 +200,17 @@ Publish + version bump per the repo's release flow.
 > `payload.title`/`payload.body` correctly; they simply arrive unrendered.
 >
 > **Scope C is RULED — no gate stop:** the operator decided 2026-08-04 to show **sender name + message
-> text**, having been told it makes the body readable on a locked device and puts it through a
-> third-party service, outside the Fernet boundary that protects it at rest. Implement that; do not
-> narrow it yourself and do not build a preview toggle. `sec_reviewer` confirms the implementation
-> matches the ruling — truncation, non-text fallbacks, no resurrection of soft-deleted text, and no
+> text**. Read the correction in scope C before forming a threat model: the push service **cannot** read
+> the payload (`pywebpush` + VAPID = RFC 8291 end-to-end encryption), and this is not a new decryption
+> boundary — the real exposure is a locked device's screen and the OS notification history. An earlier
+> version of this WO said otherwise and was wrong. `sec_reviewer` confirms the implementation honours
+> the ruling's limits — truncation, non-text fallbacks, no body from soft-deleted content, no
 > cross-recipient leakage — rather than re-litigating the ruling.
+>
+> **Scope E (per-user preview toggle) spans two repos and this WO owns only the dcm half** — the
+> preference field, its API exposure, and push composition respecting it, defaulting to ON. The `Switch`
+> in `ui-core-micha`'s `NotificationSettings.jsx` needs its own WO; flag it in the completion note so it
+> does not silently never arrive.
 >
 > Fix **all** emitted keys, not just this one, or the next report is identical.
 
