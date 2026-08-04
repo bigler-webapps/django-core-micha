@@ -179,6 +179,111 @@ the retention window configurable alongside the bucket width.
 shows who was present, which is personal data. Decide and state who may query: scope managers only, by
 analogy with `read_receipt_detail` in messaging? `sec_reviewer` rules on this; do not default it open.
 
+## CONTEXT PACKAGE — verified current state (Orchestrator, Implementation map)
+
+Work from this package; do not explore broadly from scratch — open only the named files to verify.
+If you must dig deeper, delegate to a read-only Explore sub-agent (Haiku).
+
+**New app: `src/django_core_micha/activity/`**, mirroring the existing `messaging`/`notifications`
+app shape — `__init__.py`, `apps.py`, `models.py`, `services.py` (thin views delegate here, matching
+messaging's split), `views.py`, `serializers.py`, `urls.py`, `migrations/`, `tests/`,
+`management/commands/cleanup_activity_buckets.py` (retention command lives in `management/commands/`
+per the `notifications` app's precedent for command placement).
+
+**A. The model — copy `MessagingScope`'s generic-scope shape exactly**
+(`src/django_core_micha/messaging/models.py:46-68`, full block):
+```python
+content_type = models.ForeignKey(ContentType, null=True, blank=True, on_delete=models.CASCADE)
+object_id = models.CharField(max_length=64, null=True, blank=True)   # CharField, not PositiveIntegerField
+content_object = GenericForeignKey("content_type", "object_id")
+```
+`object_id` is deliberately a `CharField(max_length=64)`, not an integer field — it must work for both
+int PKs (jg's `Event.id`) and UUID PKs (other consumers) without dcm knowing which. Add an `app`-key
+field (a short string identifying the consuming app, e.g. `app_key`) alongside — the WO explicitly
+requires "uniqueness including the app key," mirroring `MessagingScope`'s
+`UniqueConstraint(fields=["app", "kind", "content_type", "object_id"], ...)` pattern
+(`messaging/models.py:61-68`) but for `(app_key, content_type, object_id, user, bucket_start)`.
+Index on `(content_type, object_id, bucket_start)` — the read pattern is always scope + bucket range
+(`messaging`'s own `Meta.indexes` convention, e.g. `events/models.py:544-546`'s jg-side
+`models.Index(fields=["event", "bucket_start"])` is the direct analog, generalized to the FK pair).
+
+**B. Storage granularity — one hour, hard-coded, not configurable.** jg's own bucket-width helper
+(`events/activity.py:9`, `ACTIVITY_BUCKET_HOURS = 4`) floors to a fixed boundary — port the *shape* of
+that flooring logic (floor `now` to the nearest hour boundary) but with a fixed 1-hour width, no
+per-app parameter.
+
+**C. Ping endpoint — port jg's exact accumulation rule**
+(`backend/events/views.py:322-361` in the jg-ferien repo, `EventActivityPingView`, full method):
+```python
+with transaction.atomic():
+    last_ping_at = (Model.objects.select_for_update()
+        .filter(scope=..., user=request.user, last_ping_at__isnull=False)
+        .order_by("-last_ping_at").values_list("last_ping_at", flat=True).first())
+    delta_seconds = 0
+    if last_ping_at is not None:
+        elapsed_seconds = (now - last_ping_at).total_seconds()
+        delta_seconds = int(max(0, min(max_credit_seconds, elapsed_seconds)))  # capped, default 45s
+    bucket, _created = Model.objects.get_or_create(scope=..., user=request.user, bucket_start=bucket_start)
+    Model.objects.filter(pk=bucket.pk).update(
+        active_seconds=F("active_seconds") + delta_seconds, last_ping_at=now)
+```
+Three details that are easy to drop and must be ported exactly: `select_for_update()` (prevents
+double-crediting from concurrent tabs), the **capped delta** rather than raw elapsed time (protects
+against clock skew / long gaps inflating `active_seconds` — jg's default cap is 45s, keep a
+configurable-with-that-default cap), and a final `.update()` with `F()` (atomic increment, not a
+read-modify-`.save()` race). The endpoint takes `content_type` (as an app-provided model label, e.g.
+`"app_label.ModelName"`) + `object_id` + the `app_key`, resolves/creates the scope row, then applies
+the above.
+
+**D. Query endpoint — genuinely new code, no dcm precedent to copy.** Confirmed by grep: dcm has
+**zero** existing `TruncHour`/`TruncDay`/`TruncMonth` usage anywhere — this is new. jg's own read
+endpoint (`backend/events/views.py:1856-1891`, `EventViewSet.activity`) is the aggregation-shape
+reference (`Count("user", distinct=True)`, `Sum("active_seconds")`) but explicitly does **not**
+truncate to a coarser granularity — it groups only by the raw stored `bucket_start`, returning one row
+per *stored* bucket regardless of requested range. The rollup itself (`django.db.models.functions
+.TruncHour/TruncDay/TruncMonth` + `.annotate(bucket=Trunc...(...)).values("bucket").annotate(
+distinct_users=Count("user", distinct=True), total_active_seconds=Sum("active_seconds"))
+.order_by("bucket")`) must be written from scratch. Reject a request for a granularity finer than the
+1-hour store (e.g. an explicit "minute" ask, if such a value were ever accepted) with a clear 400, not
+a silent fallback.
+
+**Anchoring** — implement the exact 3-fallback expression from the WO (`supplied_anchor or
+MAX(bucket_start) for the scope or now`) as one expression, not branching logic that could grow. If it
+starts growing branches, stop and drop anchoring per the WO's own instruction — do not push through.
+
+**E. Retention command** — port `events/management/commands/cleanup_activity_buckets.py` (jg-ferien,
+full file, 33 lines) near-verbatim: `--older-than-days` CLI arg (default 365), `bucket_start__lt=cutoff`
+filter, bulk `.delete()`, success message with the deleted count.
+
+**F. Permissions — the load-bearing design gap, resolve it explicitly.** Verified: jg's actual
+read-permission check (`can_manage_event(request.user, event)`, a jg-local structural helper) is
+**not** analogous to messaging's `read_receipt_detail` capability string — it is domain knowledge
+(who manages this specific event) that dcm must never learn, per this WO's own core constraint.
+**Reusing messaging's exact mechanism is not possible; reuse its *pattern* instead.** Messaging solves
+an equivalent problem (a per-app-pluggable permission decision dcm's core cannot itself make) via a
+`Protocol`-based policy object the consuming app registers:
+`MessagingPolicy` (`messaging/policy.py:27-34`) + `register_messaging_policy(app_key, policy)`
+(`policy.py:40`). **Define an equivalent `ActivityPolicy` protocol** (e.g. a single method like
+`can_read_activity(*, actor, scope) -> bool`) with a matching `register_activity_policy(app_key,
+policy)`, and gate the query endpoint on it. **Default-closed, not default-open**: if no policy is
+registered for an `app_key`, deny the read (403), do not fall through to "any authenticated user."
+`sec_reviewer` must confirm this default-closed behavior explicitly — it is the exact failure mode the
+WO warns against ("do not default it open").
+
+**URL registration** — dcm is a library; each app ships its own flat `urlpatterns` with no namespace
+(`messaging/urls.py:9-35`, `notifications/urls.py:16-26` are the precedent). Add
+`src/django_core_micha/activity/urls.py` with `path("ping/", ...)` / `path("query/", ...)`, named
+consistently (`activity-ping`, `activity-query`, matching `messaging-*`/`notification-*` naming).
+Wiring into each consuming app's own `backend/api/urls.py` is explicitly out of scope here (that is
+the per-app rewire, analogous to SHELL-1's host WOs).
+
+**Versioning** — single source `pyproject.toml:7` (`[project].version`). Release commit pattern:
+`chore(release): bump to X.Y.Z -- publishes <TICKET> (<summary>)`, touching only `pyproject.toml`
+(CHANGELOG.md entry goes in the feature commit itself, not the release commit).
+`.github/workflows/publish.yml` triggers on push to `main` touching `pyproject.toml` or
+`src/django_core_micha/**`, publishes to PyPI only if the version increased (same
+compare-against-published-version pattern as ucm's `publish.yml`).
+
 ## NON-GOALS / DO NOT TOUCH
 - No consumer-specific fields, FKs, or naming. See the constraint above.
 - Do not migrate jg's data here — that is jg's WO, which runs after this publishes.
