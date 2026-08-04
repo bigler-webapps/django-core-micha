@@ -52,6 +52,29 @@ Operator, 2026-08-04: activity scopes to **the host's structural container** —
 `object_id` + `GenericForeignKey`, with the uniqueness constraint including the app key. It is proven
 in this codebase and keeps dcm ignorant of what the object *is*.
 
+### Who decides the scope level — the app, entirely
+
+dcm provides the *mechanism* (any model can be a scope). **The consuming app decides which of its models
+that is**, and dcm never learns the answer. jg pings with an `Event`, spesix with a School, survey_app
+with a `ProjectSite`.
+
+An app may use **several** scope levels if it wants — different content types produce separate rows and
+separate charts, with no extra machinery.
+
+**But there is no cross-scope roll-up, and there must not be.** Activity recorded against Event 4 does
+**not** automatically count toward the organisation that owns Event 4: dcm cannot know that hierarchy
+without learning the consumer's domain, which is the one thing this design forbids.
+
+So an app that wants organisation-level activity has exactly two honest options, and must pick one:
+
+1. **Ping at that level too** — the client records against the organisation as its own scope. Simple,
+   and the two levels are then independent measurements.
+2. **Query per child scope and aggregate app-side** — only the app knows which events belong to which
+   organisation, so only the app can sum them.
+
+**Do not add a parent/child field, a hierarchy table, or a `roll_up_to` parameter to dcm.** If a
+consumer needs hierarchy, that is the consumer's knowledge and belongs on its side.
+
 **dcm must never learn a consumer's domain.** No `event_id`, no FK to a consumer model. If the
 implementation starts needing to know what the scope object means, the shape is wrong — stop and report.
 
@@ -108,14 +131,30 @@ Every preset returns between a dozen and fifty points, which is what keeps the c
 range. A request for a granularity **finer than the one-hour store** must fail clearly rather than
 silently return something coarser.
 
-**Anchoring (operator, 2026-08-04 — keep it simple or drop it).** A range relative to *now* is useless
-for a finished scope: a camp that ran in July shows an empty "last 7 days" when opened in August. So
-anchor the range's end at **the scope's most recent bucket with data**, falling back to now when the
-scope has none.
+### Anchoring (operator, 2026-08-04 — keep it simple or drop it)
 
-That is deliberately one rule with no per-app logic and no heuristics. **If the implementation starts
-growing cases, drop the anchoring and return ranges relative to now** — the operator gated this on it
-staying simple, and a clever version is worse than none.
+A range relative to *now* is useless for a finished scope: a camp that ran in July shows an empty
+"last 7 days" when opened in August.
+
+**Resolution order — one expression, three fallbacks:**
+
+```
+anchor = supplied_anchor  or  MAX(bucket_start) for the scope  or  now
+```
+
+1. **The app may supply an anchor date.** jg would pass the event's end date. This is the *preferred*
+   input where the app has a meaningful date, because it is stable.
+2. **Otherwise dcm derives it** from the scope's most recent bucket with data.
+3. **Otherwise now**, for a scope that has never recorded anything.
+
+**Why the app-supplied anchor matters — a flaw in the derived one.** An earlier draft of this WO used
+only the derived anchor. That drifts: the moment anyone opens the July event's page today, their own
+ping becomes the scope's most recent data and the anchor jumps to today, hiding exactly the camp week
+the viewer wanted. An event's end date does not drift. **Derive only when the app has nothing better.**
+
+This is three fallbacks in one expression, not three code paths. **If the implementation starts growing
+cases beyond that, drop anchoring entirely and return ranges relative to now** — the operator gated
+this on staying simple, and a clever version is worse than none.
 
 **E. Retention.** jg has `cleanup_activity_buckets` (`events/management/commands/`). Port it; a
 per-user-per-bucket table grows with users × time, and an app with a thousand users will notice. Make
