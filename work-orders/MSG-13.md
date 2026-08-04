@@ -108,11 +108,13 @@ missing key ships to users exactly as this one did.
 - Do not change `_recipient_language` or the per-recipient override.
 - Do not touch the in-app notification feed's own rendering beyond what shares `_render_content`; if a
   change would affect it, say so explicitly rather than discovering it in review.
-- Do not add message content to the payload without the `sec_reviewer` ruling from scope C.
+- Do not narrow scope C's ruling, and do not build a per-user preview toggle — both are out of scope.
 
 ## RISKS
-- **Scope C is the one that can do lasting harm.** An excerpt in a push cannot be recalled and is
-  visible on a locked device. Err toward less.
+- **Scope C is the one that can do lasting harm, and the operator has accepted that risk.** A push
+  cannot be recalled and is visible on a locked device. The residual risks the implementation must
+  contain are therefore the ones it controls: an untruncated body, a body built from soft-deleted
+  content, and any cross-recipient leakage. Tests 5 and 6 exist for these.
 - Adding catalogues to a library affects every consumer's translation story; a key colliding with a
   consumer's own namespace would silently change their text. Namespace dcm's keys clearly.
 - `.format(**params)` on translator-supplied strings is an injection surface for malformed
