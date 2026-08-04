@@ -7,6 +7,7 @@ from django_core_micha.invitations.views import PasswordResetConfirmView
 from django_core_micha.invitations import urls as invitations_urls
 from django_core_micha.notifications import urls as notifications_urls
 from django_core_micha.messaging import urls as messaging_urls
+from django_core_micha.activity import urls as activity_urls
 from django_core_micha.onboarding import urls as onboarding_urls
 from django_core_micha.auth.views import (
     csrf_token_view,
@@ -73,5 +74,6 @@ urlpatterns = [
     path("", include(invitations_urls)),
     path("notifications/", include(notifications_urls)),
     path("messaging/", include(messaging_urls)),
+    path("activity/", include(activity_urls)),
     path("onboarding/", include(onboarding_urls)),
 ]

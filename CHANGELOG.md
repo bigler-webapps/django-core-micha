@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.40.4] — 2026-08-04
+
+### Added
+
+New `activity` app: a shared, cross-app user-activity domain scoped generically to any consumer
+model via `content_type`/`object_id` (mirroring `messaging.MessagingScope`'s pattern), replacing the
+need for every app to build its own presence-tracking model. A ping endpoint upserts hourly
+presence buckets with a capped, concurrency-safe accumulation rule (ported from jg-ferien's
+reference implementation); a query endpoint aggregates server-side to a requested granularity
+(hour/4hour/day/month, fixed to the requested range) rather than shipping raw rows; a
+`cleanup_activity_buckets` management command enforces retention. Reading is gated by a new
+per-app-registered `ActivityPolicy` hook (mirroring `MessagingPolicy`) — fails closed: no policy
+registered for an app means every read is denied, never implicitly allowed (ACT-1).
+
 ## [2.40.2] — 2026-08-03
 
 ### Fixed

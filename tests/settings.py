@@ -8,6 +8,7 @@ INSTALLED_APPS = [
     "django_core_micha.invitations",
     "django_core_micha.notifications",
     "django_core_micha.messaging",
+    "django_core_micha.activity",
     "django_core_micha.onboarding",
     "allauth",
     "allauth.account",
