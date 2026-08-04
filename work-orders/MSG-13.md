@@ -10,6 +10,11 @@ file. Fall back to direct Claude implementation only on Codex quota / rate-limit
 Feature-level WO (Expertenchat envelope). Operator report 2026-08-04 with a screenshot from staging: a
 browser push notification whose **title and body both read `messaging.new_message`**.
 
+> **ID note:** this is dcm's own `MSG-13`. `jg-ferien` has an unrelated `MSG-13` — its **done** row for
+> the ucm Thread fetch-on-open fix (`d48cebf`, ui-core-micha 2.21.2, "Noch keine Nachrichten"). Different
+> repo, different namespace. **Always say which repo when referencing one across repos** — these two have
+> already been confused once, on 2026-08-04.
+
 ## TIER
 Tier 2 — shared-core, user-facing on every app with push enabled. Independent `reviewer` mandatory.
 **`sec_reviewer` mandatory for scope C** — the operator has ruled that message content may go into the
