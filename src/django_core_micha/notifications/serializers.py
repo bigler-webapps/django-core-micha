@@ -7,7 +7,7 @@ from .validators import is_allowed_push_endpoint
 class NotificationPreferenceSerializer(serializers.ModelSerializer):
     class Meta:
         model = NotificationPreference
-        fields = ["email_opt_in", "push_opt_in"]
+        fields = ["email_opt_in", "push_opt_in", "push_preview_opt_in"]
 
 
 class PushSubscriptionEndpointValidationMixin:

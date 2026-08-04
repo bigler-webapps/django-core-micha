@@ -1,6 +1,15 @@
+import logging
+
 import pytest
 from django.contrib.auth import get_user_model
 
+from django_core_micha.messaging.notification_texts import (
+    NEW_MESSAGE_BODY_HIDDEN_KEY,
+    NEW_MESSAGE_BODY_KEY_BY_KIND,
+    NEW_MESSAGE_TITLE_KEY,
+    NEW_MESSAGE_TITLE_UNKNOWN_SENDER_KEY,
+    register_messaging_notification_texts,
+)
 from django_core_micha.notifications import dispatch as dispatch_module
 from django_core_micha.notifications.api import notify
 from django_core_micha.notifications.models import (
@@ -8,6 +17,7 @@ from django_core_micha.notifications.models import (
     NotificationPreference,
     NotificationRecipient,
 )
+from django_core_micha.notifications.text_registry import SUPPORTED_LANGUAGES
 from django_core_micha.notifications.types import NotificationType, _REGISTRY, register_notification_type
 
 
@@ -254,3 +264,140 @@ def test_resolve_channels_still_excludes_popup_for_types_that_do_not_declare_it(
     effective = resolve_channels(ntype, user)
 
     assert "popup" not in effective
+
+
+class _FakeUser:
+    """Language resolution only needs `.contact_profile` to raise AttributeError."""
+
+
+@pytest.mark.parametrize("language", SUPPORTED_LANGUAGES)
+@pytest.mark.parametrize(
+    "key",
+    [
+        NEW_MESSAGE_TITLE_KEY,
+        NEW_MESSAGE_TITLE_UNKNOWN_SENDER_KEY,
+        NEW_MESSAGE_BODY_HIDDEN_KEY,
+        *NEW_MESSAGE_BODY_KEY_BY_KIND.values(),
+    ],
+)
+def test_every_messaging_notification_key_renders_to_a_non_key_string(key, language):
+    register_messaging_notification_texts()
+
+    rendered = dispatch_module._resolve_text_key(
+        key, language, {"sender": "Alex", "excerpt": "hi there"}, kind="body", require_registered=True
+    )
+
+    assert rendered != key
+    assert rendered
+
+
+def test_missing_catalogue_entry_logs_a_warning_naming_the_key(caplog):
+    with caplog.at_level(logging.WARNING, logger=dispatch_module.__name__):
+        rendered = dispatch_module._resolve_text_key(
+            "messaging.does_not_exist", "de", {}, kind="body", require_registered=True
+        )
+
+    assert rendered == "messaging.does_not_exist"
+    assert any("messaging.does_not_exist" in record.getMessage() for record in caplog.records)
+
+
+def test_missing_catalogue_entry_is_silent_for_a_caller_that_never_opted_into_the_registry(caplog):
+    # Every non-messaging notification type today authors its own literal title/body
+    # text directly as `title_key`/`body_key` -- see test_notification_api.py -- and
+    # must keep working with no registry involved and no warning noise.
+    with caplog.at_level(logging.WARNING, logger=dispatch_module.__name__):
+        rendered = dispatch_module._resolve_text_key("Static Title", "de", {}, kind="title")
+
+    assert rendered == "Static Title"
+    assert caplog.records == []
+
+
+def test_render_content_no_longer_returns_the_raw_key_for_a_registered_template():
+    # Regression test for MSG-13: pre-fix, `_render_content` called `gettext(title_key)`
+    # against a repo shipping no `.po` catalogue at all, so it returned the key verbatim
+    # with no exception -- this must fail against that code.
+    register_messaging_notification_texts()
+
+    title, body, _ = dispatch_module._render_content(
+        {
+            "title_key": NEW_MESSAGE_TITLE_KEY,
+            "body_key": NEW_MESSAGE_BODY_KEY_BY_KIND["chat"],
+            "require_registered_text": True,
+            "params": {},
+        },
+        user=_FakeUser(),
+        transient={"sender": "Jamie Lee", "excerpt": "see you tomorrow"},
+    )
+
+    assert title == "Jamie Lee"
+    assert body == "see you tomorrow"
+    assert title != NEW_MESSAGE_TITLE_KEY
+    assert body != NEW_MESSAGE_BODY_KEY_BY_KIND["chat"]
+
+
+@pytest.mark.django_db
+def test_push_preview_enabled_defaults_true_with_no_preference_row():
+    user = get_user_model().objects.create_user(
+        username="preview-no-row", email="preview-no-row@example.test", password="password"
+    )
+
+    assert dispatch_module._push_preview_enabled(user) is True
+
+
+@pytest.mark.django_db
+def test_push_preview_enabled_reads_the_stored_value():
+    user = get_user_model().objects.create_user(
+        username="preview-row", email="preview-row@example.test", password="password"
+    )
+    NotificationPreference.objects.create(user=user, push_preview_opt_in=False)
+
+    assert dispatch_module._push_preview_enabled(user) is False
+
+
+@pytest.mark.django_db
+def test_notificationpreference_push_preview_opt_in_defaults_true():
+    user = get_user_model().objects.create_user(
+        username="prefs-default", email="prefs-default@example.test", password="password"
+    )
+
+    preference = NotificationPreference.objects.create(user=user)
+
+    assert preference.push_preview_opt_in is True
+
+
+@pytest.mark.django_db
+def test_push_dispatcher_hides_preview_body_but_keeps_the_sender_name_in_the_title(monkeypatch):
+    register_notification_type(
+        NotificationType(
+            key="preview-off-e2e",
+            category="system",
+            mode="event",
+            resolution="user-done",
+            default_channels=["push"],
+            eligible_channels=["push"],
+        )
+    )
+    register_messaging_notification_texts()
+    user = get_user_model().objects.create_user(
+        username="preview-off-e2e", email="preview-off-e2e@example.test", password="password"
+    )
+    NotificationPreference.objects.create(user=user, push_opt_in=True, push_preview_opt_in=False)
+    sent = []
+    monkeypatch.setattr(dispatch_module, "_send_push", lambda **kwargs: sent.append(kwargs))
+
+    notify(
+        type="preview-off-e2e",
+        recipients=user,
+        content={
+            "title_key": NEW_MESSAGE_TITLE_KEY,
+            "body_key": NEW_MESSAGE_BODY_KEY_BY_KIND["chat"],
+            "hidden_body_key": NEW_MESSAGE_BODY_HIDDEN_KEY,
+            "params": {},
+        },
+        transient={"sender": "Jamie Lee", "excerpt": "sensitive body text"},
+    )
+
+    assert len(sent) == 1
+    assert sent[0]["title"] == "Jamie Lee"
+    assert "sensitive body text" not in sent[0]["body"]
+    assert "Jamie Lee" not in sent[0]["body"]

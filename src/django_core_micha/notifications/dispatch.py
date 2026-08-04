@@ -3,10 +3,9 @@ from dataclasses import dataclass
 import logging
 from typing import ClassVar, Protocol
 
-from django.utils import translation
-from django.utils.translation import gettext
-
 from .delivery import _send_email, _send_push, notification_envelope, push_to_users
+from .models import NotificationPreference
+from .text_registry import resolve_notification_text
 
 
 logger = logging.getLogger(__name__)
@@ -41,27 +40,61 @@ def _recipient_language(user) -> str:
     return language if language in {"de", "en", "fr"} else "de"
 
 
+def _resolve_text_key(key: str, language: str, params: dict, *, kind: str, require_registered: bool = False) -> str:
+    """Render one key for one language, falling back to the raw key.
+
+    A caller that opted in via ``require_registered`` (messaging's i18n keys) is
+    asserting the key MUST resolve through the text registry -- a miss there is the
+    exact MSG-13 defect (``gettext`` silently returning the msgid for a catalogue that
+    doesn't exist), so it is logged loudly. A caller that never registered anything
+    keeps the pre-existing contract: the key itself IS the format template (this is how
+    every non-messaging notification type already authors its content).
+
+    A future caller that registers real i18n keys but forgets ``require_registered_text``
+    on its content dict would reproduce the exact MSG-13 defect silently -- when adding a
+    new registry-backed notification type, set that flag.
+    """
+
+    if not key:
+        return ""
+    template = resolve_notification_text(key, language)
+    if template is None:
+        if require_registered:
+            logger.warning("Notification text key %r has no registered translation; rendering the raw key", key)
+        template = key
+    try:
+        return template.format(**params)
+    except Exception:
+        logger.warning("Notification %s rendering failed; falling back to source key", kind, exc_info=True)
+        return key
+
+
 def _render_content(content: dict, user, transient=None) -> tuple[str, str, str]:
-    """Render text for a recipient, falling back to source keys on bad translations."""
+    """Render text for a recipient. ``content["require_registered_text"]`` opts a
+    caller into the text-registry i18n path (see ``_resolve_text_key``)."""
 
     title_key = str(content.get("title_key", ""))
     body_key = str(content.get("body_key", ""))
     params = content.get("params", {})
     params = params if isinstance(params, dict) else {}
     params = {**params, **(transient or {})}
-    with translation.override(_recipient_language(user)):
-        try:
-            title = gettext(title_key).format(**params) if title_key else ""
-        except Exception:
-            logger.warning("Notification title rendering failed; falling back to source key", exc_info=True)
-            title = title_key
-        try:
-            body = gettext(body_key).format(**params) if body_key else ""
-        except Exception:
-            logger.warning("Notification body rendering failed; falling back to source key", exc_info=True)
-            body = body_key
+    require_registered = bool(content.get("require_registered_text"))
+    language = _recipient_language(user)
+    title = _resolve_text_key(title_key, language, params, kind="title", require_registered=require_registered)
+    body = _resolve_text_key(body_key, language, params, kind="body", require_registered=require_registered)
     link = content.get("link", "")
     return title, body, link if isinstance(link, str) else ""
+
+
+def _push_preview_enabled(user) -> bool:
+    """Whether ``user`` wants sender/text preview in a push body. Defaults to on --
+    an existing ``NotificationPreference`` row predating this field, or no row at all,
+    behaves as on."""
+
+    preference = NotificationPreference.objects.filter(user=user).values_list(
+        "push_preview_opt_in", flat=True
+    ).first()
+    return True if preference is None else preference
 
 
 class ChipDispatcher:
@@ -100,7 +133,11 @@ class PushDispatcher:
     channel = "push"
 
     def deliver(self, notification, recipient, ctx=None) -> DeliveryResult:
-        title, body, url = _render_content(notification.content, recipient.user, ctx)
+        content = notification.content
+        hidden_body_key = content.get("hidden_body_key")
+        if hidden_body_key and not _push_preview_enabled(recipient.user):
+            content = {**content, "body_key": hidden_body_key}
+        title, body, url = _render_content(content, recipient.user, ctx)
         _send_push(
             title=title,
             body=body,

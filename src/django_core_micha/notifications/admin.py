@@ -11,7 +11,7 @@ from .models import (
 
 @admin.register(NotificationPreference)
 class NotificationPreferenceAdmin(admin.ModelAdmin):
-    list_display = ("user", "email_opt_in", "push_opt_in")
+    list_display = ("user", "email_opt_in", "push_opt_in", "push_preview_opt_in")
 
 
 @admin.register(PushSubscription)

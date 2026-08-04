@@ -29,6 +29,10 @@ class NotificationPreference(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     email_opt_in = models.BooleanField(default=False)
     push_opt_in = models.BooleanField(default=False)
+    # Whether a push body may carry sender/message preview text (MSG-13). Default True
+    # to match the operator's ruling that preview is the baseline, not the exception --
+    # an existing row predating this field must also read as on (see dispatch._push_preview_enabled).
+    push_preview_opt_in = models.BooleanField(default=True)
 
 
 class NotificationChannelDefault(models.Model):
