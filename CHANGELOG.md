@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.40.5] — 2026-08-04
+
+### Fixed
+
+The new `activity` app (ACT-1, shipped 2.40.4) was never added to `CORE_APPS` in
+`settings_base.py`, so no consuming app could actually load it — `ActivityBucket` raised
+`RuntimeError: ... isn't in an application in INSTALLED_APPS` the moment anything imported it.
+Discovered integrating jg-ferien (ACT-3). Follows the exact same unconditional-`CORE_APPS` pattern
+as `messaging`/`notifications`/`onboarding`; no consumer-side settings change needed.
+
 ## [2.40.4] — 2026-08-04
 
 ### Added

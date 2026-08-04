@@ -109,6 +109,7 @@ CORE_APPS = [
     "django_core_micha.notifications",
     "django_core_micha.messaging",
     "django_core_micha.onboarding",
+    "django_core_micha.activity",
 ]
 
 INSTALLED_APPS = CORE_APPS.copy()
