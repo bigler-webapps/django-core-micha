@@ -29,7 +29,7 @@ class Migration(migrations.Migration):
                 ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL)),
             ],
             options={
-                'indexes': [models.Index(fields=['app_key', 'content_type', 'object_id', 'bucket_start'], name='activity_bucket_scope_range_idx')],
+                'indexes': [models.Index(fields=['app_key', 'content_type', 'object_id', 'bucket_start'], name='activity_bucket_scope_range_ix')],
                 'constraints': [models.UniqueConstraint(fields=('app_key', 'content_type', 'object_id', 'user', 'bucket_start'), name='activity_bucket_scope_user_bucket_uniq')],
             },
         ),

@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.40.6] — 2026-08-05
+
+### Fixed
+
+`ActivityBucket`'s index name `activity_bucket_scope_range_idx` (31 characters) exceeded Django's
+30-character `Index.name` limit (kept for Oracle compatibility), raising system check error E034 and
+blocking `manage.py migrate` outright for every consumer before the table could even be created.
+Renamed to `activity_bucket_scope_range_ix` (30 characters) directly in the `activity` app's
+`0001_initial` migration rather than adding a `RenameIndex` migration, since no consumer's persistent
+database had successfully applied it yet — the check always failed before the table was created.
+Discovered via jg-ferien's staging deploy failing at the system-check stage.
+
 ## [2.40.5] — 2026-08-04
 
 ### Fixed

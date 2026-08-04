@@ -54,6 +54,6 @@ class ActivityBucket(models.Model):
             # aggregation groups over exactly these fields).
             models.Index(
                 fields=["app_key", "content_type", "object_id", "bucket_start"],
-                name="activity_bucket_scope_range_idx",
+                name="activity_bucket_scope_range_ix",
             ),
         ]
