@@ -11,7 +11,7 @@ authors = [
 description = "Core utilities and settings for Django Apps"
 requires-python = ">=3.10"
 dependencies = [
-    "Django>=6.0.5",
+    "Django>=6.0.5,<6.1",
     "PyYAML",
     "psycopg2-binary",
     "filetype>=1.2,<2.0",

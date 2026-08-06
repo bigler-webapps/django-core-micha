@@ -27,6 +27,13 @@ is now a derived property computed from reach. Existing registrations must migra
 `passive` (see `messaging/notifications.py`'s migration for the pattern). No change to `notify()`'s
 signature.
 
+### Fixed
+
+Capped `Django<6.1` — Django 6.1 removed `django.utils.cache.cc_delim_re`, which the installed
+`djangorestframework` (3.16.1) still imports, breaking every DRF-touching module at import time.
+Unrelated to this release's own changes; discovered when this version's CI publish run was the
+first to actually resolve Django 6.1 fresh. Operator-approved dependency-pin fix.
+
 ## [2.40.6] — 2026-08-05
 
 ### Fixed
