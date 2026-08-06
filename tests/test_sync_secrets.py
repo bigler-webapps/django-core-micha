@@ -1,5 +1,6 @@
 """Tests for sync_secrets.py — focused on project.yaml-based env/server resolution."""
 
+import argparse
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from django_core_micha.scripts.sync_secrets import (
+    _resolve_bare_targets,
     get_proton_secret,
     get_target_scope,
     main,
@@ -449,6 +451,246 @@ def test_bare_invocation_rejects_invalid_bare_server_targets(secrets_dir, value)
 
     assert exc_info.value.code != 0
     mock_sync.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _resolve_bare_targets — precedence (SEC-3)
+# ---------------------------------------------------------------------------
+
+
+def _fake_parser():
+    """A real ArgumentParser is enough to exercise .error() -> SystemExit(2)
+    without going through the full CLI-parsing machinery."""
+    return argparse.ArgumentParser()
+
+
+def test_resolve_bare_targets_explicit_override_wins_over_infra_servers():
+    """config.bare_server_targets wins outright, even when infra.servers is also present.
+    Also asserts derived_from_infra_servers is False -- an explicit override must
+    never be treated as a derived (and therefore fatally-verified) list."""
+    config = {"bare_server_targets": ["staging", "main-prod"]}
+    project_config = {"infra": {"servers": {"main-prod": {}, "contact-prod": {}}}}
+    assert _resolve_bare_targets(_fake_parser(), config, project_config) == (
+        ["staging", "main-prod"], False,
+    )
+
+
+def test_resolve_bare_targets_derives_from_infra_servers_in_declaration_order():
+    """Absent an explicit override, infra.servers keys are used, in their declared
+    order, and flagged as derived (fatal verification applies)."""
+    config = {}
+    project_config = {
+        "infra": {"servers": {"main-prod": {}, "contact-prod": {}, "innoservice-prod": {}, "monitoring": {}}}
+    }
+    assert _resolve_bare_targets(_fake_parser(), config, project_config) == (
+        ["main-prod", "contact-prod", "innoservice-prod", "monitoring"], True,
+    )
+
+
+def test_resolve_bare_targets_falls_back_to_builtin_default_for_app_repo_shaped_project():
+    """An app-repo-shaped project.yaml (no infra key at all) resolves to the built-in
+    default unchanged — app repos must keep working exactly as they do today. Not
+    derived, so a stale built-in default only warns, never fails (see hram: a real
+    third GitHub Environment the built-in staging/production default doesn't know
+    about, and SEC-3 must not turn that into a surprise hard failure)."""
+    config = {}
+    project_config = {"environments": {"staging": {}, "production": {}}}
+    assert _resolve_bare_targets(_fake_parser(), config, project_config) == (
+        ["staging", "production"], False,
+    )
+
+
+def test_resolve_bare_targets_falls_back_to_builtin_default_when_project_config_is_none():
+    assert _resolve_bare_targets(_fake_parser(), {}, None) == (["staging", "production"], False)
+
+
+def test_resolve_bare_targets_falls_back_when_infra_present_without_servers_key():
+    """infra exists (e.g. for registry_exclude/tls_exempt_zones) but declares no
+    servers key at all -- not the same as a malformed/empty servers value, this is
+    simply "no server registry here", so it must fall through silently (and is not
+    derived)."""
+    config = {}
+    project_config = {"infra": {"registry_exclude": ["kira"]}}
+    assert _resolve_bare_targets(_fake_parser(), config, project_config) == (
+        ["staging", "production"], False,
+    )
+
+
+@pytest.mark.parametrize(
+    "servers_value",
+    [
+        [],  # not a mapping at all
+        "main-prod",  # scalar, not a mapping
+        {},  # empty mapping
+    ],
+)
+def test_resolve_bare_targets_rejects_malformed_infra_servers(servers_value):
+    """Malformed infra.servers is rejected with the same clarity as the existing
+    bare_server_targets validation, not silently ignored (which would quietly fall
+    back to the built-in default and mask the config error)."""
+    config = {}
+    project_config = {"infra": {"servers": servers_value}}
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_bare_targets(_fake_parser(), config, project_config)
+    assert exc_info.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# main() bare invocation — infra.servers derivation wired end-to-end (SEC-3)
+# ---------------------------------------------------------------------------
+
+
+def _write_infra_servers_project(tmp_path, servers):
+    lines = ["project_name: infra-app\n", "infra:\n", "  servers:\n"]
+    for name in servers:
+        lines.append(f"    {name}: {{}}\n")
+    (tmp_path / "project.yaml").write_text("".join(lines), encoding="utf-8")
+
+
+def test_bare_invocation_derives_targets_from_infra_servers(secrets_dir):
+    """No config.bare_server_targets, but project.yaml declares infra.servers ->
+    the bare loop visits every server, in declaration order."""
+    _write_infra_servers_project(secrets_dir, ["main-prod", "contact-prod", "innoservice-prod"])
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+        patch(
+            "django_core_micha.scripts.sync_secrets._fetch_github_environment_names",
+            return_value={"main-prod", "contact-prod", "innoservice-prod"},
+        ),
+    ):
+        main([])
+
+    targets = [c.kwargs["secret_target"] for c in mock_sync.call_args_list]
+    assert targets == ["main-prod", "contact-prod", "innoservice-prod"]
+
+
+# ---------------------------------------------------------------------------
+# GitHub Environment verification (SEC-3) — the half that prevents recurrence
+# ---------------------------------------------------------------------------
+
+
+def test_verify_fails_naming_an_environment_with_no_target(secrets_dir, capsys):
+    """The OPS-2 case: a real GitHub Environment (monitoring) exists but no bare-mode
+    target resolves to it -- the run must fail, naming it, not quietly cover the rest."""
+    _write_infra_servers_project(secrets_dir, ["main-prod", "contact-prod"])
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+        patch(
+            "django_core_micha.scripts.sync_secrets._fetch_github_environment_names",
+            return_value={"main-prod", "contact-prod", "monitoring"},
+        ),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+
+    assert exc_info.value.code == 2
+    assert "monitoring" in capsys.readouterr().err
+    mock_sync.assert_not_called()
+
+
+def test_verify_fails_naming_a_target_with_no_environment(secrets_dir, capsys):
+    """A typo or decommissioned server: the resolved target has no matching
+    GitHub Environment -- fail, naming it."""
+    _write_infra_servers_project(secrets_dir, ["main-prod", "ghost-server"])
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+        patch(
+            "django_core_micha.scripts.sync_secrets._fetch_github_environment_names",
+            return_value={"main-prod"},
+        ),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+
+    assert exc_info.value.code == 2
+    assert "ghost-server" in capsys.readouterr().err
+    mock_sync.assert_not_called()
+
+
+def test_verify_is_a_no_op_when_resolved_targets_match_environments_exactly(secrets_dir):
+    """The steady-state case: derivation and reality agree -- re-running is a no-op
+    in effect, the sync proceeds for every target."""
+    _write_infra_servers_project(secrets_dir, ["main-prod", "contact-prod"])
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+        patch(
+            "django_core_micha.scripts.sync_secrets._fetch_github_environment_names",
+            return_value={"main-prod", "contact-prod"},
+        ),
+    ):
+        main([])
+
+    assert mock_sync.call_count == 2
+
+
+def test_verify_warns_and_proceeds_when_environments_cannot_be_fetched(secrets_dir, capsys):
+    """gh missing/unauthenticated/API error must not block the routine -- a transient
+    tooling gap is a warning, not a failure."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+        patch(
+            "django_core_micha.scripts.sync_secrets._fetch_github_environment_names",
+            return_value=None,
+        ),
+    ):
+        main([])
+
+    assert mock_sync.call_count == 2  # built-in default: staging, production
+    assert "could not list GitHub Environments" in capsys.readouterr().out
+
+
+def test_verify_warns_but_does_not_fail_a_mismatch_on_the_builtin_default(secrets_dir, capsys):
+    """Regression test for a real discovery during review: a consumer relying on the
+    built-in staging/production default (no infra.servers, no explicit override --
+    the overwhelming majority of app repos, e.g. hram) can have a real GitHub
+    Environment the default doesn't know about (hram has a third one, `hram-webapp`).
+    SEC-3 must not turn that pre-existing, out-of-scope gap into a surprise hard
+    failure for repos this WO never touched -- only a derived (infra.servers) list
+    is fatal on mismatch; everything else warns loudly and proceeds."""
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+        patch(
+            "django_core_micha.scripts.sync_secrets._fetch_github_environment_names",
+            return_value={"staging", "production", "hram-webapp"},
+        ),
+    ):
+        main([])  # no SystemExit
+
+    assert mock_sync.call_count == 2  # staging, production still both synced
+    assert "hram-webapp" in capsys.readouterr().out
+
+
+def test_verify_warns_but_does_not_fail_a_mismatch_on_an_explicit_override(secrets_dir, capsys):
+    """Same as above, for the explicit config.bare_server_targets branch: a mismatch
+    warns, never fails -- an existing consumer's already-working override must not
+    be broken by verification alone."""
+    (secrets_dir / "secrets.yaml").write_text(
+        "config:\n"
+        "  target_repo: org/repo\n"
+        "  bare_server_targets: [staging, main-prod]\n"
+        "secrets:\n"
+        "  MY_SECRET:\n"
+        "    source: proton://Vault/Item/field\n",
+        encoding="utf-8",
+    )
+    with (
+        patch("django_core_micha.scripts.sync_secrets.check_dependencies", return_value=True),
+        patch("django_core_micha.scripts.sync_secrets.sync_github") as mock_sync,
+        patch(
+            "django_core_micha.scripts.sync_secrets._fetch_github_environment_names",
+            return_value={"staging", "main-prod", "monitoring"},
+        ),
+    ):
+        main([])  # no SystemExit
+
+    assert mock_sync.call_count == 2
+    assert "monitoring" in capsys.readouterr().out
 
 
 def test_explicit_server_secret_target_staging_unchanged(secrets_dir):

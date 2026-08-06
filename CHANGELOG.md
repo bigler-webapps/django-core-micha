@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.41.1] — 2026-08-06
+
+### Fixed
+
+SEC-3: a bare `sync-secrets` run resolved its GitHub-Environment target list from a
+hand-maintained `config.bare_server_targets` override, which silently drifted from the
+estate's real environments (root cause of OPS-2: the `monitoring` environment held 0
+secrets against 32-38 elsewhere, `DOMAIN_KUMA` was never populated, `status.bigler-consult.ch`
+404'd). Bare-mode target resolution now has an explicit precedence — `config.bare_server_targets`
+if set, else `project.yaml infra.servers` keys in declaration order, else the built-in
+`staging`/`production` default — and every bare run now verifies the resolved targets against the
+repo's actual GitHub Environments (`gh api repos/{repo}/environments`), naming the difference in
+both directions (an environment with no target, or a target with no environment) instead of
+quietly covering a subset. A mismatch is **fatal** only when the target list was *derived* from
+`infra.servers` — a derived registry can itself be incomplete, which is the exact bug class OPS-2
+was. A mismatch on an explicit override or the built-in default is a **loud warning, not a
+failure**: those reflect an existing consumer's current, already-working configuration (e.g. hram
+has a real third GitHub Environment, `hram-webapp`, its default doesn't know about), and this fix
+must not turn that kind of pre-existing, out-of-scope drift into a surprise hard failure for a repo
+SEC-3 never touched. Unable to fetch the environment list at all (gh missing/unauthenticated/API
+error) is always a warning — a transient tooling gap must not block the routine either way.
+
 ## [2.41.0] — 2026-08-06
 
 ### Added

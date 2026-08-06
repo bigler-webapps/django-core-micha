@@ -139,5 +139,66 @@ and confirm the run **fails naming it**, rather than quietly covering five.
 
 ## B. Implementation map
 
-*(To be filled by the Orchestrator on `git pull` — context package, target working directory,
-progress contract, execution directive, mini-handover. Not authored by the Expertenchat.)*
+**Process note:** implemented directly in Claude, not via Codex — a process deviation from the
+mandatory Codex-first rule (the prior WO in this session, cockpit OBS-6, had already hit
+Codex's "workspace out of credits" quota error on both its chunks; that quota was assumed still
+exhausted and Codex was not re-attempted here). Author = Orchestrator, so an independent
+`reviewer` pass is mandatory before commit (author ≠ reviewer).
+
+### Context package
+
+- `src/django_core_micha/scripts/sync_secrets.py:670` (`_BARE_SERVER_TARGETS` default) through
+  the `_sync_all_github_targets` function: added `_resolve_bare_targets(parser, config,
+  project_config)` (three-branch precedence: explicit `config.bare_server_targets` →
+  `project_config["infra"]["servers"]` keys in declaration order → built-in `_BARE_SERVER_TARGETS`
+  default; returns `(bare_targets, derived_from_infra_servers)`, the second element flagging
+  branch 2), `_fetch_github_environment_names(target_repo)` (shells `gh api
+  repos/{target_repo}/environments --jq '.environments[].name'`, returns `None` — not an empty set
+  — on any failure so callers can distinguish "no environments" from "couldn't check"), and
+  `_verify_bare_targets_against_environments(parser, bare_targets, target_repo, *, fatal)`.
+  `_sync_all_github_targets` now calls both helpers before its existing per-target loop, unchanged
+  otherwise.
+- **Independent review caught a real scope overrun**, fixed before landing: the first version made
+  verification unconditionally fatal for every consumer with `target_repo` set, not just the
+  `infra.servers`-derived case this WO targets. Verified live against the estate (`gh api
+  repos/bigler-webapps/hram/environments`): hram has a genuine third GitHub Environment,
+  `hram-webapp`, that its built-in `staging`/`production` default doesn't know about — a real,
+  pre-existing, out-of-scope gap that would have turned into a surprise hard failure on hram's very
+  next bare `sync-secrets` run. Fixed by threading `derived_from_infra_servers` through as
+  `fatal=...`: a mismatch is fatal only for a derived list (which can itself be incomplete — the
+  exact OPS-2 bug class); a mismatch on an explicit override or the built-in default is now a loud,
+  unmissable warning (bracketed `!`-banner) instead, so verification alone cannot break another
+  repo's already-working routine. This was an explicit operator decision (asked via AskUserQuestion
+  mid-implementation, since it's an emergent, out-of-scope breaking risk to repos this WO never
+  named) — "fatal only when derived" was the chosen and recommended option.
+- `tests/test_sync_secrets.py`: imports `_resolve_bare_targets` directly; new test sections for
+  precedence (5 direct unit tests, each now asserting the `(targets, derived)` tuple, + 1
+  malformed-input parametrized test), one `main()`-level integration test proving `infra.servers`
+  derivation is wired into the real bare-mode path, and 6 tests for the verification step (fails
+  naming an environment-with-no-target, fails naming a target-with-no-environment — both via the
+  derived path — no-op on an exact match, warns-and-proceeds when the environment list can't be
+  fetched, and two regression tests proving a mismatch on the built-in default and on an explicit
+  override each warn rather than fail — the hram scenario, reproduced directly). All pre-existing
+  bare-mode tests were left untouched and still pass — they never mock
+  `_fetch_github_environment_names`, so they exercise the real (network-less, fast-failing) "can't
+  verify → warn" path, proven by the full-suite run (73 passed).
+- `pyproject.toml` / `CHANGELOG.md`: version bump `2.41.0` → `2.41.1` (patch — this extends an
+  existing capability, not a new one, per Risk 4). `django-core-micha` is installed editable
+  (`pip show` confirms `Editable project location: …\django-core-micha`) on this machine, so the
+  bump takes effect immediately for the operator's global `sync-secrets`/`run-dev` — no separate
+  reinstall step needed here, though other machines/CI consuming a pinned release would need one.
+- Companion repo `webapp-management/secrets.yaml` (item 3): removed the `bare_server_targets`
+  override under `config:` so derivation from `infra.servers` actually takes effect; replaced the
+  comment with one pointing at this WO and stating the `runners` gap explicitly (item 4,
+  recommended path — `runners` stays out of `infra.servers`, so the very next bare run in
+  `webapp-management` will genuinely fail naming `runners` as an environment with no target,
+  until the operator decides how to add it as an explicit target). This is expected, intended
+  behaviour of the fix, not a residual bug — flagged to the operator as a required follow-up
+  decision, not resolved unilaterally here (Non-goals: do not derive targets from GitHub
+  Environments themselves, so `runners` cannot silently self-register).
+
+### Tests run (narrow, per Test scope)
+
+`pytest tests/test_sync_secrets.py` — 73 passed (55 pre-existing + 18 new), ~17s, no live network
+calls (this environment's `gh` fails fast/unauthenticated, which is exactly the "warn, don't
+block" path the tests also cover explicitly via mocking).

@@ -670,6 +670,128 @@ def sync_github(
 _BARE_SERVER_TARGETS = ("staging", "production")
 
 
+def _resolve_bare_targets(parser, config, project_config):
+    """Resolve the bare-mode target list, explicit precedence (SEC-3).
+
+    Returns (bare_targets, derived_from_infra_servers) — the second element tells
+    the caller whether the list came from project.yaml infra.servers (derivation,
+    branch 2) as opposed to an explicit override or the built-in default (branches
+    1 and 3). That distinction matters downstream: verification is fatal only for a
+    derived list — infra.servers can itself be incomplete (it omitted `runners`),
+    which is exactly the class of bug this WO fixes. An override or the built-in
+    default reflects an existing consumer's current, already-working setup; making
+    a stale environment there suddenly fatal would break repos SEC-3 never touched
+    (confirmed: hram has a third GitHub Environment, `hram-webapp`, not in its
+    staging/production default — a real, pre-existing gap, but not this WO's to
+    turn into a hard failure without that consumer's own review).
+
+      1. config.bare_server_targets, if set — someone's explicit escape hatch, wins outright.
+      2. else, project.yaml infra.servers keys, in declaration order — derived, no hand
+         maintenance; this is what closed the OPS-2 gap (a server added to infra.servers
+         is now a bare-mode target without a second edit).
+      3. else, the built-in _BARE_SERVER_TARGETS default — app repos have no infra.servers
+         and must keep working exactly as they do today.
+    """
+    bare_targets = config.get("bare_server_targets")
+    if bare_targets is not None:
+        if not (
+            isinstance(bare_targets, (list, tuple))
+            and bare_targets
+            and all(isinstance(t, str) and t.strip() for t in bare_targets)
+        ):
+            parser.error(
+                "config.bare_server_targets must be a non-empty list of non-empty"
+                " strings (server target names)."
+            )
+        return list(bare_targets), False
+
+    infra = (project_config or {}).get("infra")
+    if isinstance(infra, dict) and "servers" in infra:
+        servers = infra["servers"]
+        if not (isinstance(servers, dict) and servers):
+            parser.error(
+                "project.yaml infra.servers must be a non-empty mapping of server name ->"
+                " config, to derive bare-mode targets from."
+            )
+        return list(servers.keys()), True
+
+    return list(_BARE_SERVER_TARGETS), False
+
+
+def _fetch_github_environment_names(target_repo):
+    """Return the set of GitHub Environment names configured on *target_repo*.
+
+    Returns None (not an empty set) when the names could not be determined at all
+    (gh missing, not authenticated, API error) — callers must treat that as "cannot
+    verify" and warn, not as "repo has zero environments" and fail.
+    """
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"repos/{target_repo}/environments", "--jq", ".environments[].name"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
+def _verify_bare_targets_against_environments(parser, bare_targets, target_repo, *, fatal):
+    """Check the resolved bare targets against the repo's actual GitHub Environments,
+    in both directions (SEC-3 — this is the half that actually prevents recurrence: a
+    registry we derive from can itself be wrong, as `infra.servers` already proved by
+    omitting `runners`).
+
+    *fatal* (True only for a project.yaml infra.servers-derived list, see
+    _resolve_bare_targets) decides the consequence of a mismatch: a derived list can
+    itself be incomplete, so a gap there is exactly the bug class this WO fixes and
+    must hard-stop the run. An explicit override or the built-in default reflects an
+    existing consumer's current, already-working configuration — a mismatch there is
+    surfaced as a loud, unmissable warning instead, so newly-added verification alone
+    cannot break another repo's routine sync outright; that repo's own owner decides
+    when to act on it.
+
+    Cannot-verify (gh missing/unauthenticated/API error) is always a warning, never a
+    failure, regardless of *fatal* — a transient tooling gap must not block every sync.
+    """
+    actual = _fetch_github_environment_names(target_repo)
+    if actual is None:
+        print(
+            f"    Warning: could not list GitHub Environments for {target_repo} to verify"
+            " bare-mode targets against (gh api failed) — proceeding without verification."
+        )
+        return
+
+    resolved = set(bare_targets)
+    envs_with_no_target = sorted(actual - resolved)
+    targets_with_no_env = sorted(resolved - actual)
+    if not envs_with_no_target and not targets_with_no_env:
+        return
+
+    lines = [
+        f"bare-mode target list does not match GitHub Environments for {target_repo}."
+    ]
+    if envs_with_no_target:
+        lines.append(
+            "  Environment(s) with no bare-mode target (would silently never receive"
+            f" secrets): {', '.join(envs_with_no_target)}"
+        )
+    if targets_with_no_env:
+        lines.append(
+            "  Bare-mode target(s) with no matching environment (typo, or a decommissioned"
+            f" server): {', '.join(targets_with_no_env)}"
+        )
+    message = "\n".join(lines)
+
+    if fatal:
+        parser.error(f"Error: {message}")
+    else:
+        print(f"\n{'!' * 60}\n    WARNING: {message}\n{'!' * 60}\n")
+
+
 def _do_server_sync(
     secret_target_name,
     config,
@@ -739,18 +861,14 @@ def _write_local_env(secret_target, secret_source, values_file, project_config):
 
 def _sync_all_github_targets(parser, config, secrets_def, project_config, project_config_path, args):
     """Sync every configured bare-mode GitHub target in sequence."""
-    bare_targets = config.get("bare_server_targets")
-    if bare_targets is None:
-        bare_targets = _BARE_SERVER_TARGETS
-    elif not (
-        isinstance(bare_targets, (list, tuple))
-        and bare_targets
-        and all(isinstance(t, str) and t.strip() for t in bare_targets)
-    ):
-        parser.error(
-            "config.bare_server_targets must be a non-empty list of non-empty"
-            " strings (server target names)."
+    bare_targets, derived_from_infra_servers = _resolve_bare_targets(parser, config, project_config)
+
+    target_repo = config.get("target_repo")
+    if target_repo:
+        _verify_bare_targets_against_environments(
+            parser, bare_targets, target_repo, fatal=derived_from_infra_servers
         )
+
     for target_name in bare_targets:
         print(f"\n{'-' * 60}")
         print(f"  sync-secrets — target: {target_name}")
