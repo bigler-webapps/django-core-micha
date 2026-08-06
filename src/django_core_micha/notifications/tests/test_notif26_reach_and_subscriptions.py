@@ -220,6 +220,31 @@ def test_preferences_endpoint_lists_only_registered_subscribable_categories():
 
 
 @pytest.mark.django_db
+def test_notification_types_report_a_resolved_label_falling_back_to_category():
+    register_notification_text("NotificationType.ops.labeled.LABEL", {"de": "Betriebs-Ereignis", "en": "Ops event"})
+    labeled = NotificationType(
+        key="ops.labeled", category="ops", mode="event", resolution="user-done",
+        active=True, passive=False, label_key="NotificationType.ops.labeled.LABEL",
+    )
+    unlabeled = make_active_type("ops.unlabeled")
+    register_notification_type(labeled)
+    register_notification_type(unlabeled)
+    user = make_user("label-fallback-user")
+    NotificationPreference.objects.create(user=user, email_opt_in=True)
+
+    rows = {
+        row["key"]: row for row in NotificationPreferenceSerializer(
+            NotificationPreference.objects.get(user=user)
+        ).data["notification_types"]
+    }
+
+    # _recipient_language defaults to "de" for a user with no contact_profile.
+    assert rows["ops.labeled"]["label"] == "Betriebs-Ereignis"
+    # No label_key registered -> falls back to the raw category, never a blank/None.
+    assert rows["ops.unlabeled"]["label"] == "ops"
+
+
+@pytest.mark.django_db
 def test_resolve_category_subscribers_ignores_channel_overrides_and_requires_explicit_opt_in():
     subscribed = make_user("resolver-subscribed")
     not_subscribed = make_user("resolver-not-subscribed")

@@ -66,6 +66,7 @@ def test_notify_message_recipe_matches_jg_precedent(domain):
     assert notification_type.eligible_channels == ["email", "push"]
     assert "chip" not in notification_type.eligible_channels
     assert notification_type.feed_visible is False
+    assert notification_type.label_key == "messaging.new_message.settings_label"
 
     message, _ = send_message(actor=users[0], conversation=conversation, body="sensitive body", title="sensitive title")
     before = timezone.now()

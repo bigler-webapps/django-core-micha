@@ -22,6 +22,11 @@ NEW_MESSAGE_BODY_KEY_BY_KIND = {
 
 NEW_MESSAGE_BODY_HIDDEN_KEY = "messaging.new_message.body.hidden"
 
+# NOTIF-26 scope H: the settings-surface label for this type, distinct from the
+# per-message title/body templates above (those render one delivered notification;
+# this names the notification TYPE itself in NotificationSettings' reach list).
+NEW_MESSAGE_SETTINGS_LABEL_KEY = "messaging.new_message.settings_label"
+
 _REGISTERED = False
 
 
@@ -32,6 +37,9 @@ def register_messaging_notification_texts() -> None:
     if _REGISTERED:
         return
 
+    register_notification_text(NEW_MESSAGE_SETTINGS_LABEL_KEY, {
+        "de": "Neue Nachrichten", "en": "New messages", "fr": "Nouveaux messages",
+    })
     register_notification_text(NEW_MESSAGE_TITLE_KEY, {"de": "{sender}", "en": "{sender}", "fr": "{sender}"})
     register_notification_text(NEW_MESSAGE_TITLE_UNKNOWN_SENDER_KEY, {
         "de": "Unbekannter Absender", "en": "Unknown sender", "fr": "Expéditeur inconnu",

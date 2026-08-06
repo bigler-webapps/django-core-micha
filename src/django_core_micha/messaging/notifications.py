@@ -9,6 +9,7 @@ from .crypto import decrypt_text
 from .notification_texts import (
     NEW_MESSAGE_BODY_HIDDEN_KEY,
     NEW_MESSAGE_BODY_KEY_BY_KIND,
+    NEW_MESSAGE_SETTINGS_LABEL_KEY,
     NEW_MESSAGE_TITLE_KEY,
     NEW_MESSAGE_TITLE_UNKNOWN_SENDER_KEY,
     register_messaging_notification_texts,
@@ -39,6 +40,7 @@ def register_messaging_notification_type(app_key):
             # active-only correctly derives to feed-hidden, matching the previous
             # explicit feed_visible=False.
             active=True, passive=False,
+            label_key=NEW_MESSAGE_SETTINGS_LABEL_KEY,
         )
         register_notification_type(notification_type)
         return notification_type

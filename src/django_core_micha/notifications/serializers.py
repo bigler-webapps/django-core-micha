@@ -27,14 +27,17 @@ class NotificationPreferenceSerializer(serializers.ModelSerializer):
 
     def get_notification_types(self, preference):
         user = preference.user
+        language = _recipient_language(user)
         rows = []
         for key, ntype in iter_registered_event_types():
             has_active_channel = (
                 bool(resolve_channels(ntype, user, override=["email", "push"])) if ntype.active else None
             )
+            label = (resolve_notification_text(ntype.label_key, language) if ntype.label_key else None) or ntype.category
             rows.append({
                 "key": key,
                 "category": ntype.category,
+                "label": label,
                 "active": ntype.active,
                 "passive": ntype.passive,
                 "has_active_channel": has_active_channel,

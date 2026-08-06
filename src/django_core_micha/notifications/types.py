@@ -37,6 +37,12 @@ class NotificationType:
     persist_until_done: bool = False
     critical: bool = False
     window: dict | None = None
+    # A text-registry key resolvable to a human-readable settings-surface label (see
+    # text_registry.resolve_notification_text). None falls back to the raw category in
+    # the preferences/ response -- registering one is optional but required for the
+    # reach axis to actually be legible to the user in ui-core-micha's
+    # NotificationSettings (NOTIF-26 scope H).
+    label_key: str | None = None
 
     def __post_init__(self):
         if self.mode not in VALID_NOTIFICATION_MODES:
