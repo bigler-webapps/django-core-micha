@@ -7,6 +7,7 @@ from django.utils import timezone
 from .dispatch import dispatch
 from .models import Notification, NotificationDelivery, NotificationRecipient
 from .router import resolve_channels
+from .subscriptions import resolve_category_subscribers
 from .types import get_notification_type
 
 
@@ -103,3 +104,44 @@ def notify(
                 delivery.save(update_fields=["status"])
 
     return notification
+
+
+def notify_subscribers(
+    *, type, category=None, urgency="normal", content, content_is_shareable=False,
+    notifiable=None, channels=None, transient=None, expires_at=None,
+) -> Notification | None:
+    """``notify()`` for a category resolved by subscription instead of an explicit
+    recipient list (NOTIF-26 scope D).
+
+    Resolves recipients from ``resolve_category_subscribers`` BEFORE anything is
+    authored, and returns ``None`` without creating a ``Notification`` row when nobody
+    subscribes (scope F) -- ``notify()`` itself authors its row before its recipient
+    loop, so the empty-subscriber short-circuit has to happen one level up, here,
+    rather than inside ``notify()``.
+
+    ``content_is_shareable`` is a required, fail-closed acknowledgement (scope
+    privacy risk): one ``content`` payload is durable and visible, unfiltered, to every
+    subscriber via the canonical feed -- there is no per-recipient content today. A
+    call site must explicitly confirm it carries nothing beyond what a wider,
+    self-selected audience should see before this will deliver at all.
+    """
+
+    if not content_is_shareable:
+        raise ValueError(
+            "notify_subscribers() delivers one shared `content` payload to every "
+            "subscriber of the category; pass content_is_shareable=True only after "
+            "confirming content carries nothing the emitting call site would not want "
+            "a wider, self-selected audience to see."
+        )
+
+    ntype = get_notification_type(type)
+    resolved_category = category or ntype.category
+    recipients = list(resolve_category_subscribers(resolved_category))
+    if not recipients:
+        return None
+
+    return notify(
+        type=type, recipients=recipients, category=category, urgency=urgency,
+        content=content, notifiable=notifiable, channels=channels, transient=transient,
+        expires_at=expires_at,
+    )

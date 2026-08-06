@@ -240,3 +240,148 @@ to True and would broadcast to everyone). jg's messaging type is registered in S
 (src/django_core_micha/messaging/notifications.py:34-38), not in jg-ferien/backend/events/. Then
 follow orchestrate-codex.
 ```
+
+---
+
+## PART B — IMPLEMENTATION MAP (Orchestrator, filled 2026-08-06)
+
+Three sequenced Codex runs, one per repo (cross-repo, cannot share one `cwd`). Run 2 depends on
+Run 1's finalized API contract; Run 3 depends on both packages' versions being bumped (not
+necessarily yet published) so its pin bump has a real target.
+
+### Context package — verified against landed code 2026-08-06
+
+**`src/django_core_micha/notifications/types.py`** (53 lines) — `NotificationType` is a
+`@dataclass` with `default_channels: list[str]` / `eligible_channels: list[str]`
+(lines 16-17), `feed_visible: bool = True` (line 24, already has a docstring-style comment
+distinguishing it from the todo registry). `_REGISTRY: dict[str, NotificationType]` module-level
+dict (line 31); `register_notification_type`/`get_notification_type`/`iter_feed_hidden_type_keys`
+(lines 34-52) are the only public surface. This is where the reach declaration replaces
+`default_channels`/`eligible_channels` — **or coexists during migration**, implementer's call, but
+by end-of-WO no registration site should pass a raw channel list to express reach.
+
+**`src/django_core_micha/notifications/router.py`** (33 lines, NOT explicitly named in the
+Envelope but load-bearing — read it) — `resolve_channels(ntype, user, override=None)` (line 14) is
+the ONLY place `default_channels`/`eligible_channels` are consumed:
+`base = override if override is not None else ntype.default_channels` (line 23),
+`eligible = [c for c in base if c in ntype.eligible_channels]` (line 24), then per-channel
+`is_channel_enabled` + critical-force check (lines 26-31). Scope C's bounded fallback
+(active→passive only if the type declares passive) belongs here: today `resolve_channels` has no
+concept of "no active channel available" degrading anywhere — that branch must be added. The
+per-call `channels=` override (`api.py:92`, NON-GOALS line 161) narrows `base`, so it must keep
+working against whatever replaces `default_channels`.
+
+**`src/django_core_micha/notifications/prefs.py`** (55 lines) — `is_channel_enabled(user,
+category, channel)` (line 9), 4-tier precedence, bottom tier at lines 52-54: `chip/todo/popup`
+default `True`, `email/push` default `False`. **Do not touch this function's precedence order** —
+the subscription resolver (scope D) must be a NEW function that never calls this one, per the WO's
+explicit prohibition.
+
+**`src/django_core_micha/notifications/api.py`** (106 lines) — `notify(...)` (line 68) authors the
+`Notification` row via `_get_notification_with_retry` at lines 81-88, THEN loops
+`_normalize_recipients(recipients)` at line 90. Scope F's "resolve first, return early" must sit
+between the type lookup (line 74) and the row-authoring call (line 81) — if the category is
+subscription-driven and resolves to zero recipients, return before line 81 without creating the
+`Notification`. Scope D's resolver output must be able to substitute for or extend the `recipients`
+kwarg for subscription-category calls — decide whether that's a new `notify()` kwarg or a
+resolve-then-pass-recipients helper the call site uses; either way, `recipients` stays required
+(NON-GOALS line 160: no signature change beyond what the axes strictly require).
+
+**`src/django_core_micha/notifications/models.py`** — `NotificationCategoryChannelPreference`
+(lines 65-96): `user, category, channel, enabled`, unique on `(user, category, channel)`, no
+discriminator field. Scope E needs either a new boolean/enum field here (e.g. distinguishing
+"override" vs "subscription" rows) or a separate model — **either path is `[approval schema]`,
+stop and ask the operator before writing the migration**, per the WO. `Notification.urgency`
+(line 172) and `NotificationChannelDefault`/`NotificationPreference` (lines 26-62) are untouched.
+
+**`src/django_core_micha/notifications/views.py`** — `CanonicalInboxView`/`CanonicalUnreadCountView`
+(lines 150-213) both `.exclude(notification__notification_type__in=iter_feed_hidden_type_keys())`
+(lines 160, 210) — scope B's target. `NotificationPreferenceView` (lines 36-42) only serializes the
+legacy `NotificationPreference` row via `NotificationPreferenceSerializer` (email/push/preview
+booleans) — it has no category surface today. Scope G's categories-in-`preferences/` and scope D's
+subscription toggle need either new fields on this view+serializer or a sibling endpoint; either
+way it must report only the CURRENT APP's registered categories (read `_REGISTRY` filtered to
+`category` values in-process — no cross-app leak) with a label key resolvable through the existing
+text registry (see `messaging/notification_texts.py` for the pattern already in use).
+
+**`src/django_core_micha/notifications/urls.py`** (27 lines) — `preferences/` at line 17 binds to
+`NotificationPreferenceView`. Add any new path(s) here (e.g. `preferences/categories/` or fold into
+the existing response) — either is the implementer's call.
+
+**`src/django_core_micha/notifications/serializers.py`** (57 lines) — `NotificationPreferenceSerializer`
+(lines 7-10) is `email_opt_in/push_opt_in/push_preview_opt_in` only. A new serializer (or extension)
+is needed for categories + subscription state + the scope-C "no active channel configured" signal
+per type. `urgency` passthrough at line 38 (`CanonicalNotificationSerializer`) is untouched.
+
+**`src/django_core_micha/messaging/notifications.py`** (115 lines) —
+`register_messaging_notification_type(app_key)` (line 23) builds
+`NotificationType(key=..., default_channels=["email","push"], eligible_channels=["email","push"],
+feed_visible=False)` at lines 34-38. This is the "active only" case (no `chip` in either list) AND
+independently `feed_visible=False` — after scope B's reconciliation this type's `feed_visible` may
+become derived rather than separately declared; if so, this call site's `feed_visible=False` kwarg
+either goes away or must still evaluate to hidden. This file is SHARED CODE (jg is merely the only
+caller today, via `jg-ferien/backend/messaging/apps.py:19`, which passes no channel args and needs
+NO changes) — treat any signature change here as a wider-blast-radius edit than "migrate jg".
+
+**Do-not-touch confirmed by inspection:** `notifications/todo/registry.py` (74 lines) is a fully
+separate registry (`_PROVIDERS`/`_CONFIGS`/`_CANDIDATE_USERS`) with its own lifecycle fields — no
+reach/channel concept exists there and none should be added.
+
+**Existing tests to extend/adapt** (`src/django_core_micha/notifications/tests/`):
+`test_notification_api.py` (router/notify mechanics — `test_router_override_is_narrowed_to_eligible_channels`,
+`test_router_respects_opt_out_but_keeps_chip`, `test_critical_router_forces_available_default_but_not_unavailable_push`),
+`test_canonical_notification_api.py::test_feed_visible_policy_hides_only_explicitly_hidden_registered_types`
+(scope B's existing pin), `test_preference_matrix.py` (precedence tiers — do not break),
+`test_dispatch.py::test_resolve_channels_still_excludes_popup_for_types_that_do_not_declare_it`.
+New test files/functions per the WO's "REQUIRED TESTS" list (1-9 land in dcm; 4's cockpit half and
+messaging half both touch dcm-visible fixtures — coordinate with the cockpit run).
+
+**Versioning:** `pyproject.toml` currently `2.40.6`. This is additive-shaped scope-A/B/C/D/E/F/G
+work — a minor bump unless scope E's `[approval schema]` model change is deemed to warrant more;
+implementer proposes, Orchestrator confirms before the version-bump commit. `CHANGELOG.md` style:
+`## [x.y.z] — YYYY-MM-DD` then `### Added`/`### Changed` prose citing NOTIF-26.
+
+### RUN 1 — django-core-micha (cwd: `C:\Users\biglmi\Documents\webapps\django-core-micha`)
+
+Scope: A, B, C, D, E (stop for `[approval schema]` if a model/field change proves necessary — do
+NOT write the migration until the operator confirms), F, G, and the shared messaging registration
+migration (scope I, `messaging/notifications.py` only — NOT jg-ferien, which needs no change).
+Required tests: 1, 2, 3, 5, 6, 7, 8, 9, and the messaging-type half of 4 (jg's type resolves
+identically before/after). Do NOT touch `todo/registry.py`, `urgency`, `NotificationChannelDefault`,
+or `NotificationPreference`. Do NOT bump `pyproject.toml`/`CHANGELOG.md` yet — that happens once at
+Orchestrator finalize, after review, alongside Run 3's pin-bump target is known.
+
+### RUN 2 — ui-core-micha (cwd: `C:\Users\biglmi\Documents\webapps\ui-core-micha`)
+
+Scope: H only — rebuild `src/notifications/NotificationSettings.jsx` (currently 221 lines, zero
+props, fetches via `getNotificationPreferences()`/patches via `patchNotificationPreferences()` from
+`./api`, renders exactly Email + Push/Push-preview toggle blocks). Must consume Run 1's FINAL
+`preferences/` response shape (the Orchestrator pastes the actual finalized fields into this run's
+prompt after Run 1 lands — do not guess the contract). Zero new props (Pattern 3,
+`webapp-management/SHARED_CAPABILITIES.md` — ucm owns everything). `NotificationBell.jsx` and
+`NotificationsProvider.jsx` need NO changes (verified: both are channel/category-agnostic, treat
+the feed as opaque). Required test: 10. Do NOT bump `package.json` yet.
+
+### RUN 3 — cockpit (cwd: `C:\Users\biglmi\Documents\webapps\cockpit`)
+
+Scope: scope I bullet 1 — migrate `backend/notify/apps.py`'s six-type `policies` tuple (lines
+81-88 in the file as it stands: three "both" types `deploy_failed`/`workflow_failed`/`monitor_down`
+at `["chip","push","email"]`, three "passive only" types `deploy_recovered`/`workflow_recovered`/
+`monitor_recovered` at `["chip"]`, shared `eligible_channels=["chip","push","email"]`) to the new
+reach declaration at parity. Update `backend/tests/test_notifications.py`'s
+`test_status_notification_type_policies` (lines 76-96, currently asserts `default_channels`/
+`eligible_channels` as raw lists — parametrize/rewrite to assert resolved channel sets per user
+state instead, matching the WO's requirement-4 framing). Bump `backend/requirements.txt`'s
+`django-core-micha` pin (currently stale at `2.40.3`, three releases behind) and
+`frontend/package.json`'s `@micha.bigler/ui-core-micha` pin (currently `2.26.4`, already current —
+recheck) to the versions Run 1/Run 2 will publish. Lands on cockpit's `develop`. Cockpit's own
+scoped tests must stay green.
+
+### Sequencing / progress contract (all three runs)
+
+Each Codex invocation follows the standard `PLAN:` / `PROGRESS: [n/total] <action>` / `RESULT:
+DONE|BLOCKED <reason>` contract (see `references/codex-wo-template.md`). None of the three runs
+commits — Orchestrator reviews the complete assembled diff (all three repos) together, runs the
+independent `reviewer` + concurrent `ui_reviewer` (ui_reviewer scoped to the ucm + cockpit-frontend
+diff), runs each repo's affected-tests gate, THEN bumps both packages' versions/CHANGELOGs and
+commits all three repos in the same finalize pass.

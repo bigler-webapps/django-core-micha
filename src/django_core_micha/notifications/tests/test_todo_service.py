@@ -26,7 +26,6 @@ def clear_registries():
 def register_provider(provider, config):
     register_notification_type(NotificationType(
         key="demo_todo", category="todo", mode="provider", resolution="state-resolved",
-        default_channels=["todo"], eligible_channels=["todo"],
     ))
     registry.register_todo_provider("demo_todo", provider, config=config)
 
@@ -116,7 +115,6 @@ def test_warm_derivation_has_a_bounded_query_count_for_many_types():
         type_key = f"todo-{index}"
         register_notification_type(NotificationType(
             key=type_key, category="todo", mode="provider", resolution="state-resolved",
-            default_channels=["todo"], eligible_channels=["todo"],
         ))
         registry.register_todo_provider(
             type_key,
@@ -156,7 +154,6 @@ def test_multiple_types_apply_overrides_and_keep_materialized_output():
     for type_key, scope, config in definitions:
         register_notification_type(NotificationType(
             key=type_key, category="todo", mode="provider", resolution="state-resolved",
-            default_channels=["todo"], eligible_channels=["todo"],
         ))
         registry.register_todo_provider(
             type_key,

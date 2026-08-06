@@ -96,6 +96,37 @@ class NotificationCategoryChannelPreference(models.Model):
         )[0]
 
 
+class NotificationCategorySubscription(models.Model):
+    """Explicit opt-in to be addressed for a category the user is not otherwise the
+    natural owner of (NOTIF-26 scope D/E).
+
+    Deliberately a SEPARATE model from ``NotificationCategoryChannelPreference``, which
+    means "my channel override for a category whose notifications I already receive" --
+    a different consent from "add me as a recipient for a category I would otherwise
+    never be addressed in". A plan review flagged that carrying both consents in one
+    row shape with no discriminator field is itself a path to an accidental broadcast:
+    the presence of a row would become ambiguous between "I muted chip for this
+    category" and "subscribe me to this category". Existence of a row here means
+    exactly one thing: this user is a recipient. See ``subscriptions.resolve_category_subscribers``,
+    which queries this model and explicitly does NOT consult ``is_channel_enabled()``.
+    """
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    category = models.CharField(max_length=32)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "category"],
+                name="uniq_notification_category_subscription",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "category"], name="notif_catsub_user_category"),
+        ]
+
+
 class AbstractNotification(models.Model):
     """Base for a consuming app's concrete notification/inbox model."""
 

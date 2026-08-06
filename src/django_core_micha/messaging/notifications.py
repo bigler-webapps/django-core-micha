@@ -33,8 +33,12 @@ def register_messaging_notification_type(app_key):
     except LookupError:
         notification_type = NotificationType(
             key=key, category="messaging", mode="event", resolution="user-done",
-            default_channels=["email", "push"], eligible_channels=["email", "push"],
-            feed_visible=False,
+            # NOTIF-26: active-only reach -- messaging must reach the user (email/push,
+            # the user's own choice of which), never merely wait in a passive surface.
+            # feed_visible is now derived from reach (see NotificationType.feed_visible);
+            # active-only correctly derives to feed-hidden, matching the previous
+            # explicit feed_visible=False.
+            active=True, passive=False,
         )
         register_notification_type(notification_type)
         return notification_type

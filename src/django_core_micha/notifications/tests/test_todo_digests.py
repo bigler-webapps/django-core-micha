@@ -28,7 +28,6 @@ def test_digest_records_thresholds_once_and_sends_again_only_for_t2(monkeypatch)
     due = first_now + timedelta(days=3)
     register_notification_type(NotificationType(
         key="demo_todo", category="todo", mode="provider", resolution="state-resolved",
-        default_channels=["todo"], eligible_channels=["todo"],
     ))
     registry.register_todo_provider(
         "demo_todo",
@@ -58,7 +57,6 @@ def test_send_failure_marks_delivery_failed_not_falsely_sent(monkeypatch):
     now = timezone.now()
     register_notification_type(NotificationType(
         key="demo_todo", category="todo", mode="provider", resolution="state-resolved",
-        default_channels=["todo"], eligible_channels=["todo"],
     ))
     registry.register_todo_provider(
         "demo_todo",
@@ -87,7 +85,6 @@ def test_not_opted_in_user_records_nothing_and_later_opt_in_catches_up(monkeypat
     now = timezone.now()
     register_notification_type(NotificationType(
         key="demo_todo", category="todo", mode="provider", resolution="state-resolved",
-        default_channels=["todo"], eligible_channels=["todo"],
     ))
     registry.register_todo_provider(
         "demo_todo",
@@ -124,7 +121,6 @@ def test_digest_reconciles_only_non_emitted_todo_overlays_and_preserves_emitted_
     emissions = {"stale", "dismissed", "done"}
     register_notification_type(NotificationType(
         key="demo_todo", category="todo", mode="provider", resolution="state-resolved",
-        default_channels=["todo"], eligible_channels=["todo"],
     ))
 
     def provider(user, now):

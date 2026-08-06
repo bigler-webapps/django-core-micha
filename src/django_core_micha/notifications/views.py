@@ -25,9 +25,11 @@ from .serializers import (
     CanonicalMarkInputSerializer,
     CanonicalNotificationSerializer,
     NotificationPreferenceSerializer,
+    NotificationSubscriptionInputSerializer,
     PushSubscriptionInputSerializer,
     PushSubscriptionSerializer,
 )
+from .subscriptions import set_subscription
 from .todo.registry import iter_registered_todo_types
 from .todo.service import count_active_todos_for_user, derive_todos_for_user
 from .types import iter_feed_hidden_type_keys
@@ -40,6 +42,18 @@ class NotificationPreferenceView(generics.RetrieveUpdateAPIView):
     def get_object(self):
         preference, _ = NotificationPreference.objects.get_or_create(user=self.request.user)
         return preference
+
+
+class NotificationSubscriptionView(views.APIView):
+    """Toggle the current user's subscription to a discoverable category (NOTIF-26 scope D)."""
+
+    def post(self, request):
+        serializer = NotificationSubscriptionInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        category = serializer.validated_data["category"]
+        subscribed = serializer.validated_data["subscribed"]
+        set_subscription(request.user, category, subscribed)
+        return Response({"category": category, "subscribed": subscribed})
 
 
 class PushSubscriptionView(views.APIView):

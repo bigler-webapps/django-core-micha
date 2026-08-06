@@ -43,8 +43,6 @@ def test_provider_is_a_valid_notification_type_mode():
         category="todo",
         mode="provider",
         resolution="state-resolved",
-        default_channels=["todo"],
-        eligible_channels=["todo"],
     ).mode == "provider"
 
 
@@ -55,6 +53,4 @@ def test_unknown_notification_mode_is_rejected():
             category="todo",
             mode="bogus",
             resolution="state-resolved",
-            default_channels=["todo"],
-            eligible_channels=["todo"],
         )

@@ -75,7 +75,6 @@ def get_unread_count(user):
 def register_toggleable_todo_provider(emissions, widgets):
     register_notification_type(NotificationType(
         key="demo_todo", category="todo", mode="provider", resolution="state-resolved",
-        default_channels=["todo"], eligible_channels=["todo"],
     ))
 
     def provider(user, now):
@@ -204,14 +203,18 @@ def test_unread_count_matches_the_unseen_live_feed_without_materializing_rows():
 
 @pytest.mark.django_db
 def test_feed_visible_policy_hides_only_explicitly_hidden_registered_types():
+    """Also pins NOTIF-26 scope B: feed_visible is derived from reach, not a
+    free-floating flag -- an active-only type is feed-hidden, a passive (or both)
+    type is feed-visible, with no way to set the two out of step."""
     user = make_user("feed-visibility")
-    register_notification_type(NotificationType(
+    hidden_type = NotificationType(
         key="hidden-delivery-only", category="system", mode="event", resolution="user-done",
-        default_channels=["email"], eligible_channels=["email"], feed_visible=False,
-    ))
+        active=True, passive=False,
+    )
+    register_notification_type(hidden_type)
     visible_type = NotificationType(
         key="visible-default", category="system", mode="event", resolution="user-done",
-        default_channels=["chip"], eligible_channels=["chip"],
+        active=False, passive=True,
     )
     register_notification_type(visible_type)
     hidden = make_recipient(user, suffix="hidden", notification_type="hidden-delivery-only")
@@ -220,6 +223,7 @@ def test_feed_visible_policy_hides_only_explicitly_hidden_registered_types():
 
     response = get_feed(user)
 
+    assert hidden_type.feed_visible is False
     assert visible_type.feed_visible is True
     assert {item["id"] for item in response.data["results"]} == {visible.pk, historical.pk}
     assert hidden.pk not in {item["id"] for item in response.data["results"]}

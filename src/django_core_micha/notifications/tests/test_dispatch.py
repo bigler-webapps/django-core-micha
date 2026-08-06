@@ -13,6 +13,7 @@ from django_core_micha.messaging.notification_texts import (
 from django_core_micha.notifications import dispatch as dispatch_module
 from django_core_micha.notifications.api import notify
 from django_core_micha.notifications.models import (
+    Notification,
     NotificationDelivery,
     NotificationPreference,
     NotificationRecipient,
@@ -81,29 +82,23 @@ def test_retryable_delivery_is_retried_but_permanent_failure_is_not(monkeypatch)
 
 @pytest.mark.django_db
 def test_transient_context_never_leaks_to_chip_or_popup_wire_payloads(monkeypatch):
-    register_notification_type(
-        NotificationType(
-            key="transient-websocket",
-            category="system",
-            mode="event",
-            resolution="user-done",
-            default_channels=["chip", "popup"],
-            eligible_channels=["chip", "popup"],
-        )
-    )
+    # NOTIF-26: passive reach is atomic (chip only) -- a type can no longer declare
+    # "popup" directly. This drives both dispatchers straight, bypassing notify()'s
+    # reach resolution entirely, since the leak-prevention behaviour under test lives
+    # in the dispatchers themselves, not in routing.
     user = get_user_model().objects.create_user(
         username="transient-websocket", email="transient-websocket@example.test", password="password"
     )
+    content = {"title_key": "Title", "body_key": "Body", "params": {"stored": "value"}}
+    notification, _ = Notification.objects.get_or_create_by_dedup(
+        notification_type="transient-websocket", category="system", content=content,
+    )
+    recipient = NotificationRecipient.objects.create(notification=notification, user=user)
     payloads = []
     monkeypatch.setattr(dispatch_module, "push_to_users", lambda users, payload: payloads.append(payload))
-    content = {"title_key": "Title", "body_key": "Body", "params": {"stored": "value"}}
 
-    notification = notify(
-        type="transient-websocket",
-        recipients=user,
-        content=content,
-        transient={"excerpt": "confidential excerpt"},
-    )
+    for channel in ("chip", "popup"):
+        dispatch_module.dispatch(channel, notification=notification, recipient=recipient, ctx={"excerpt": "confidential excerpt"})
 
     assert {payload["channel"] for payload in payloads} == {"chip", "popup"}
     assert all(payload["content"] == content for payload in payloads)
@@ -119,8 +114,8 @@ def test_dispatch_exception_fails_only_its_channel_and_keeps_sibling_delivery(mo
             category="system",
             mode="event",
             resolution="user-done",
-            default_channels=["chip", "email"],
-            eligible_channels=["chip", "email"],
+            active=True,
+            passive=True,
         )
     )
     user = get_user_model().objects.create_user(
@@ -162,43 +157,34 @@ def test_dispatch_exception_fails_only_its_channel_and_keeps_sibling_delivery(mo
 
 @pytest.mark.django_db
 def test_popup_dispatcher_delivers_with_channel_discriminator_on_the_wire(monkeypatch):
-    register_notification_type(
-        NotificationType(
-            key="popup-scaffolding-e2e",
-            category="system",
-            mode="event",
-            resolution="user-done",
-            default_channels=["popup"],
-            eligible_channels=["popup"],
-        )
-    )
+    # NOTIF-26: no type can declare "popup" via reach anymore (passive is atomic --
+    # chip only). This dispatches straight to the PopupDispatcher, bypassing notify()'s
+    # reach resolution, since the scaffolding under test is the dispatcher's wire
+    # format, not routing.
     user = get_user_model().objects.create_user(
         username="popup-e2e",
         email="popup-e2e@example.test",
         password="password",
     )
+    notification, _ = Notification.objects.get_or_create_by_dedup(
+        notification_type="popup-scaffolding-e2e", category="system",
+        content={"title_key": "Title", "body_key": "Body"},
+    )
+    recipient = NotificationRecipient.objects.create(notification=notification, user=user)
     sent = []
     monkeypatch.setattr(
         dispatch_module, "push_to_users", lambda users, payload: sent.append((list(users), payload))
     )
 
-    notification = notify(
-        type="popup-scaffolding-e2e",
-        recipients=user,
-        content={"title_key": "Title", "body_key": "Body"},
-    )
+    result = dispatch_module.dispatch("popup", notification=notification, recipient=recipient)
 
-    statuses = dict(
-        NotificationDelivery.objects.filter(recipient__notification=notification).values_list("channel", "status")
-    )
-    assert statuses == {"popup": "sent"}
+    assert result is True
     assert len(sent) == 1
     delivered_users, payload = sent[0]
     assert [u.pk for u in delivered_users] == [user.pk]
     assert payload["envelope"] == "notification"
     assert payload["channel"] == "popup"
     assert payload["notification_id"] == notification.pk
-    recipient = NotificationRecipient.objects.get(notification=notification, user=user)
     # feed/mark/ (CanonicalMarkView) resolves ids against NotificationRecipient,
     # not Notification — the wire payload must carry the recipient pk, or every
     # markSeen/markDismissed a client sends for this push either no-ops or (worse)
@@ -214,8 +200,8 @@ def test_chip_dispatcher_carries_channel_field_with_no_other_regression(monkeypa
             category="system",
             mode="event",
             resolution="user-done",
-            default_channels=["chip"],
-            eligible_channels=["chip"],
+            active=False,
+            passive=True,
         )
     )
     user = get_user_model().objects.create_user(
@@ -249,21 +235,24 @@ def test_chip_dispatcher_carries_channel_field_with_no_other_regression(monkeypa
 def test_resolve_channels_still_excludes_popup_for_types_that_do_not_declare_it():
     from django_core_micha.notifications.router import resolve_channels
 
+    # NOTIF-26: passive reach is atomic (chip only) -- popup is structurally
+    # unreachable via any reach declaration, not merely excluded by a narrower
+    # eligible list, per the WO's explicit "no currently-registered type uses popup"
+    # basis for making the axis atomic.
     ntype = NotificationType(
         key="no-popup",
         category="system",
         mode="event",
         resolution="user-done",
-        default_channels=["chip", "popup"],
-        eligible_channels=["chip"],
+        active=True,
+        passive=True,
     )
     user = get_user_model().objects.create_user(
         username="no-popup", email="no-popup@example.test", password="password"
     )
 
-    effective = resolve_channels(ntype, user)
-
-    assert "popup" not in effective
+    assert "popup" not in ntype.eligible_channels
+    assert "popup" not in resolve_channels(ntype, user)
 
 
 class _FakeUser:
@@ -373,8 +362,8 @@ def test_push_dispatcher_hides_preview_body_but_keeps_the_sender_name_in_the_tit
             category="system",
             mode="event",
             resolution="user-done",
-            default_channels=["push"],
-            eligible_channels=["push"],
+            active=True,
+            passive=False,
         )
     )
     register_messaging_notification_texts()

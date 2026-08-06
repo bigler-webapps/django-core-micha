@@ -32,14 +32,14 @@ def isolated_registry():
     _REGISTRY.update(original)
 
 
-def make_type(*, key="test_notice", critical=False, defaults=None, eligible=None):
+def make_type(*, key="test_notice", critical=False, active=True, passive=True):
     return NotificationType(
         key=key,
         category="finance",
         mode="event",
         resolution="user-done",
-        default_channels=defaults or ["chip", "email", "push"],
-        eligible_channels=eligible or ["chip", "email", "push"],
+        active=active,
+        passive=passive,
         critical=critical,
     )
 
@@ -88,7 +88,7 @@ def test_notification_type_registry_returns_registered_policy_and_rejects_unknow
 def test_router_override_is_narrowed_to_eligible_channels():
     user = make_user("router-override")
     NotificationPreference.objects.create(user=user, email_opt_in=True)
-    notification_type = make_type(defaults=["chip", "email"], eligible=["chip", "email"])
+    notification_type = make_type()
 
     assert resolve_channels(notification_type, user, override=["email", "popup"]) == ["email"]
 
@@ -97,7 +97,7 @@ def test_router_override_is_narrowed_to_eligible_channels():
 def test_router_respects_opt_out_but_keeps_chip():
     user = make_user("router-opt-out")
     NotificationPreference.objects.create(user=user, email_opt_in=False)
-    notification_type = make_type(defaults=["chip", "email"], eligible=["chip", "email"])
+    notification_type = make_type()
 
     assert resolve_channels(notification_type, user) == ["chip"]
 
@@ -106,7 +106,7 @@ def test_router_respects_opt_out_but_keeps_chip():
 def test_critical_router_forces_available_default_but_not_unavailable_push():
     user = make_user("router-critical")
     NotificationPreference.objects.create(user=user, email_opt_in=False, push_opt_in=False)
-    notification_type = make_type(critical=True, defaults=["email", "push"], eligible=["email", "push"])
+    notification_type = make_type(critical=True, active=True, passive=False)
 
     assert resolve_channels(notification_type, user) == ["email"]
 
@@ -192,7 +192,7 @@ def test_notify_transient_values_render_only_for_email_and_push_without_affectin
 
 @pytest.mark.django_db
 def test_notify_without_transient_passes_none_to_dispatch_and_preserves_existing_behavior(monkeypatch):
-    register_notification_type(make_type(defaults=["chip"], eligible=["chip"]))
+    register_notification_type(make_type(active=False, passive=True))
     user = make_user("no-transient")
     calls = []
     monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: None)
@@ -213,7 +213,7 @@ def test_notify_without_transient_passes_none_to_dispatch_and_preserves_existing
 
 @pytest.mark.django_db
 def test_notify_persists_optional_expiry_without_affecting_dedup(monkeypatch):
-    register_notification_type(make_type(defaults=["chip"], eligible=["chip"]))
+    register_notification_type(make_type(active=False, passive=True))
     user = make_user("notification-expiry")
     monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: None)
     expiry = timezone.now() + timedelta(days=30)
@@ -224,7 +224,7 @@ def test_notify_persists_optional_expiry_without_affecting_dedup(monkeypatch):
 @pytest.mark.django_db
 def test_notify_critical_type_actually_delivers_email_despite_opt_out(monkeypatch):
     register_notification_type(
-        make_type(critical=True, defaults=["email"], eligible=["email"])
+        make_type(critical=True, active=True, passive=False)
     )
     user = make_user("critical-force")
     NotificationPreference.objects.create(user=user, email_opt_in=False)
@@ -257,7 +257,7 @@ def test_notify_critical_type_actually_delivers_email_despite_opt_out(monkeypatc
 
 @pytest.mark.django_db
 def test_notify_recovers_from_dedup_integrity_error(monkeypatch):
-    register_notification_type(make_type(defaults=["chip"], eligible=["chip"]))
+    register_notification_type(make_type(active=False, passive=True))
     user = make_user("integrity-retry")
     existing, _ = Notification.objects.get_or_create_by_dedup(
         notification_type="test_notice",
@@ -290,7 +290,7 @@ def test_notify_recovers_from_dedup_integrity_error(monkeypatch):
 
 @pytest.mark.django_db
 def test_notify_recovers_from_null_delivery_integrity_error(monkeypatch):
-    register_notification_type(make_type(defaults=["chip"], eligible=["chip"]))
+    register_notification_type(make_type(active=False, passive=True))
     user = make_user("delivery-integrity-retry")
     notification, _ = Notification.objects.get_or_create_by_dedup(
         notification_type="test_notice",

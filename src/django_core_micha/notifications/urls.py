@@ -7,6 +7,7 @@ from .views import (
     NotificationInboxView,
     NotificationMarkReadView,
     NotificationPreferenceView,
+    NotificationSubscriptionView,
     NotificationUnreadCountView,
     PushSubscriptionView,
     VapidPublicKeyView,
@@ -15,6 +16,7 @@ from .views import (
 
 urlpatterns = [
     path("preferences/", NotificationPreferenceView.as_view(), name="notification-preferences"),
+    path("preferences/subscriptions/", NotificationSubscriptionView.as_view(), name="notification-subscriptions"),
     path("preferences/push-subscription/", PushSubscriptionView.as_view(), name="push-subscription"),
     path("preferences/vapid-public-key/", VapidPublicKeyView.as_view(), name="vapid-public-key"),
     path("inbox/", NotificationInboxView.as_view(), name="notification-inbox"),

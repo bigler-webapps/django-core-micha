@@ -61,8 +61,9 @@ def test_notify_message_recipe_matches_jg_precedent(domain):
     app, conversation, users = domain
     register_messaging_notification_type(app.app_key)
     notification_type = get_notification_type(messaging_notification_type_key(app.app_key))
+    assert notification_type.active is True
+    assert notification_type.passive is False
     assert notification_type.eligible_channels == ["email", "push"]
-    assert notification_type.default_channels == ["email", "push"]
     assert "chip" not in notification_type.eligible_channels
     assert notification_type.feed_visible is False
 
