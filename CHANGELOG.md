@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.41.0] — 2026-08-06
+
+### Added
+
+NOTIF-26: notification types now declare *reach* (`active`/`passive` on `NotificationType`,
+not a channel list) instead of enumerating `default_channels`/`eligible_channels` — an app
+says whether a notification must reach the user (active: email/push, the user's own choice
+of which) or may wait until they look (passive: chip), with all three states (active-only,
+passive-only, both) expressible. `feed_visible` is now derived from `passive` instead of an
+independently-settable flag. Adds `NotificationCategorySubscription` (a separate model from
+`NotificationCategoryChannelPreference` — a different consent) and `notify_subscribers()` for
+events with no natural recipient owner (a nightly job, a CLI-started run), resolved from
+explicit opt-in only — never derived from `is_channel_enabled()`'s default-True passive tier.
+Gated by a required `content_is_shareable=True` acknowledgement, since one `content` payload
+is durable and visible to every subscriber. The `preferences/` endpoint now also reports the
+app's registered event types (with reach + a computed `has_active_channel` flag) and its
+subscribable categories (translated label + subscription state); a new `preferences/subscriptions/`
+endpoint toggles a subscription. `NotificationType` gained an optional `label_key`, resolved
+through the text registry, for a human-readable settings-surface label per type.
+
+### Changed
+
+`default_channels`/`eligible_channels` are removed from `NotificationType` — `eligible_channels`
+is now a derived property computed from reach. Existing registrations must migrate to `active`/
+`passive` (see `messaging/notifications.py`'s migration for the pattern). No change to `notify()`'s
+signature.
+
 ## [2.40.6] — 2026-08-05
 
 ### Fixed
