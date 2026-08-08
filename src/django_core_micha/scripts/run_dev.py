@@ -8,8 +8,20 @@ import threading
 import time
 from pathlib import Path
 
+import yaml
+
 # Import existing scripts as modules
 from django_core_micha.scripts import generate_env
+
+
+# Optional local-dev-only services, gated behind a same-named Compose profile in
+# docker-compose.local.yml (never in the base/prod compose file). Celery's need is
+# auto-detected from whether the project's compose files define it at all; java has
+# no auto-detection (most consumers never need it) and stays an explicit opt-in.
+OPTIONAL_LOCAL_SERVICE_PROFILES = {
+    "celery": ["celery_worker", "celery_beat"],
+    "java": ["java_backend"],
+}
 
 
 def normalize_project_name(name: str) -> str:
@@ -36,6 +48,47 @@ def run_command(command, cwd=None, ignore_errors=False, shell=False, capture_out
         else:
             print(f"[ERROR] Command failed: {e}")
             sys.exit(e.returncode)
+
+def load_compose_service_names(compose_files_args):
+    """Best-effort parse of the compose files passed via `-f` flags to discover which
+    services they define (merged across base + overlays), so run-dev can auto-detect
+    optional local-dev services (e.g. celery) without requiring a manual flag."""
+    names = set()
+    it = iter(compose_files_args)
+    for token in it:
+        if token != "-f":
+            continue
+        try:
+            file_path = next(it)
+        except StopIteration:
+            break
+        path = Path(file_path)
+        if not path.exists():
+            continue
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (yaml.YAMLError, OSError, UnicodeDecodeError):
+            continue
+        names.update((data.get("services") or {}).keys())
+    return names
+
+
+def compute_active_local_profiles(*, celery_flag, java_flag, local_profiles_eligible, compose_service_names):
+    """Decide which OPTIONAL_LOCAL_SERVICE_PROFILES entries are active for this run.
+
+    Celery is auto-detected (active whenever the project's own compose files already
+    define a `celery_worker` service, or `--celery` forces it); java has no
+    auto-detection and is active only via the explicit `--java` flag. Neither applies
+    outside local dev (edge/spool run every optional service unconditionally, with no
+    profile gate at all, so this function is never consulted there).
+    """
+    if not local_profiles_eligible:
+        return {"celery": False, "java": False}
+    return {
+        "celery": bool(celery_flag or "celery_worker" in compose_service_names),
+        "java": bool(java_flag),
+    }
+
 
 def stream_docker_logs(compose_files_args, services):
     """
@@ -280,20 +333,32 @@ def run_backend_maintenance(compose_files_args, args):
         run_command(base_cmd + command_suffix)
 
 
-def cleanup_optional_local_services(compose_files_args, args):
-    """Remove optional local-only services that should not survive across runs."""
-    if args.spool or args.edge or args.celery or not Path("docker-compose.local.yml").exists():
+def cleanup_optional_local_services(compose_files_args, args, active_profiles):
+    """Remove optional local-only services that are not part of THIS run, so a
+    service started by an earlier invocation with different flags (e.g. --celery
+    or --java on a previous run) doesn't silently keep running."""
+    if args.spool or args.edge or not Path("docker-compose.local.yml").exists():
+        return
+
+    stale_services = [
+        service
+        for profile, services in OPTIONAL_LOCAL_SERVICE_PROFILES.items()
+        if profile not in active_profiles
+        for service in services
+    ]
+    if not stale_services:
         return
 
     previous_profiles = os.environ.get("COMPOSE_PROFILES")
     try:
-        # Enable the optional service temporarily so compose can target and remove it.
-        os.environ["COMPOSE_PROFILES"] = "celery"
-        print("[INFO] Removing stale local celery_worker container...")
-        run_command(
-            ["docker-compose"] + compose_files_args + ["rm", "-f", "-s", "celery_worker"],
-            ignore_errors=True,
-        )
+        # Enable every optional profile temporarily so compose can target and remove them.
+        os.environ["COMPOSE_PROFILES"] = ",".join(OPTIONAL_LOCAL_SERVICE_PROFILES.keys())
+        for service in stale_services:
+            print(f"[INFO] Removing stale local {service} container...")
+            run_command(
+                ["docker-compose"] + compose_files_args + ["rm", "-f", "-s", service],
+                ignore_errors=True,
+            )
     finally:
         if previous_profiles is None:
             os.environ.pop("COMPOSE_PROFILES", None)
@@ -318,7 +383,20 @@ def main():
     parser.add_argument(
         "--celery",
         action="store_true",
-        help="Start the optional celery_worker in local development",
+        help=(
+            "Force-enable the optional celery_worker/celery_beat in local development. "
+            "Usually unnecessary: run-dev auto-enables them when the project's compose "
+            "files already define a celery_worker service."
+        ),
+    )
+    parser.add_argument(
+        "--java",
+        action="store_true",
+        help=(
+            "Start the optional java_backend in local development. Off by default -- "
+            "most projects no longer need it; pass this only when a task genuinely "
+            "requires the Java backend (e.g. a legacy-engine run in hram)."
+        ),
     )
     parser.add_argument(
         "--refresh",
@@ -413,12 +491,6 @@ def main():
     else:
         os.environ["UV_FLAGS"] = ""
 
-    print(f"==================================================")
-    print(
-        f"[INFO] RUN-DEV | Mode: {MODE} | Env-Regen: {FORCE_ENV} | "
-        f"Celery: {args.celery} | Build: {should_build} | Watch: {args.watch}"
-    )
-    print(f"==================================================")
     # DEBUG OUTPUT: Damit wir sehen, wo er sucht
     print(f"[DEBUG] Searching for frontend in: {frontend_dir}")
 
@@ -470,14 +542,36 @@ def main():
     print(f"[INFO] Compose files: {' '.join(compose_files_args)}")
     print(f"[INFO] Compose project: {os.environ.get('COMPOSE_PROJECT_NAME', '(default)')}")
 
-    if args.celery and not args.edge and not args.spool and Path("docker-compose.local.yml").exists():
-        os.environ["COMPOSE_PROFILES"] = "celery"
-        print("[INFO] Local celery profile enabled.")
+    # Optional local-dev services (celery, java): gated behind a Compose profile that
+    # only exists in docker-compose.local.yml, so this never applies to edge/spool.
+    local_profiles_eligible = not args.edge and not args.spool and Path("docker-compose.local.yml").exists()
+    compose_service_names = load_compose_service_names(compose_files_args) if local_profiles_eligible else set()
+    profile_state = compute_active_local_profiles(
+        celery_flag=args.celery,
+        java_flag=args.java,
+        local_profiles_eligible=local_profiles_eligible,
+        compose_service_names=compose_service_names,
+    )
+    celery_active = profile_state["celery"]
+    java_active = profile_state["java"]
+
+    active_profiles = [profile for profile, active in profile_state.items() if active]
+
+    if active_profiles:
+        os.environ["COMPOSE_PROFILES"] = ",".join(active_profiles)
+        print(f"[INFO] Local profiles enabled: {', '.join(active_profiles)}")
     else:
         os.environ.pop("COMPOSE_PROFILES", None)
 
+    print(f"==================================================")
+    print(
+        f"[INFO] RUN-DEV | Mode: {MODE} | Env-Regen: {FORCE_ENV} | "
+        f"Celery: {celery_active} | Java: {java_active} | Build: {should_build} | Watch: {args.watch}"
+    )
+    print(f"==================================================")
+
     log_services = ["backend"]
-    if args.celery:
+    if celery_active:
         log_services.append("celery_worker")
 
     # --- SCHRITT 3: CLEANUP ---
@@ -492,7 +586,7 @@ def main():
             stdout=subprocess.DEVNULL, 
             shell=(sys.platform=="win32")
         )
-        cleanup_optional_local_services(compose_files_args, args)
+        cleanup_optional_local_services(compose_files_args, args, active_profiles)
 
 
     # --- SCHRITT 4: START ---
