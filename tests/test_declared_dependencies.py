@@ -14,6 +14,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src" / "django_core_micha"
 MODULE_TO_DISTRIBUTION = {
     "PIL": "Pillow",
     "allauth": "django-allauth",
+    "anthropic": "anthropic",
     "asgiref": "Django",
     "channels": "channels",
     "corsheaders": "django-cors-headers",
@@ -22,6 +23,8 @@ MODULE_TO_DISTRIBUTION = {
     "environ": "django-environ",
     "filetype": "filetype",
     "pywebpush": "pywebpush",
+    "pypdf": "pypdf",
+    "openai": "openai",
     "rest_framework": "djangorestframework",
     "yaml": "PyYAML",
 }

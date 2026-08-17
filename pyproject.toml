@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-core-micha"
-version = "2.41.2"
+version = "2.42.0"
 authors = [
   { name="Micha Bigler", email="micha.bigler2@gmail.com" },
 ]
@@ -25,6 +25,9 @@ dependencies = [
     "cryptography>=42",
     "django-allauth[mfa,socialaccount]",
     "Pillow>=10",
+    "pypdf>=6.13.1",
+    "openai>=2.41.0",
+    "anthropic",
     "whitenoise",
 ]
 
