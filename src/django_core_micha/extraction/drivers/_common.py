@@ -23,3 +23,11 @@ def merge_passthrough(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, 
         names = ", ".join(sorted(overlap))
         raise ValueError(f"Provider passthrough cannot replace normalized fields: {names}")
     return {**base, **extra}
+
+
+def best_effort_delete(delete_fn) -> None:
+    """Run a cleanup delete; swallow any failure so it never masks the real result."""
+    try:
+        delete_fn()
+    except Exception:
+        pass

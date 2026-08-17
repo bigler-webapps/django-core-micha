@@ -108,11 +108,67 @@ bump, not minor.
 
 ## B. Implementation map — filled by the Orchestrator — ADDRESSED TO THE IMPLEMENTER
 
-> **Placeholder — not yet filled.** The Orchestrator completes this section on `git pull`, within
-> the envelope above: the exact field/type additions, named files with `path:line`, the Anthropic
-> upload API surface verified against the installed SDK, invariants and pitfalls, the absolute target
-> working directory, and the progress contract. **This work order must not be dispatched while this
-> placeholder stands.**
+**Target working directory:** `C:\Users\biglmi\Documents\webapps\django-core-micha` (repo root).
+
+**Anthropic upload API, verified against the installed `anthropic==0.122.0` SDK (this workspace's
+first use of it — do not assume it mirrors OpenAI):**
+- Files live under `client.beta.files`, not `client.files`. `client.beta.files.upload(file=(filename,
+  bytes, mime_type))` returns a `FileMetadata` with `.id`; `client.beta.files.delete(file_id)` removes
+  it. The SDK auto-adds the `anthropic-beta: files-api-2025-04-14` header for these two calls — no
+  explicit beta flag needed on `upload`/`delete` themselves.
+- **Referencing an uploaded file in a request is different: the *stable* `client.messages.create`
+  does not accept a file reference at all.** It must go through `client.beta.messages.create(...,
+  betas=["files-api-2025-04-14"])` — the explicit `betas` kwarg is required there (unlike
+  `beta.files.*`, it is not auto-added).
+- Content-block shape for a referenced file: `{"type": "document", "source": {"type": "file",
+  "file_id": ...}}` for a PDF, `{"type": "image", "source": {"type": "file", "file_id": ...}}` for an
+  image — confirmed against `anthropic.types.beta.beta_file_document_source_param` /
+  `beta_file_image_source_param` (`{"type": "file", "file_id": str}`).
+- **Only switch to `client.beta.messages.create` when a file was actually uploaded.** The existing
+  inline-image/pdf-text path keeps calling `client.messages.create` exactly as AI-1 shipped it — this
+  is what keeps AI-1's existing tests (whose stub client only has `.messages`, no `.beta`) passing
+  unchanged, and there is no reason to route a request that needs none of the beta surface through it.
+
+**OpenAI upload:** unchanged shape from `_upload_file` in
+`reimbursements/backend/claims/services/openai_ocr.py` (already read for AI-1) — `client.files.create
+(file=(filename, bytes, mime_type), purpose=...)`, trying `"user_data"` then `"assistants"` on
+failure, referenced as `{"type": "input_file", "file_id": upload.id}`. Unlike Anthropic, one block
+type covers both a PDF and an image upload — no branching on MIME type needed here.
+
+**Files to change:**
+- `src/django_core_micha/extraction/types.py` — add `upload_bytes: bytes | None = None`,
+  `upload_mime_type: str | None = None`, `upload_filename: str | None = None` to `ExtractionRequest`.
+  Extend `__post_init__`: require `upload_mime_type` + `upload_filename` when `upload_bytes` is set
+  (mirrors the existing `image_mime_type` check), and reject `image_bytes` + `upload_bytes` both set
+  — the caller picks exactly one attachment mode per request.
+- `src/django_core_micha/extraction/drivers/_common.py` — add a `best_effort_delete(delete_fn)`
+  helper: call it, swallow any exception. Both drivers' cleanup needs this same swallow-and-never-mask
+  behaviour; factor it once rather than duplicating the bare `except Exception: pass`.
+- `src/django_core_micha/extraction/drivers/openai_driver.py` — add a private `_upload_file(client,
+  filename, mime_type, content)` helper (the purpose-fallback loop above). In `extract`: when
+  `request.upload_bytes is not None` (and `image_bytes` is not — mutually exclusive per the type),
+  upload and append the `input_file` block; wrap the upload call's own exceptions as
+  `DocumentExtractionError(REQUEST_FAILED, ...)` same as the existing request-call wrapping. Track the
+  returned upload object in an outer-scope variable and delete it in a `finally` around everything from
+  the upload attempt through the return — so cleanup runs whether the extraction request that follows
+  succeeds, fails, or truncates.
+- `src/django_core_micha/extraction/drivers/anthropic_driver.py` — same shape: upload via
+  `client.beta.files.upload`, append the `document`/`image` file-reference block (branch on
+  `upload_mime_type == "application/pdf"`), and when an upload happened, issue the request via
+  `client.beta.messages.create(betas=["files-api-2025-04-14"], **call)` instead of
+  `client.messages.create(**call)`. Same `finally`-based cleanup via `client.beta.files.delete`.
+
+**Invariants restated for this map specifically:**
+- Schema validation stays the first statement in both drivers, before anything upload-related —
+  unchanged from AI-1.
+- The existing AI-1 test suite's driver stubs (`SimpleNamespace(responses=...)` /
+  `SimpleNamespace(messages=...)`) must keep working unmodified for every test that doesn't exercise
+  upload — confirms the inline path truly wasn't touched.
+- A delete failure in the `finally` must never propagate — it would otherwise replace a real
+  successful `ExtractionResult` or a real `DocumentExtractionError` with an unrelated cleanup error.
+
+Work from this package: open only the two driver files, `types.py`, `_common.py`, and the test file,
+to verify.
 
 ## Preamble — a REQUIRED block IN this file, not something appended at invocation
 

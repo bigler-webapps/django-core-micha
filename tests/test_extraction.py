@@ -63,7 +63,7 @@ def _valid_schema() -> dict:
     }
 
 
-def _request(*, image=False) -> ExtractionRequest:
+def _request(*, image=False, upload_mime=None) -> ExtractionRequest:
     return ExtractionRequest(
         system_prompt="Extract only the requested fields.",
         user_prompt="Read this document.",
@@ -73,7 +73,10 @@ def _request(*, image=False) -> ExtractionRequest:
         thinking={"type": "disabled"},
         image_bytes=_image_bytes() if image else None,
         image_mime_type="image/png" if image else None,
-        pdf_text="Visible PDF text",
+        pdf_text=None if upload_mime else "Visible PDF text",
+        upload_bytes=b"raw-attachment-bytes" if upload_mime else None,
+        upload_mime_type=upload_mime,
+        upload_filename="scan.pdf" if upload_mime else None,
     )
 
 
@@ -94,22 +97,62 @@ class _ProviderFailure(Exception):
     status_code = 429
 
 
-def _openai_client(*, error=None):
+class _RecordingFiles:
+    def __init__(self, *, file_id="file-123", upload_error=None, delete_error=None, purpose_sequence=None):
+        self.file_id = file_id
+        self.upload_error = upload_error
+        self.delete_error = delete_error
+        self.purpose_sequence = purpose_sequence  # OpenAI-only: purposes that raise before one succeeds
+        self.create_calls = []
+        self.upload_calls = []
+        self.delete_calls = []
+
+    def create(self, *, file, purpose):
+        """OpenAI-shaped: client.files.create(file=..., purpose=...)."""
+        self.create_calls.append(purpose)
+        if self.purpose_sequence and purpose in self.purpose_sequence:
+            raise RuntimeError(f"purpose {purpose} rejected")
+        if self.upload_error:
+            raise self.upload_error
+        return SimpleNamespace(id=self.file_id)
+
+    def upload(self, *, file):
+        """Anthropic-shaped: client.beta.files.upload(file=...)."""
+        self.upload_calls.append(file)
+        if self.upload_error:
+            raise self.upload_error
+        return SimpleNamespace(id=self.file_id)
+
+    def delete(self, file_id):
+        self.delete_calls.append(file_id)
+        if self.delete_error:
+            raise self.delete_error
+
+
+def _openai_client(*, error=None, files=None):
     response = SimpleNamespace(
         output_text='{"name": "Ada"}',
         status="completed",
         usage=SimpleNamespace(input_tokens=10, output_tokens=5, total_tokens=15),
     )
-    return SimpleNamespace(responses=_RecordingEndpoint(response, error))
+    client = SimpleNamespace(responses=_RecordingEndpoint(response, error))
+    client.files = files if files is not None else _RecordingFiles()
+    return client
 
 
-def _anthropic_client(*, error=None):
+def _anthropic_client(*, error=None, files=None):
     response = SimpleNamespace(
         content=[SimpleNamespace(type="text", text='{"name": "Ada"}')],
         stop_reason="end_turn",
         usage=SimpleNamespace(input_tokens=10, output_tokens=5),
     )
-    return SimpleNamespace(messages=_RecordingEndpoint(response, error))
+    client = SimpleNamespace(messages=_RecordingEndpoint(response, error))
+    beta_messages = _RecordingEndpoint(response, error)
+    client.beta = SimpleNamespace(
+        files=files if files is not None else _RecordingFiles(),
+        messages=beta_messages,
+    )
+    return client
 
 
 # Input preparation
@@ -451,6 +494,162 @@ def test_provider_error_preserves_status_code(driver, client):
         driver.extract(_request(), api_key="key", model="model", client=client)
     assert error.value.code == REQUEST_FAILED
     assert error.value.status_code == 429
+
+
+# Raw-file upload path (AI-5)
+
+
+def test_extraction_request_rejects_upload_without_mime_or_filename():
+    with pytest.raises(ValueError):
+        ExtractionRequest(
+            system_prompt="s",
+            user_prompt="u",
+            schema=_valid_schema(),
+            max_output_tokens=10,
+            effort="low",
+            thinking={"type": "disabled"},
+            upload_bytes=b"bytes",
+        )
+
+
+def test_extraction_request_rejects_image_and_upload_together():
+    with pytest.raises(ValueError):
+        ExtractionRequest(
+            system_prompt="s",
+            user_prompt="u",
+            schema=_valid_schema(),
+            max_output_tokens=10,
+            effort="low",
+            thinking={"type": "disabled"},
+            image_bytes=_image_bytes(),
+            image_mime_type="image/png",
+            upload_bytes=b"bytes",
+            upload_mime_type="application/pdf",
+            upload_filename="scan.pdf",
+        )
+
+
+def test_openai_driver_uploads_and_references_file():
+    client = _openai_client()
+    openai_driver.extract(
+        _request(upload_mime="application/pdf"),
+        api_key="key",
+        model="gpt-4.1-mini",
+        client=client,
+    )
+    assert client.files.create_calls[0] == "user_data"
+    call = client.responses.calls[0]
+    file_block = call["input"][0]["content"][1]
+    assert file_block == {"type": "input_file", "file_id": client.files.file_id}
+    assert client.files.delete_calls == [client.files.file_id]
+
+
+def test_openai_driver_deletes_upload_after_failed_request():
+    client = _openai_client(error=_ProviderFailure())
+    with pytest.raises(DocumentExtractionError):
+        openai_driver.extract(
+            _request(upload_mime="application/pdf"),
+            api_key="key",
+            model="model",
+            client=client,
+        )
+    assert client.files.delete_calls == [client.files.file_id]
+
+
+def test_openai_driver_swallows_delete_failure_and_still_returns_result():
+    client = _openai_client(files=_RecordingFiles(delete_error=RuntimeError("gone")))
+    result = openai_driver.extract(
+        _request(upload_mime="application/pdf"),
+        api_key="key",
+        model="model",
+        client=client,
+    )
+    assert result.raw_text == '{"name": "Ada"}'
+
+
+def test_openai_driver_falls_back_to_second_purpose_on_upload_rejection():
+    client = _openai_client(files=_RecordingFiles(purpose_sequence={"user_data"}))
+    openai_driver.extract(
+        _request(upload_mime="image/jpeg"),
+        api_key="key",
+        model="model",
+        client=client,
+    )
+    assert client.files.create_calls == ["user_data", "assistants"]
+
+
+def test_anthropic_driver_uploads_pdf_as_document_block_via_beta_messages():
+    client = _anthropic_client()
+    anthropic_driver.extract(
+        _request(upload_mime="application/pdf"),
+        api_key="key",
+        model="claude-sonnet-5",
+        client=client,
+    )
+    assert client.beta.files.upload_calls
+    call = client.beta.messages.calls[0]
+    assert call["betas"] == ["files-api-2025-04-14"]
+    file_block = call["messages"][0]["content"][0]
+    assert file_block == {
+        "type": "document",
+        "source": {"type": "file", "file_id": client.beta.files.file_id},
+    }
+    assert client.beta.files.delete_calls == [client.beta.files.file_id]
+    # The non-upload stable endpoint must never be touched for this path.
+    assert client.messages.calls == []
+
+
+def test_anthropic_driver_uploads_image_as_image_block():
+    client = _anthropic_client()
+    anthropic_driver.extract(
+        _request(upload_mime="image/png"),
+        api_key="key",
+        model="claude-sonnet-5",
+        client=client,
+    )
+    call = client.beta.messages.calls[0]
+    file_block = call["messages"][0]["content"][0]
+    assert file_block["type"] == "image"
+    assert file_block["source"] == {"type": "file", "file_id": client.beta.files.file_id}
+
+
+def test_anthropic_driver_deletes_upload_after_failed_request():
+    client = _anthropic_client(error=_ProviderFailure())
+    with pytest.raises(DocumentExtractionError):
+        anthropic_driver.extract(
+            _request(upload_mime="application/pdf"),
+            api_key="key",
+            model="model",
+            client=client,
+        )
+    assert client.beta.files.delete_calls == [client.beta.files.file_id]
+
+
+def test_anthropic_driver_swallows_delete_failure_and_still_returns_result():
+    client = _anthropic_client(files=_RecordingFiles(delete_error=RuntimeError("gone")))
+    result = anthropic_driver.extract(
+        _request(upload_mime="application/pdf"),
+        api_key="key",
+        model="model",
+        client=client,
+    )
+    assert result.raw_text == '{"name": "Ada"}'
+
+
+@pytest.mark.parametrize(
+    ("driver", "client_factory"),
+    [(openai_driver, _openai_client), (anthropic_driver, _anthropic_client)],
+)
+def test_schema_is_validated_before_any_upload_call(driver, client_factory):
+    request = _request(upload_mime="application/pdf")
+    request.schema["additionalProperties"] = True
+    client = client_factory()
+    with pytest.raises(DocumentExtractionError):
+        driver.extract(request, api_key="key", model="model", client=client)
+    files = client.files if driver is openai_driver else client.beta.files
+    assert files.create_calls == []
+    assert files.upload_calls == []
+    assert files.delete_calls == []
 
 
 @override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=500)
