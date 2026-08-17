@@ -196,19 +196,136 @@ is a **minor** bump, not a patch.
 
 ## B. Implementation map — filled by the Orchestrator — ADDRESSED TO THE IMPLEMENTER
 
-> **Placeholder — not yet filled.** The Orchestrator completes this section on `git pull`, within
-> the envelope above: named files with `path:line`, the architecture slice, key snippets of the
-> reimbursements source being lifted, invariants and pitfalls, the absolute target working
-> directory, and the progress contract. **This work order must not be dispatched while this
-> placeholder stands.**
+**Target working directory:** `C:\Users\biglmi\Documents\webapps\django-core-micha` (repo root —
+this is a plain Python package, `src/django_core_micha/`, not a running Django project).
 
-Source material to lift from (read-only reference for the Orchestrator, in `reimbursements`):
-`backend/claims/services/cost_guard.py` in full; and from `backend/claims/services/openai_ocr.py`
-the helpers `_resize_image_bytes`, `_encode_image_inline`, `_extract_pdf_text`, `_upload_file`,
-`_extract_json_candidate`, `_iter_json_objects_from_text`, `_extract_codeblock_candidates`,
-`_coerce_payload_dict`, `_parse_json_payload`, `_extract_payload_from_response_obj`,
-`_make_json_safe`, `_response_to_data`, `_response_to_text`, `_usage_to_metadata`, and the
-`OpenAIOCRExtractionError` shape. Everything else in that file is domain and stays put.
+**Source material to lift from (read-only reference, in `reimbursements`, do not edit that repo):**
+`backend/claims/services/cost_guard.py` in full (214 lines); and from
+`backend/claims/services/openai_ocr.py` the pure-function helpers `_resize_image_bytes`,
+`_encode_image_inline`, `_extract_pdf_text`, `_extract_json_candidate`,
+`_iter_json_objects_from_text`, `_extract_codeblock_candidates`, `_coerce_payload_dict`,
+`_parse_json_payload`, `_extract_payload_from_response_obj`, `_make_json_safe`,
+`_response_to_data`, `_response_to_text`, `_usage_to_metadata`, and the `OpenAIOCRExtractionError`
+shape (code/message/status_code). Migrated test cases: all of
+`backend/claims/test_cost_guard.py` (216 lines). **`_upload_file` stays behind** — it is the
+OpenAI Files-API upload path, a driver-specific transport detail, not a shared primitive; the
+Anthropic driver does not upload files the same way, and neither AI-1 nor AI-2 need it (AI-2
+still calls the existing `openai_ocr.py` for the file-upload path unchanged — only the *pure*
+helpers above are being lifted). Everything else in `openai_ocr.py` (prompts, schemas,
+`ALLOWED_FIELDS`, `FIELD_ALIASES`, `_normalize_*`, `_validate_and_filter_payload`, the three
+`extract_*`/`match_pairs_with_llm` entry points) is domain and stays in `reimbursements` for AI-2.
+
+**Existing dcm module-layout convention** (verified against `src/django_core_micha/fields/`,
+`.../health/`, `.../validators/`): a plain-function utility module needs no `apps.py` and no
+`INSTALLED_APPS` entry — only add one if the module later needs models/migrations, which this one
+does not. Follow the same pattern: a new top-level package, e.g.
+`src/django_core_micha/extraction/`, with plain modules inside (suggested split below — the exact
+file/function split is your call, this is a map of the seams, not a spec of the API):
+
+- `cost_guard.py` — the moved-and-generalised S193 cap. **Behaviour is a relocation, not a
+  rewrite**: the atomic `cache.add`-then-`incr` seeding, the charge-after-response ordering, the
+  over-by-one acceptance, and the ≥1¢ floor must be byte-for-byte the same logic. What *does*
+  change: setting names lose the `OPENAI_` prefix (`OPENAI_COST_LIMIT_ENABLED` →
+  `AI_COST_LIMIT_ENABLED`, `OPENAI_DAILY_COST_LIMIT_CENTS` → `AI_DAILY_COST_LIMIT_CENTS`,
+  `OPENAI_MODEL_COST_TABLE_CENTS_PER_1K` → `AI_MODEL_COST_TABLE_CENTS_PER_1K`); the cache-key
+  prefix `f"{env}:openai:cost:..."` loses `openai:` → `f"{env}:ai:cost:..."`; and the cost table
+  (currently OpenAI-only, see full content read above) gains Claude Sonnet 5 at **list price**
+  `{"input": 0.3, "output": 1.5}` — not the introductory `$2/$10` rate, which expires
+  2026-08-31 (see Scope item 1 in the Envelope). Keep the conservative unknown-model fallback
+  (`1.5` / `6.0` cents/1k) unchanged — verbatim, not re-derived. `IS_LOCAL` / `ENV_TYPE` are
+  already generic dcm-wide settings and need no renaming.
+- `input_prep.py` — `_resize_image_bytes` and `_extract_pdf_text`, generalised: the long-edge
+  (currently hardcoded `1500`) and JPEG quality (`85`) become parameters with those values as
+  defaults; the PDF char cap (currently `12000`) likewise. Keep `_encode_image_inline`'s
+  base64-encode step but do **not** keep its OpenAI-shaped return value
+  (`{"type": "input_image", "image_url": "data:...;base64,..."}`) as the shared function's
+  contract — that dict shape is OpenAI's `input_image` block, not Anthropic's (Anthropic's image
+  block is `{"type": "image", "source": {"type": "base64", "media_type": ..., "data": ...}}`).
+  Return the provider-neutral pair (resized bytes/mime, or a base64 string + mime) and let each
+  driver build its own block shape — this is the concrete instance of the "driver must not
+  flatten provider capability" rule in Scope item 6, applied to the *input* side.
+- `salvage.py` — `_extract_json_candidate`, `_iter_json_objects_from_text`,
+  `_extract_codeblock_candidates`, `_coerce_payload_dict`, `_parse_json_payload`,
+  `_extract_payload_from_response_obj`, `_make_json_safe`, combined into one entry point (e.g.
+  `extract_json_payload(raw_text, raw_response_obj=None) -> dict`). **The one real trap here:**
+  `_extract_payload_from_response_obj`'s `_looks_like_extracted_payload` gate is keyed off
+  `KNOWN_FIELD_KEYS`, which is derived from reimbursements' `ALLOWED_FIELDS` and `FIELD_ALIASES`
+  — i.e. a domain-specific field-name allowlist buried inside an otherwise generic
+  recovery routine. That allowlist must **not** travel into dcm (it is exactly the "would
+  reimbursements and jg-ferien agree about this?" test from the Envelope's Goal section, and the
+  answer is no — jg-ferien's fields are entirely different). Replace the gate with a
+  domain-neutral heuristic (e.g.: a dict with no nested dict/list values, and no wrapper key
+  matched, is itself a payload candidate) so the function needs no caller-supplied field list.
+  Confirm this still passes the "tool-call arguments string" and "list whose first dict is the
+  payload" required-test cases — neither of those needs domain knowledge, only the
+  already-generic wrapper-key/recursion logic.
+- `errors.py` — one exception, `code`/`message`/`status_code`, per Scope item 4. Codes are
+  provider-neutral strings scoped to this package, e.g.
+  `django_core_micha.extraction.<code>` (not `claims.validation.openai_*` — that prefix is
+  app- and provider-specific and is exactly what item 4 says to drop). Fixed code set: missing
+  credential, missing model, missing dependency, empty file, image conversion failed, request
+  failed, output truncated, invalid JSON, empty payload.
+- `schema_contract.py` — `validate_schema(schema: dict) -> None`, raising the taxonomy error
+  (naming the violated rule) when any object node's `additionalProperties` is missing or not
+  `False`, or any node's `"type"` is a JSON-Schema array. **Must recurse** into `properties` and
+  `items` — the reimbursements schemas nest an object (`bbox_norm` in the bulk-extraction schema)
+  and Anthropic's `additionalProperties: false` requirement applies to every object, not just the
+  top level. Run it against the actual current reimbursements schemas
+  (`_json_schema_format`, `_bulk_json_schema_format`, `_classify_schema_format`,
+  `_match_schema_format` in `openai_ocr.py`, all `additionalProperties: True` today) as an
+  informal sanity check while writing the required tests — they are the real shape this will see
+  in AI-3.
+- `types.py` (or similar) — the normalised request/result carried by Scope item 6: system prompt,
+  user prompt, optional image bytes + MIME, optional extracted PDF text, schema, max output
+  tokens, effort level, and **explicit** `thinking` (never defaulted — see Scope item 6's second
+  rule; Claude Sonnet 5 runs adaptive thinking when the parameter is omitted and `max_tokens`
+  bounds thinking + answer together). Normalised result: raw text, raw response object, token
+  usage (`input_tokens`/`output_tokens`/`total_tokens` — note both OpenAI's and Anthropic's SDKs
+  already expose `usage.input_tokens`/`usage.output_tokens` under those same attribute names, so
+  `cost_guard`'s usage-extraction can stay provider-agnostic without per-provider branching).
+- `drivers/openai_driver.py`, `drivers/anthropic_driver.py` — one function each taking the
+  normalised request and provider credentials/model, returning the normalised result. Effort
+  lands in `reasoning.effort` (OpenAI) vs `output_config.effort` (Anthropic, per Scope item 6 —
+  verify the exact Anthropic parameter name against the installed `anthropic` SDK version rather
+  than assuming, since this is new-to-the-estate territory: no other repo in this workspace
+  currently declares an `anthropic` dependency). `thinking` must be present explicitly in every
+  Anthropic request body (the regression guard named in Required tests). Wrap the provider SDK
+  import in a try/except raising the `missing_dependency` taxonomy error (mirrors
+  `openai_ocr.py`'s existing `except Exception: raise OpenAIOCRExtractionError(...)` around
+  `from openai import OpenAI`). Provider errors re-raise as the taxonomy error with
+  `status_code` preserved from the SDK exception where available, else `502` (mirrors
+  `openai_ocr.py`'s `getattr(exc, "status_code", 502)` pattern). A per-provider passthrough
+  kwarg (e.g. `**extra`) merged into the raw API call keeps Scope item 6's "must not flatten
+  provider capability" rule concrete rather than aspirational.
+
+**Dependencies — new to this package, must be declared in TWO places or
+`tests/test_declared_dependencies.py::test_runtime_imports_are_declared_dependencies` fails:**
+1. `pyproject.toml` → `[project] dependencies`: add `pypdf>=6.13.1` and `openai>=2.41.0` (both
+   already pinned at these floors in `reimbursements/backend/requirements.txt` — match them, don't
+   invent new floors) plus `anthropic` (no existing pin anywhere in this workspace to match —
+   check the current PyPI release and use an unpinned or lower-bounded entry consistent with how
+   this file already treats several deps, e.g. `PyYAML`, `django-cors-headers`, with no version
+   constraint at all).
+2. `tests/test_declared_dependencies.py` → `MODULE_TO_DISTRIBUTION` dict: add `"pypdf": "pypdf"`,
+   `"openai": "openai"`, `"anthropic": "anthropic"`. The AST-based scanner in that test walks
+   *all* function bodies including code inside `try/except ImportError` guards — declaring the
+   dependency is required even though the import is defensive at runtime.
+
+**Version:** bump `pyproject.toml`'s `version` from `2.41.2` to `2.42.0` (minor — new capability
+area, per the Envelope's own version note).
+
+**Invariants / do-not-touch, restated from the Envelope for this section specifically:**
+- No prompts, schemas, or field normalisers cross the seam (Non-goals).
+- Do not touch `reimbursements` or `survey_app` in this WO (Non-goals) — the source-material reads
+  above are read-only reference.
+- No streaming/multi-turn/tool-use/agent-loop surface on the drivers (Non-goals).
+- No new credential handling — drivers read `api_key`/model from whatever the caller passes in
+  (mirroring how `cost_guard`/`openai_ocr.py` read from Django `settings` today); this WO does not
+  touch `.env` or `secrets.yaml`.
+
+Work from this package: open only the files named above (in `reimbursements`, read-only) plus
+whatever you create under `src/django_core_micha/extraction/` and the two dependency-declaration
+files, to verify.
 
 ## Preamble — a REQUIRED block IN this file, not something appended at invocation
 
