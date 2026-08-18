@@ -14,8 +14,6 @@ logger = logging.getLogger("backend")
 
 env = environ.Env(
     DEBUG=(bool, False),
-    EMAIL_PORT=(int, 587),
-    EMAIL_USE_TLS=(bool, True),
 )
 
 DEBUG = env("DEBUG", default=False)
@@ -232,31 +230,26 @@ ONBOARDING_EXTRA_STEP_KEYS = []
 # -------------------------------------------------------------------
 # Email
 # -------------------------------------------------------------------
-from django_core_micha.settings._email_config import resolve_email_backend
+from django_core_micha.settings._email_config import build_mailers, resolve_email_backend
 
-# smtp | resend | postmark | console | "" (auto: console wenn IS_LOCAL/DEBUG, sonst smtp)
+# resend | console | "" (auto: console wenn IS_LOCAL/DEBUG, sonst resend)
 EMAIL_PROVIDER = env("EMAIL_PROVIDER", default="").lower().strip()
 
-EMAIL_HOST = env("EMAIL_HOST", default="")
-EMAIL_PORT = env.int("EMAIL_PORT", default=587)
-EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
-EMAIL_HOST_USER = env("EMAIL_USER", default="")
-EMAIL_HOST_PASSWORD = env("EMAIL_PASSWORD", default="")
+_email_from_user = env("EMAIL_USER", default="")
 
-EMAIL_BACKEND, _anymail_cfg = resolve_email_backend(
+_email_backend, _anymail_cfg = resolve_email_backend(
     provider=EMAIL_PROVIDER,
     is_local=IS_LOCAL,
     debug=DEBUG,
-    host=EMAIL_HOST,
-    password=EMAIL_HOST_PASSWORD,
     resend_key=env("RESEND_API_KEY", default=""),
-    postmark_token=env("POSTMARK_SERVER_TOKEN", default=""),
 )
 if _anymail_cfg:
     ANYMAIL = _anymail_cfg
 
-# API-Provider (resend/postmark) haben keinen EMAIL_USER → DEFAULT_FROM_EMAIL explizit setzen.
-DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default=EMAIL_HOST_USER)
+MAILERS = build_mailers(_email_backend)
+
+# API-Provider (resend) hat keinen EMAIL_USER → DEFAULT_FROM_EMAIL explizit setzen.
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default=_email_from_user)
 
 # -------------------------------------------------------------------
 # Templates (Projekt setzt DIRS / BASE_DIR)

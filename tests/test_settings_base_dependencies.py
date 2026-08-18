@@ -38,7 +38,7 @@ def test_settings_base_is_importable_with_only_declared_dependencies(tmp_path):
         import django
         django.setup()
 
-        from django.conf import settings
+        from django.conf import DEPRECATED_EMAIL_SETTINGS, settings
         from django.utils.module_loading import import_string
 
         # django.setup() only populates INSTALLED_APPS — it does not import
@@ -51,6 +51,62 @@ def test_settings_base_is_importable_with_only_declared_dependencies(tmp_path):
         for storage in settings.STORAGES.values():
             import_string(storage["BACKEND"])
 
+        leaked = DEPRECATED_EMAIL_SETTINGS & settings._wrapped._explicit_settings
+        assert not leaked, f"Deprecated email settings still present: {leaked}"
+        assert hasattr(settings, "MAILERS") and "default" in settings.MAILERS, (
+            "settings.MAILERS not configured"
+        )
+
+        expected_from_email = __import__("os").environ["EXPECTED_FROM_EMAIL"]
+        assert settings.DEFAULT_FROM_EMAIL == expected_from_email
+        assert "EMAIL_HOST_USER" not in settings._wrapped._explicit_settings
+
+        print("OK")
+        """
+    )
+
+    subprocess_env = {
+        **os.environ,
+        "ENV_TYPE": "local",
+        "DJANGO_SETTINGS_MODULE": "consumer_settings",
+        "PYTHONPATH": str(tmp_path),
+        "EMAIL_USER": "sender@example.test",
+        "EXPECTED_FROM_EMAIL": "sender@example.test",
+    }
+    subprocess_env.pop("DEFAULT_FROM_EMAIL", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", check_script],
+        cwd=tmp_path,
+        env=subprocess_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, (
+        f"Importing settings_base and resolving its MIDDLEWARE/STORAGES with "
+        f"only pyproject.toml's declared dependencies failed:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "OK" in result.stdout
+
+
+def test_default_from_email_env_override_wins(tmp_path):
+    settings_module = tmp_path / "consumer_settings.py"
+    settings_module.write_text(
+        "from django_core_micha.settings.settings_base import *  # noqa: F401,F403\n",
+        encoding="utf-8",
+    )
+
+    check_script = textwrap.dedent(
+        """
+        import django
+        django.setup()
+
+        from django.conf import settings
+        assert settings.DEFAULT_FROM_EMAIL == "override@example.test"
+        assert "EMAIL_HOST_USER" not in settings._wrapped._explicit_settings
         print("OK")
         """
     )
@@ -63,6 +119,8 @@ def test_settings_base_is_importable_with_only_declared_dependencies(tmp_path):
             "ENV_TYPE": "local",
             "DJANGO_SETTINGS_MODULE": "consumer_settings",
             "PYTHONPATH": str(tmp_path),
+            "EMAIL_USER": "sender@example.test",
+            "DEFAULT_FROM_EMAIL": "override@example.test",
         },
         capture_output=True,
         text=True,
@@ -70,8 +128,7 @@ def test_settings_base_is_importable_with_only_declared_dependencies(tmp_path):
     )
 
     assert result.returncode == 0, (
-        f"Importing settings_base and resolving its MIDDLEWARE/STORAGES with "
-        f"only pyproject.toml's declared dependencies failed:\n"
+        f"DEFAULT_FROM_EMAIL override check failed:\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert "OK" in result.stdout

@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.43.0] — 2026-08-18
+
+### Changed
+
+DEPS-1 moves the supported Django range from `>=6.0.5,<6.1` to `>=6.1,<7.0`, unblocking
+the Django 6.1 upgrades in kerzenziehen PR #50 and innoservice PR #55 once those apps
+adopt django-core-micha 2.43.0. Email configuration now uses Django's `MAILERS`
+setting exclusively and supports only the estate's live console and Resend paths;
+the unused SMTP and Postmark branches were removed. `MAILERS` is a Django 6.1+-only
+concept — on Django 6.0.x it is inert and Django silently falls back to its own SMTP
+default, so the lower bound was raised to `>=6.1` (not left at `>=6.0.5`) specifically
+to prevent that silent breakage in any consuming app still on Django 6.0.x: those apps
+now simply cannot resolve 2.43.0 at all, rather than resolving it and losing mail
+routing. This eliminates the `RemovedInDjango70Warning` and avoids Django 6.1's
+settings-conflict boot failure, as verified against Django 6.1's deprecated-settings
+inventory.
+
 ## [2.41.1] — 2026-08-06
 
 ### Fixed

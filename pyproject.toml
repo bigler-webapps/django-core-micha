@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-core-micha"
-version = "2.42.1"
+version = "2.43.0"
 authors = [
   { name="Micha Bigler", email="micha.bigler2@gmail.com" },
 ]
 description = "Core utilities and settings for Django Apps"
 requires-python = ">=3.10"
 dependencies = [
-    "Django>=6.0.5,<6.1",
+    "Django>=6.1,<7.0",
     "PyYAML",
     "psycopg2-binary",
     "filetype>=1.2,<2.0",
@@ -69,4 +69,3 @@ where = ["src"]
   "templates/**/*.email",
   "locale/**/django.*",
 ]
-
