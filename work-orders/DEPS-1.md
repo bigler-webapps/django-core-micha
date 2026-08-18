@@ -20,6 +20,11 @@ surfaces, so dcm becomes genuinely — not just nominally — usable under 6.1. 
 published dcm release that consuming apps' Renovate PRs can pin to and resolve cleanly, verified
 by dcm's own full test suite passing unchanged under Django 6.1.
 
+**This release does not turn those two PRs green by itself.** Both currently pin
+`django-core-micha==2.41.2`, which still carries the `<6.1` cap — Renovate must first pull them up
+to `2.43.0` (its next scan, or a manual rebase) before they can resolve. Expect them to stay red
+until that happens; that is not a sign the fix failed.
+
 ## Background — what was already verified in this session
 
 - Full local test run of dcm's suite (667 tests) under Django 6.1 (Python 3.13, `channels==4.3.2`
@@ -39,6 +44,10 @@ by dcm's own full test suite passing unchanged under Django 6.1.
   **wiring `settings.MAILERS` with a default mailer, resolved from the same already-existing
   `EMAIL_PROVIDER`/backend resolution dcm already does** — not a rewrite of the provider
   abstraction.
+- **No consuming app sets `EMAIL_BACKEND` or `MAILERS` itself.** Verified across all twelve app
+  repos' `backend/**/*.py` (zero matches outside dcm). A `MAILERS["default"]` introduced in dcm
+  therefore cannot silently override an app-level mail configuration — there is none to override.
+  This is the main thing that would have made the settings change risky, and it does not apply.
 
 ## Scope
 
@@ -72,7 +81,11 @@ by dcm's own full test suite passing unchanged under Django 6.1.
   uses resend exclusively. That simplification, if ever wanted, is a separate WO.
 - **Do not bump or touch any consuming app's own `Django==` or `django-core-micha==` pin.** This WO
   only unblocks — kerzenziehen/innoservice/others pick up the new dcm version on their own
-  Renovate/PR schedule, out of scope here.
+  Renovate/PR schedule, out of scope here. **This explicitly includes the six apps that carry their
+  own `<6.1` cap** (`cockpit`, `hram`, `spesix`, `fitness-monitor`, `hpc-bridge`, `webshop-guenter`
+  — see Risks): widening those is per-app work with its own per-app verification, not a sweep to
+  fold in here. Track it as a follow-up rather than dropping it — the point of naming them is that
+  they will otherwise be assumed handled.
 - **Do not silently widen or touch dcm's other dependency pins** (`django-allauth`, `djangorestframework`,
   `django-cors-headers`, `channels`, `channels_redis`, `django-anymail`, `django-environ`,
   `whitenoise`, `cryptography`, etc.) beyond what's already unpinned today. If the Django-6.1 suite
@@ -93,12 +106,40 @@ by dcm's own full test suite passing unchanged under Django 6.1.
   install without triggering a fresh dcm compatibility check — a future minor could break something
   dcm's suite doesn't currently exercise, and nothing will flag it until symptoms show up
   downstream. This was an explicit operator trade-off against `<6.2`'s narrower/safer window.
+
+  **Consuming apps do not inherit that openness, and the reason matters both ways.** Every one of
+  the twelve app repos is independently bounded on Django today (verified against remote `develop`,
+  not local checkouts): six pin exactly (`jg-ferien`, `survey_app`, `survey_contact_app`,
+  `reimbursements` at `==6.0.7`; `kerzenziehen` `==6.0.5`; `innoservice` `==6.0.6`) and six carry
+  their own cap (`cockpit`, `spesix`, `hpc-bridge`, `webshop-guenter` at `>=6.0.5,<6.1`;
+  `fitness-monitor` `>=6.0.6,<6.1`; `hram` `>=6.0.7,<6.1`). So **no app can silently receive Django
+  6.1 as a side effect of a dcm bump** — that failure mode was considered and does not exist here.
+
+  The consequence runs the other direction instead: for those six capped apps, **widening dcm moves
+  nothing.** Their own `<6.1` — today a redundant mirror of dcm's cap — becomes the sole binding
+  constraint the moment dcm's is gone, and it is the kind of constraint nobody thinks to look at
+  because it used to be harmless duplication. Widening them is per-app work, deliberately **not** in
+  this WO's scope (see non-goals), but it should be tracked, or those six quietly sit on 6.0.x
+  indefinitely while everyone assumes DEPS-1 handled it.
+
+- **`reimbursements` is the one app that takes this release with no PR and no review.** Its dcm pin
+  is `django-core-micha>=2.42.1` — unbounded — so its next image build resolves to 2.43.0 and picks
+  up the `MAILERS` settings change without a Renovate PR, a pin bump, or anything to review. Its
+  Django stays at `==6.0.7`, so no Django movement; the exposure is to the settings change alone.
+  Worth a deliberate look at that app after publishing rather than a surprise later.
 - **`MAILERS`'s exact expected shape/keys for this Django version aren't yet confirmed against
   Django's own docs/release notes** by this Envelope — the Orchestrator/implementer must verify the
   correct settings shape while implementing, not guess from the deprecation warning text alone.
-- **dcm has no CI test gate on push to `main`** (`publish.yml` only publishes; it does not run
-  pytest first) — the authoritative test run must happen before the commit lands, not be assumed
-  from CI green.
+- **dcm's CI test gate is real but doubly conditional — and both conditions happen to hold here.**
+  `publish.yml` runs `pytest -q` ("Install and run tests", `:98`) *before* "Build package" (`:106`)
+  and "Publish to PyPI" (`:110`), so a red suite does block the publish. But it only runs when
+  (a) the push touches the `paths` filter (`pyproject.toml` or `src/django_core_micha/**`) — a
+  commit touching only `tests/`, `CHANGELOG.md` or docs never triggers the workflow at all — and
+  (b) `should_publish == 'true'`, i.e. the version in `pyproject.toml` actually increased; every
+  step carries that `if:`, the test step included, so a version-less push skips the tests too.
+  This WO bumps the version *and* touches `pyproject.toml`, so the gate does fire for it. The
+  Orchestrator's own authoritative run before commit stands regardless — `AGENTS.md` makes it the
+  gate — but not because CI lacks one.
 
 ## Required tests to WRITE
 
