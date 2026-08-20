@@ -12,6 +12,7 @@ import yaml
 
 # Import existing scripts as modules
 from django_core_micha.scripts import generate_env
+from django_core_micha.scripts.drift_check import collect_drift_warnings
 
 
 # Optional local-dev-only services, gated behind a same-named Compose profile in
@@ -493,6 +494,11 @@ def main():
 
     # DEBUG OUTPUT: Damit wir sehen, wo er sucht
     print(f"[DEBUG] Searching for frontend in: {frontend_dir}")
+
+    # DX-4: warn (never block) when .env has outlived project.yaml, or the local
+    # venv has outlived requirements.txt. Silent on a clean start.
+    for warning in collect_drift_warnings(BASE_DIR, env_mode):
+        print(f"[WARN] {warning}")
 
     # --- SCHRITT 1: ENV GENERATION ---
     if FORCE_ENV:

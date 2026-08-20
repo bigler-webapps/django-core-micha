@@ -112,12 +112,40 @@ No precondition. Independent of hram's `DEP-4`, which this would have made visib
 
 # B. Implementation map — filled by the Orchestrator — ADDRESSED TO THE IMPLEMENTER
 
-> **PLACEHOLDER — not yet written.** The Orchestrator fills this on `git pull` with the context
-> package (`src/django_core_micha/scripts/run_dev.py`, `generate_env.py` — in particular the
-> `app_env` / `env_overrides` precedence comment and the platform-computed `add()` keys that cannot be
-> overridden — the requirements-parsing approach, and at least two apps' `project.yaml` for shape),
-> the absolute target working directory, the progress contract, and the preamble. **Do not dispatch
-> while this placeholder stands.**
+**Not dispatched to Codex** — `.claude/codex-status.md` already carried a same-day (2026-08-20)
+`unavailable` line (out of credits during `webapp-management/INF-42`); known-unavailable shortcut
+applied. The Orchestrator implemented directly, which flips authorship and made independent
+`reviewer` mandatory (already required at Tier 2 for new logic).
+
+Filled in retrospectively (implementation is complete) for the durable record:
+
+- New module `src/django_core_micha/scripts/drift_check.py`: `check_env_drift(base_dir, env_name)`
+  (compares `.env` against `project.yaml`'s raw `app_env`/`env_overrides` keys — value-diffed but
+  never printed — plus `secrets.yaml`'s declared, non-`exclude_from_env` keys — presence-only) and
+  `check_venv_drift(base_dir)` (compares `backend/.venv`'s installed distributions, read directly
+  from `*.dist-info/METADATA`, against `backend/requirements.txt`'s `==`/`>=` pins — no subprocess,
+  no import, no network). `collect_drift_warnings()` wraps both in independent `except Exception`
+  guards and is the only symbol `run_dev.py` imports.
+- Wired into `run_dev.py:main()` right after the `[DEBUG] Searching for frontend in...` line —
+  before `.env` generation, so a stale `.env` is flagged before it might get silently regenerated
+  over, and before any docker command runs.
+- Comparable-set classification (the false-positive trap the WO's Risks section named): the 24
+  keys `generate_env.py`'s `add()` computes itself and refuses `app_env`/`env_overrides` overrides
+  for (`ENV_TYPE`, `PROJECT_NAME`, `COMPOSE_PROJECT_NAME`, `CONTAINER_NAME_PREFIX`, `IMAGE_TAG`,
+  `IMAGE_NAME`, the five local-only port keys, `ROUTER_NAME`, `MFA_WEBAUTHN_RP_NAME`,
+  `BACKUP_ENABLE`, `TRAEFIK_ENABLE`, `USE_EXTERNAL_PROXY`, the three volume-name keys,
+  `MASTER_BASE_URL`, `MASTER_PUBLIC_IP`, `DJANGO_ALLOWED_HOSTS`, `PUBLIC_ORIGIN`, `DEBUG`,
+  `CSRF_TRUSTED_URLS`, `TRAEFIK_ROUTER_RULE`) are excluded from the drift check entirely — they are
+  never in the comparable set, not recomputed and compared. Everything else in `app_env`/
+  `env_overrides`, plus every non-excluded `secrets.yaml` key, is comparable.
+- Exercised directly (function-level, not a full `run-dev` invocation — that would need docker and
+  would mutate other repos' running containers) against real app shapes per the WO's own
+  "twenty repos, one script" risk: `hram` (has `backend/.venv` — correctly reported 15 packages
+  below their `DEP-4` pins, since the venv was checked before that WO's own venv sync landed
+  there), `survey_app`/`jg-ferien` (no local venv, no drift — silent, correctly), `spesix` (no
+  `backend/.venv`, but a `.env` missing 5 keys `secrets.yaml` declares — correctly flagged, key
+  names only, no values). One of these (`hram`) surfaced a real bug in `DEP-4`'s own verification
+  the same day — see that WO's register Notiz.
 
 # C. Orchestrator only — NOT ADDRESSED TO THE IMPLEMENTER
 
