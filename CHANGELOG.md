@@ -1,5 +1,44 @@
 # Changelog
 
+## [2.43.1] — 2026-08-27
+
+### Added
+
+`run-dev --refresh-deps` requests a uv dependency refresh explicitly and implies `--build`.
+In `--no-log-stream` mode `run-dev` now waits for the backend to answer and closes with exactly
+one parseable line — `READY <url>` or `TIMEOUT after <n>s` (60 s default) — leaving the containers
+running either way. Agent sessions previously had nothing to wait on: `docker compose up -d`
+returns at container *creation* and no consuming app declares a `backend` healthcheck, so the
+detached mode returned into an app that was not yet serving, while every other mode blocks
+forever by design. The readiness probe resolves its port through `docker compose port`, never by
+reading `.env`.
+
+### Changed
+
+DCM-DX-5: `--build` no longer sets `UV_FLAGS=--refresh`. That flag defeats the
+`--mount=type=cache,target=/root/.cache/uv` cache in the consuming apps' Dockerfiles, so a local
+`--build` re-resolved dependencies from scratch on every invocation while CI, building with the
+default `ARG UV_FLAGS=""`, hit the cache in full — the largest single contributor to the
+local/staging build-time gap. The deprecated `--refresh` flag keeps its existing meaning as an
+alias for `--build` and was deliberately not repurposed. `ensure_frontend_node_modules` now also
+runs `pnpm install` when `pnpm-lock.yaml`/`package.json` is newer than `node_modules/.modules.yaml`,
+not only when `node_modules` is absent — a changed lockfile previously left the host-side frontend
+build running against stale dependencies with no error, which the container then served via
+`FRONTEND_BUILD_DIR`. `--watch`'s help text now states that it runs a full `vite build` per change
+rather than HMR (`--vite` is HMR), and the `--watch` + `--no-log-stream` message describes what
+that combination does instead of reading as a usage error. Script output is unbuffered and the
+frontend watch loop emits a heartbeat, so a long build no longer looks like a stalled process.
+
+### Fixed
+
+`docker rm -f traefik` ran unconditionally — and twice — from whichever app repo `run-dev` was
+started in, removing a traefik container belonging to another Compose project, in practice
+`webapp-management`'s. Removal is now scoped to the invocation's own project, whose name is
+derived from `project.yaml` using `generate_env`'s own `{project_name}_{env_name}` formula. This
+was caught in review: the first implementation reconstructed the project name from the directory
+basename, which misclassified the invocation's own container as foreign in almost every case,
+and reading the name back from `.env` is not an option.
+
 ## [2.43.0] — 2026-08-18
 
 ### Changed
