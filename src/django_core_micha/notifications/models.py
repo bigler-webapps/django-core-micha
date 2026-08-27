@@ -6,6 +6,7 @@ from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db.models import Q
+from django.utils import timezone
 
 
 class PushSubscription(models.Model):
@@ -186,7 +187,17 @@ class NotificationManager(models.Manager):
         if notifiable is not None:
             defaults["content_type"] = ContentType.objects.get_for_model(notifiable)
             defaults["object_id"] = str(notifiable.pk)
-        return self.get_or_create(dedup_key=dedup_key, defaults=defaults)
+        return self.get_or_create(
+            dedup_key=dedup_key,
+            resolved_at__isnull=True,
+            defaults=defaults,
+        )
+
+    def get_open(self, notification_type, notifiable):
+        """Return the open (unresolved) Notification for this type+target, or None."""
+
+        dedup_key = self.model.build_dedup_key(notification_type, notifiable)
+        return self.filter(dedup_key=dedup_key, resolved_at__isnull=True).first()
 
 
 class Notification(models.Model):
@@ -213,6 +224,7 @@ class Notification(models.Model):
     notifiable = GenericForeignKey("content_type", "object_id")
     dedup_key = models.CharField(max_length=128)
     expires_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = NotificationManager()
@@ -223,8 +235,20 @@ class Notification(models.Model):
             models.Index(fields=["notification_type", "dedup_key"]),
         ]
         constraints = [
-            models.UniqueConstraint(fields=["dedup_key"], name="uniq_notification_dedup_key"),
+            models.UniqueConstraint(
+                fields=["dedup_key"],
+                condition=Q(resolved_at__isnull=True),
+                name="uniq_notification_dedup_key_open",
+            ),
         ]
+
+    def mark_resolved(self, *, when=None):
+        """Close this notification's open episode; a later emit for the same
+        (type, target) starts a new one instead of reusing this row."""
+
+        if self.resolved_at is None:
+            self.resolved_at = when or timezone.now()
+            self.save(update_fields=["resolved_at"])
 
     @classmethod
     def build_dedup_key(cls, notification_type, notifiable):

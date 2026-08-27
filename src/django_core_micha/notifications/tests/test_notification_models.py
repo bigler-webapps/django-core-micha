@@ -72,6 +72,42 @@ def test_notification_deduplicates_logical_messages_and_enforces_constraint():
             dedup_key=first.dedup_key,
         )
 
+    first.mark_resolved()
+    second_episode = Notification.objects.create(
+        notification_type="payment_due",
+        category="finance",
+        content=content,
+        dedup_key=first.dedup_key,
+    )
+
+    assert second_episode != first
+    assert Notification.objects.filter(dedup_key=first.dedup_key).count() == 2
+
+
+@pytest.mark.django_db
+def test_open_dedup_lookup_returns_current_episode_when_resolved_history_exists():
+    content = {"title_key": "Notif.Payment.TITLE"}
+    first = Notification.objects.create(
+        notification_type="payment_due",
+        category="finance",
+        content=content,
+        dedup_key="consumer-shaped-lookup",
+    )
+    first.mark_resolved()
+    current = Notification.objects.create(
+        notification_type="payment_due",
+        category="finance",
+        content=content,
+        dedup_key=first.dedup_key,
+    )
+
+    found = Notification.objects.get(
+        dedup_key=first.dedup_key,
+        resolved_at__isnull=True,
+    )
+
+    assert found == current
+
 
 @pytest.mark.django_db
 def test_notification_dedup_key_with_no_notifiable():

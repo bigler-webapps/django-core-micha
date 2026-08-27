@@ -41,7 +41,25 @@ def _get_notification_with_retry(*, notification_type, category, notifiable, con
             )
             return notification
     except IntegrityError:
-        return Notification.objects.get(dedup_key=dedup_key)
+        try:
+            return Notification.objects.get(
+                dedup_key=dedup_key,
+                resolved_at__isnull=True,
+            )
+        except Notification.DoesNotExist:
+            # The row we raced against was resolved in the gap between our failed
+            # insert and this lookup -- there is no open row to reuse, so start a
+            # fresh episode instead of raising.
+            with transaction.atomic():
+                notification, _ = Notification.objects.get_or_create_by_dedup(
+                    notification_type=notification_type,
+                    category=category,
+                    notifiable=notifiable,
+                    content=content,
+                    urgency=urgency,
+                    expires_at=expires_at,
+                )
+                return notification
 
 
 def _get_delivery_with_retry(*, recipient, channel):
@@ -145,3 +163,33 @@ def notify_subscribers(
         content=content, notifiable=notifiable, channels=channels, transient=transient,
         expires_at=expires_at,
     )
+
+
+def resolve(*, type, notifiable) -> Notification | None:
+    """Close the open episode for ``type``+``notifiable``.
+
+    Mark every not-yet-done recipient done and close the notification, so the
+    next emit for the same (type, target) starts a fresh episode instead of
+    silently reusing this one. Return ``None`` when there is no open
+    notification to resolve.
+    """
+
+    with transaction.atomic():
+        notification = Notification.objects.select_for_update().filter(
+            dedup_key=Notification.build_dedup_key(type, notifiable),
+            resolved_at__isnull=True,
+        ).first()
+        if notification is None:
+            return None
+        NotificationRecipient.objects.filter(
+            notification=notification,
+            done_at__isnull=True,
+        ).update(done_at=timezone.now())
+        notification.mark_resolved()
+    return notification
+
+
+def has_open(*, type, notifiable) -> bool:
+    """Return whether an open Notification exists for ``type``+``notifiable``."""
+
+    return Notification.objects.get_open(type, notifiable) is not None

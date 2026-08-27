@@ -6,7 +6,7 @@ from django.db import IntegrityError
 from django.utils import timezone
 
 from django_core_micha.notifications import dispatch
-from django_core_micha.notifications.api import notify
+from django_core_micha.notifications.api import has_open, notify, resolve
 from django_core_micha.notifications.models import (
     Notification,
     NotificationDelivery,
@@ -135,6 +135,7 @@ def test_notify_creates_canonical_rows_dispatches_and_deduplicates(monkeypatch):
 
     assert second == first
     assert Notification.objects.count() == 1
+    assert first.resolved_at is None
     assert first.recipients.count() == 2
     assert NotificationDelivery.objects.filter(recipient__notification=first).count() == 6
     assert set(NotificationDelivery.objects.values_list("status", flat=True)) == {"sent"}
@@ -152,6 +153,77 @@ def test_notify_creates_canonical_rows_dispatches_and_deduplicates(monkeypatch):
         "envelope": "notification",
         "channel": "chip",
     }
+
+
+@pytest.mark.django_db
+def test_notify_after_resolution_creates_and_delivers_a_fresh_episode(monkeypatch):
+    register_notification_type(make_type(active=False, passive=True))
+    user = make_user("notify-after-resolution")
+    calls = []
+    monkeypatch.setattr(
+        "django_core_micha.notifications.api.dispatch",
+        lambda channel, **kwargs: calls.append((channel, kwargs)),
+    )
+    content = {"title_key": "Notification title", "body_key": "Notification body"}
+
+    first = notify(
+        type="test_notice",
+        recipients=user,
+        notifiable=user,
+        content=content,
+    )
+    resolved = resolve(type="test_notice", notifiable=user)
+    second = notify(
+        type="test_notice",
+        recipients=user,
+        notifiable=user,
+        content=content,
+    )
+
+    first.refresh_from_db()
+    assert resolved == first
+    assert first.resolved_at is not None
+    assert second.pk != first.pk
+    assert second.resolved_at is None
+    assert first.recipients.get(user=user).done_at is not None
+    assert second.recipients.filter(user=user).count() == 1
+    assert NotificationDelivery.objects.filter(recipient__notification=second).count() == 1
+    assert [channel for channel, _ in calls] == ["chip", "chip"]
+
+
+@pytest.mark.django_db
+def test_open_helpers_track_the_current_episode_after_resolved_history_exists():
+    user = make_user("open-helper")
+    content = {"title_key": "Notification title", "body_key": "Notification body"}
+    first, first_created = Notification.objects.get_or_create_by_dedup(
+        notification_type="test_notice",
+        category="finance",
+        notifiable=user,
+        content=content,
+    )
+    first_recipient = NotificationRecipient.objects.create(notification=first, user=user)
+
+    assert first_created is True
+    assert resolve(type="test_notice", notifiable=user) == first
+    first_recipient.refresh_from_db()
+    assert first_recipient.done_at is not None
+
+    second, second_created = Notification.objects.get_or_create_by_dedup(
+        notification_type="test_notice",
+        category="finance",
+        notifiable=user,
+        content=content,
+    )
+
+    assert second_created is True
+    assert second.pk != first.pk
+    assert Notification.objects.get_open("test_notice", user) == second
+    assert has_open(type="test_notice", notifiable=user) is True
+
+    NotificationRecipient.objects.create(notification=second, user=user)
+    assert resolve(type="test_notice", notifiable=user) == second
+    assert has_open(type="test_notice", notifiable=user) is False
+    assert Notification.objects.filter(dedup_key=first.dedup_key).count() == 2
 
 
 @pytest.mark.django_db
