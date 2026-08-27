@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.43.2] — 2026-08-27
+
+### Fixed
+
+DCM-NOTIF-10: a `Notification` whose problem had already been resolved was never reused by a later
+`notify()` for the same (type, target) — `dedup_key` carried a permanent `UniqueConstraint`, so a
+monitor that went down, recovered, and went down again alerted exactly once, ever. `Notification`
+gains a nullable `resolved_at`; the uniqueness is now partial (at most one OPEN row per `dedup_key`),
+so an emit after resolution starts a fresh episode. New `django_core_micha.notifications.api.resolve()`
+and `.has_open()` primitives; `get_or_create_by_dedup` and the dedup lookups now scope to the open
+row. Migration `0009` backfills `resolved_at` for existing fully-resolved rows. No change for callers
+that never resolve a notification (e.g. the todo channel), which keep their previous one-row-per-key
+behaviour unchanged.
+
 ## [2.43.1] — 2026-08-27
 
 ### Added
