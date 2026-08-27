@@ -157,9 +157,63 @@ Narrow and pure-function, in `tests/test_run_dev.py`, no Docker:
 
 # B. Implementation map — filled by the Orchestrator — ADDRESSED TO THE IMPLEMENTER
 
-*(placeholder — not yet filled. Per `AGENTS.md` → Work Order, this WO must NOT be dispatched to an
-implementer while this section still carries the placeholder and no preamble block is present.)*
+Per `.claude/models.local.json`, `implementation.runtime` is `claude`/`sonnet` — the Orchestrator
+implements directly (no `codex exec` dispatch, no separate implementer session). All six scope items
+landed in one pass in `src/django_core_micha/scripts/run_dev.py`:
+
+- `resolve_build_and_uv_flags` (new pure function) + the `--refresh-deps` flag.
+- `frontend_needs_pnpm_install` (new pure function) + `ensure_frontend_node_modules`'s marker check
+  against `node_modules/.modules.yaml`.
+- `wait_for_backend_ready`/`format_ready_line`/`format_timeout_line`/`resolve_backend_port`/
+  `parse_compose_port_output`/`check_http_ready`/`announce_backend_readiness` for the readiness gate,
+  wired into both `--no-log-stream` return points (CLASSIC and VITE modes).
+- `should_remove_traefik_container`/`get_traefik_container_project` for the traefik-ownership check.
+- Module-level `print = functools.partial(builtins.print, flush=True)` monkeypatch + the watch-loop
+  heartbeat (`FRONTEND_WATCH_HEARTBEAT_SECONDS`).
+- `--watch` help text + the reworded `--watch`+`--no-log-stream` info line.
+
+Fourteen new tests added to `tests/test_run_dev.py` (all pure-function, no Docker), per the WO's
+"Required tests to WRITE" list.
 
 # C. Orchestrator only — NOT ADDRESSED TO THE IMPLEMENTER
 
-*(placeholder — filled by the Orchestrator together with Part B.)*
+## Review routing
+
+`review` per `.claude/models.local.json` is `codex`/`gpt-5.6-luna`, but `.claude/codex-status.md`
+recorded `unavailable` (hang, not quota) as the newest 2026-08-27 entry, so the known-unavailable
+shortcut applied: fell back to `review_fallback` (`claude`/`sonnet`), spawned as an independent
+`reviewer` sub-agent with the diff passed inline (author = Orchestrator itself here, since
+`implementation.runtime` is `claude` — independence flip applies, review is mandatory).
+
+Findings: 1 blocker (P1) + 1 nit (P3).
+- **Blocker (fixed):** the traefik-ownership check's `own_project_name` was reconstructed from
+  `normalize_project_name(BASE_DIR.name)`, which does not match what `docker-compose` actually
+  resolves — `generate_env.py:258` writes `COMPOSE_PROJECT_NAME=f"{project_name}_{env_name}"` into
+  `.env`, auto-loaded by `docker-compose`, so the two names diverge on every ordinary invocation
+  (no `--compose-project-name`/`--spool`) and the invocation's own traefik container would almost
+  always be misclassified as foreign and left running — the opposite of scope item 4's goal. Fixed
+  by `compute_expected_compose_project_name` + `load_project_yaml_name`, which read `project.yaml`
+  directly (never `.env`) and mirror `generate_env.py`'s own formula. 6 new tests added covering it.
+- **Nit (accepted, not fixed):** `parse_compose_port_output` takes the first line unconditionally —
+  fine for the documented single-mapping case, would pick an arbitrary mapping if `docker-compose
+  port` ever emitted both an IPv4 and IPv6 line. Low risk given the existing single-service
+  convention; not exercised further, left as a documented residual risk.
+
+No re-review dispatched after the fix (AGENTS.md Gate #2: fix in-scope findings, no further reviewer
+pass without approval) — the fix was re-verified by the full scoped test gate below.
+
+## Verification
+
+Test gate (`tests/test_run_dev.py` + `tests/test_drift_check.py`, run with `PYTHONPATH=src` from
+`django-core-micha/` since the environment's installed `django-core-micha` package predates several
+already-landed WOs and is not editable-installed): **31 passed** (7 pre-existing `test_run_dev` +
+6 `test_drift_check` untouched-and-green + 18 new). `python -m py_compile` clean.
+
+No prototype artifact in scope (backend CLI script, no frontend/UI surface) — the rendered
+two-width side-by-side gate does not apply.
+
+## Register + commit
+
+Register row updated to `done` below. Commit lands on `main` (django-core-micha is infra/platform
+per `AGENTS.md` → Branching, trunk = `main`+`develop`; this repo has no `develop` branch in use for
+this change).

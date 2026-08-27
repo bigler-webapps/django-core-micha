@@ -1,11 +1,15 @@
 # webapp-management/src/django_core_micha/scripts/run_dev.py
 import argparse
+import builtins
+import functools
 import subprocess
 import sys
 import shutil
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import yaml
@@ -13,6 +17,14 @@ import yaml
 # Import existing scripts as modules
 from django_core_micha.scripts import generate_env
 from django_core_micha.scripts.drift_check import collect_drift_warnings
+
+# DCM-DX-5: unbuffered output -- a long `--build`/`--watch` run must not look like a
+# stall to an agent following AGENTS.md's ">5 min silence = suspected stall" rule.
+print = functools.partial(builtins.print, flush=True)
+
+BACKEND_READINESS_TIMEOUT_SECONDS = 60
+BACKEND_READINESS_POLL_INTERVAL_SECONDS = 1.0
+FRONTEND_WATCH_HEARTBEAT_SECONDS = 60
 
 
 # Optional local-dev-only services, gated behind a same-named Compose profile in
@@ -74,6 +86,15 @@ def load_compose_service_names(compose_files_args):
     return names
 
 
+def resolve_build_and_uv_flags(build, refresh_deps, refresh):
+    """`--build` alone matches staging's default `ARG UV_FLAGS=""` (hits the Dockerfile's
+    uv cache mount in full); only `--refresh-deps` sets UV_FLAGS=--refresh and it implies
+    --build. The deprecated `--refresh` keeps meaning exactly --build, not a refresh."""
+    should_build = bool(build or refresh_deps or refresh)
+    uv_flags = "--refresh" if refresh_deps else ""
+    return should_build, uv_flags
+
+
 def compute_active_local_profiles(*, celery_flag, java_flag, local_profiles_eligible, compose_service_names):
     """Decide which OPTIONAL_LOCAL_SERVICE_PROFILES entries are active for this run.
 
@@ -89,6 +110,126 @@ def compute_active_local_profiles(*, celery_flag, java_flag, local_profiles_elig
         "celery": bool(celery_flag or "celery_worker" in compose_service_names),
         "java": bool(java_flag),
     }
+
+
+def compute_expected_compose_project_name(explicit_override, project_name_from_yaml, env_mode, fallback_name):
+    """Mirror generate_env.py's own COMPOSE_PROJECT_NAME formula
+    (`f"{project_name}_{env_name}"`, written into `.env` and auto-loaded by
+    docker-compose) instead of guessing from the directory name -- an explicit
+    `--compose-project-name`/`--spool` override always wins; `project.yaml` is read
+    directly (never `.env`, which this codebase must not read)."""
+    if explicit_override:
+        return explicit_override
+    if project_name_from_yaml:
+        return f"{project_name_from_yaml}_{env_mode}"
+    return fallback_name
+
+
+def load_project_yaml_name(base_dir, config_path="project.yaml"):
+    path = base_dir / config_path
+    if not path.exists():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        return None
+    return data.get("project_name")
+
+
+def should_remove_traefik_container(container_project, own_project_name):
+    """A local traefik container is removed only when it belongs to THIS invocation's
+    own Compose project -- a foreign one (in practice webapp-management's) is left
+    alone. No container at all is handled by the caller before this is even consulted."""
+    if not container_project:
+        return False
+    return container_project == own_project_name
+
+
+def get_traefik_container_project():
+    """Best-effort read of the local traefik container's own Compose project label.
+    Returns None when no such container exists (nothing to remove, nothing to keep)."""
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", '{{ index .Config.Labels "com.docker.compose.project" }}', "traefik"],
+            capture_output=True,
+            text=True,
+            check=True,
+            shell=(sys.platform == "win32"),
+        )
+    except subprocess.CalledProcessError:
+        return None
+    project = result.stdout.strip()
+    return project or None
+
+
+def parse_compose_port_output(output):
+    """Parse `docker-compose ... port backend 8000` output (e.g. '0.0.0.0:32771')."""
+    first_line = (output or "").strip().splitlines()[0].strip() if (output or "").strip() else ""
+    if ":" not in first_line:
+        return None
+    port = first_line.rsplit(":", 1)[-1]
+    return port if port.isdigit() else None
+
+
+def resolve_backend_port(compose_files_args):
+    """Resolve the backend's published port via Compose itself -- never by reading
+    `.env` (AGENTS.md forbids reading it; WEB_PORT lives there)."""
+    try:
+        result = subprocess.run(
+            ["docker-compose"] + compose_files_args + ["port", "backend", "8000"],
+            capture_output=True,
+            text=True,
+            check=True,
+            shell=(sys.platform == "win32"),
+        )
+    except subprocess.CalledProcessError:
+        return None
+    return parse_compose_port_output(result.stdout)
+
+
+def check_http_ready(url, timeout_seconds=2):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_seconds):
+            return True
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False
+
+
+def format_ready_line(url):
+    return f"READY {url}"
+
+
+def format_timeout_line(seconds):
+    return f"TIMEOUT after {seconds}s"
+
+
+def wait_for_backend_ready(is_ready, url, timeout_seconds, poll_interval_seconds,
+                            sleep_fn=time.sleep, now_fn=time.monotonic):
+    """Poll `is_ready()` until it returns True or `timeout_seconds` elapses, using
+    injectable clock/sleep so this is testable without real waiting or Docker."""
+    deadline = now_fn() + timeout_seconds
+    while now_fn() < deadline:
+        if is_ready():
+            return format_ready_line(url)
+        sleep_fn(poll_interval_seconds)
+    return format_timeout_line(timeout_seconds)
+
+
+def announce_backend_readiness(compose_files_args):
+    """The `--no-log-stream` readiness gate: gives agent sessions the same
+    parse-one-line contract AGENTS.md already relies on for Codex (RESULT: DONE|BLOCKED)."""
+    port = resolve_backend_port(compose_files_args)
+    if port is None:
+        print("[WARN] Could not resolve the backend port via 'docker-compose ... port backend 8000'; skipping readiness wait.")
+        return
+    url = f"http://localhost:{port}/"
+    print(f"[INFO] Waiting for backend to become ready at {url} (timeout {BACKEND_READINESS_TIMEOUT_SECONDS}s)...")
+    print(wait_for_backend_ready(
+        lambda: check_http_ready(url),
+        url,
+        BACKEND_READINESS_TIMEOUT_SECONDS,
+        BACKEND_READINESS_POLL_INTERVAL_SECONDS,
+    ))
 
 
 def stream_docker_logs(compose_files_args, services):
@@ -111,11 +252,33 @@ def stream_docker_logs(compose_files_args, services):
         print(f"[WARN] Log stream interrupted: {e}")
 
 
+def frontend_needs_pnpm_install(node_modules_exists, marker_mtime, source_mtimes):
+    """Decide whether `pnpm install` must run: missing node_modules (existing
+    behaviour, unbroken), no install-state marker yet, or package.json/pnpm-lock.yaml
+    newer than pnpm's own marker (`node_modules/.modules.yaml`)."""
+    if not node_modules_exists:
+        return True
+    if marker_mtime is None:
+        return True
+    return any(source_mtime > marker_mtime for source_mtime in source_mtimes)
+
+
 def ensure_frontend_node_modules(frontend_dir):
     node_modules = frontend_dir / "node_modules"
+    marker = node_modules / ".modules.yaml"
+    source_paths = [frontend_dir / "package.json", frontend_dir / "pnpm-lock.yaml"]
+
+    marker_mtime = marker.stat().st_mtime if marker.exists() else None
+    source_mtimes = [path.stat().st_mtime for path in source_paths if path.exists()]
+
+    if not frontend_needs_pnpm_install(node_modules.exists(), marker_mtime, source_mtimes):
+        return
+
     if not node_modules.exists():
         print("[INFO] node_modules not found. Running pnpm install...")
-        subprocess.run("pnpm install", cwd=str(frontend_dir), shell=True, check=True)
+    else:
+        print("[INFO] package.json/pnpm-lock.yaml changed since the last install. Running pnpm install...")
+    subprocess.run("pnpm install", cwd=str(frontend_dir), shell=True, check=True)
 
 
 def frontend_cli_executable(name):
@@ -291,13 +454,19 @@ def run_host_frontend_watch_loop(frontend_dir, compose_files_args, log_services)
 
     previous_snapshot = snapshot_frontend_files(frontend_dir)
     print(f"[INFO] Watching frontend sources in {frontend_dir}...")
+    seconds_since_heartbeat = 0.0
 
     try:
         while True:
             time.sleep(FRONTEND_WATCH_POLL_SECONDS)
+            seconds_since_heartbeat += FRONTEND_WATCH_POLL_SECONDS
             current_snapshot = snapshot_frontend_files(frontend_dir)
             if current_snapshot == previous_snapshot:
+                if seconds_since_heartbeat >= FRONTEND_WATCH_HEARTBEAT_SECONDS:
+                    print(f"[INFO] Still watching {frontend_dir} (no change in the last {FRONTEND_WATCH_HEARTBEAT_SECONDS}s)...")
+                    seconds_since_heartbeat = 0.0
                 continue
+            seconds_since_heartbeat = 0.0
             previous_snapshot = current_snapshot
             time.sleep(FRONTEND_WATCH_DEBOUNCE_SECONDS)
             previous_snapshot = snapshot_frontend_files(frontend_dir)
@@ -374,12 +543,29 @@ def main():
     parser.add_argument(
         "--build",
         action="store_true",
-        help="Build Docker images before starting the stack (also refreshes Python dependencies).",
+        help=(
+            "Build Docker images before starting the stack. Uses the Dockerfile's "
+            "default uv cache (fast, matches staging); pass --refresh-deps as well "
+            "to force a dependency refresh."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-deps",
+        action="store_true",
+        help=(
+            "Force a uv dependency refresh during the build (bypasses the uv cache "
+            "mount) -- for when a dependency's contents changed without its pin "
+            "changing. Implies --build."
+        ),
     )
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="Run a host-side atomic frontend production build loop after startup without Vite.",
+        help=(
+            "Run a full 'vite build' host-side after every frontend source change -- "
+            "not HMR (use --vite for Hot Module Reloading). Slower per change than "
+            "--vite, but serves through the same atomic production-build path as --build."
+        ),
     )
     parser.add_argument(
         "--celery",
@@ -458,7 +644,6 @@ def main():
     env_mode = "edge" if args.edge else "local"
     MODE = "VITE" if args.vite else "CLASSIC"
     FORCE_ENV = args.env
-    should_build = args.build or args.refresh
     uses_host_frontend_build = frontend_dir.exists() and local_compose_uses_host_frontend_build(BASE_DIR)
 
     if args.vite and args.watch:
@@ -466,11 +651,16 @@ def main():
         sys.exit(1)
 
     if args.watch and args.no_log_stream:
-        print("[WARN] --watch has no effect together with --no-log-stream.")
+        print(
+            "[INFO] --watch + --no-log-stream: performing one atomic host frontend "
+            "build, then leaving containers running in detached mode -- the "
+            "continuous watch loop does not start (nothing to watch for once detached)."
+        )
 
     if args.refresh and not args.build:
         print("[WARN] --refresh is deprecated; use --build instead.")
-        args.build = True
+
+    should_build, uv_flags_value = resolve_build_and_uv_flags(args.build, args.refresh_deps, args.refresh)
 
     if args.compose_project_name:
         os.environ["COMPOSE_PROJECT_NAME"] = args.compose_project_name
@@ -486,11 +676,12 @@ def main():
         os.environ["MEDIA_VOLUME_NAME"] = f"{project_name}_media_volume"
         os.environ["EXCEL_VOLUME_NAME"] = f"{project_name}_excel_volume"
 
+    os.environ["UV_FLAGS"] = uv_flags_value
     if should_build:
-        print("[INFO] Docker build ACTIVE: image rebuild will also refresh Python dependencies.")
-        os.environ["UV_FLAGS"] = "--refresh"
-    else:
-        os.environ["UV_FLAGS"] = ""
+        if uv_flags_value:
+            print("[INFO] Docker build ACTIVE: image rebuild will also force-refresh Python dependencies (--refresh-deps).")
+        else:
+            print("[INFO] Docker build ACTIVE: using the Dockerfile's default uv cache (pass --refresh-deps to force a refresh).")
 
     # DEBUG OUTPUT: Damit wir sehen, wo er sucht
     print(f"[DEBUG] Searching for frontend in: {frontend_dir}")
@@ -585,13 +776,20 @@ def main():
         print("[INFO] Spool mode active, skipping local cleanup steps.")
     else:
         print("[INFO] Stopping containers...")
-        run_command(["docker", "rm", "-f", "traefik"], ignore_errors=True)
-        subprocess.run(
-            ["docker", "rm", "-f", "traefik"], 
-            stderr=subprocess.DEVNULL, 
-            stdout=subprocess.DEVNULL, 
-            shell=(sys.platform=="win32")
+        own_project_name = compute_expected_compose_project_name(
+            os.environ.get("COMPOSE_PROJECT_NAME"),
+            load_project_yaml_name(BASE_DIR),
+            env_mode,
+            normalize_project_name(BASE_DIR.name),
         )
+        traefik_project = get_traefik_container_project()
+        if traefik_project is None:
+            pass  # no local traefik container -- nothing to remove
+        elif should_remove_traefik_container(traefik_project, own_project_name):
+            print("[INFO] Removing this project's traefik container...")
+            run_command(["docker", "rm", "-f", "traefik"], ignore_errors=True)
+        else:
+            print(f"[INFO] Leaving foreign traefik container (project: {traefik_project}) untouched.")
         cleanup_optional_local_services(compose_files_args, args, active_profiles)
 
 
@@ -616,6 +814,7 @@ def main():
 
         if args.no_log_stream:
             print("[INFO] --no-log-stream active, leaving containers running in detached mode.")
+            announce_backend_readiness(compose_files_args)
             return
 
         if args.watch:
@@ -664,6 +863,7 @@ def main():
 
         if args.no_log_stream:
             print("[INFO] --no-log-stream active, leaving backend containers running in detached mode.")
+            announce_backend_readiness(compose_files_args)
             return
         
         # 2. Frontend
