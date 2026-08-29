@@ -8,12 +8,28 @@ from typing import Any
 from django.apps import apps
 from django.conf import settings
 from django.core import signing
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import F
+from django.db.models.signals import post_delete, post_save
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 logger = logging.getLogger(__name__)
+
+# Registration-policy row is read on effectively every request (once per
+# serialized user, see BaseUserSerializer.get_security_state) but written
+# rarely (an admin toggling signup modes). The cache is invalidated
+# synchronously on save()/delete() (see _connect_auth_policy_cache_signals),
+# with an epoch guard against caching a value a concurrent write has already
+# made stale (see get_or_create_auth_policy). This TTL is therefore only a
+# fallback bound for a write that bypasses the ORM signal entirely (raw SQL,
+# .update()) — 60s is short enough that such a bypass is invisible in
+# practice, since this is not a security-critical toggle re-checked per
+# request elsewhere (auth/security.py's required-2FA-level check reads the
+# same cached state, but a stale read there for at most 60s after a policy
+# change is an acceptable window, not a security control).
+AUTH_POLICY_CACHE_TTL_SECONDS = 60
 
 SIGNUP_MODE_ADMIN_INVITE = "admin_invite"
 SIGNUP_MODE_ACCESS_CODE = "self_signup_access_code"
@@ -175,15 +191,113 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _auth_policy_cache_key(model) -> str:
+    return f"dcm:auth_policy:{model._meta.label}"
+
+
+def _auth_policy_epoch_key(model) -> str:
+    return f"dcm:auth_policy_epoch:{model._meta.label}"
+
+
+def _safe_cache_get(key: str, default=None):
+    # The cache is an optimization, not a source of truth — a Redis blip must
+    # degrade to an on-demand DB read (like the pre-caching code always did),
+    # never surface as an unhandled exception in an auth/login/2FA code path.
+    try:
+        return cache.get(key, default)
+    except Exception:
+        logger.warning("Auth-policy cache read failed for key %s", key, exc_info=True)
+        return default
+
+
+def _safe_cache_set(key: str, value, timeout) -> None:
+    try:
+        cache.set(key, value, timeout)
+    except Exception:
+        logger.warning("Auth-policy cache write failed for key %s", key, exc_info=True)
+
+
+def _safe_cache_delete(key: str) -> None:
+    try:
+        cache.delete(key)
+    except Exception:
+        logger.warning("Auth-policy cache delete failed for key %s", key, exc_info=True)
+
+
+def _safe_cache_bump_epoch(key: str) -> None:
+    try:
+        cache.incr(key)
+    except ValueError:
+        # Key doesn't exist yet (nothing has read it since this process/cache
+        # started) — seeding it is itself a change, no reader could have
+        # observed "0" and cached across this bump.
+        _safe_cache_set(key, 1, None)
+    except Exception:
+        logger.warning("Auth-policy cache epoch bump failed for key %s", key, exc_info=True)
+
+
+def _invalidate_auth_policy_cache(sender, **kwargs) -> None:
+    _safe_cache_delete(_auth_policy_cache_key(sender))
+    _safe_cache_bump_epoch(_auth_policy_epoch_key(sender))
+
+
+def _connect_auth_policy_cache_signals(model) -> None:
+    """Invalidate the cached policy row whenever it is written via the ORM.
+
+    dispatch_uid is derived from the resolved model's label (distinct per
+    consuming app's concrete AUTH_POLICY_MODEL) and makes connect() itself
+    idempotent — Django skips the connection if that dispatch_uid is already
+    registered for this sender, so calling this on every call (hit or miss)
+    is safe and does not accumulate duplicate receivers. Also connected
+    eagerly from CoreAuthConfig.ready() so a process that only ever WRITES
+    the policy row (a management command, a migration) still has the
+    receiver registered — this lazy call is a second, redundant path for the
+    same idempotent connection, kept for the swappable-per-test case where
+    AUTH_POLICY_MODEL is set after app startup.
+    """
+    uid = f"dcm_auth_policy_cache_invalidate:{model._meta.label}"
+    post_save.connect(_invalidate_auth_policy_cache, sender=model, dispatch_uid=uid)
+    post_delete.connect(_invalidate_auth_policy_cache, sender=model, dispatch_uid=f"{uid}:delete")
+
+
 def get_or_create_auth_policy():
     model = get_auth_policy_model()
     if model is None:
         return None
+
+    _connect_auth_policy_cache_signals(model)
+
+    cache_key = _auth_policy_cache_key(model)
+    cached = _safe_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Epoch guard closes the write-after-invalidate race: if a concurrent
+    # save() lands (and bumps the epoch) between our DB read and our cache
+    # write, we must not re-cache the value we just read — it is already
+    # stale. Skipping the write here just means the next call re-reads the
+    # DB, which is the same cost as any other cache miss.
+    epoch_key = _auth_policy_epoch_key(model)
+    epoch_before = _safe_cache_get(epoch_key, 0)
+
     try:
-        obj, _created = model.objects.get_or_create(pk=1)
-        return obj
+        obj, created = model.objects.get_or_create(pk=1)
     except Exception:
         return None
+
+    if created:
+        # get_or_create() itself just fired the post_save signal (row didn't
+        # exist yet), which bumps the epoch as a side effect — that bump is
+        # OUR OWN write, not a race, so it must not block caching the row we
+        # just created.
+        _safe_cache_set(cache_key, obj, AUTH_POLICY_CACHE_TTL_SECONDS)
+        return obj
+
+    epoch_after = _safe_cache_get(epoch_key, 0)
+    if epoch_after == epoch_before:
+        _safe_cache_set(cache_key, obj, AUTH_POLICY_CACHE_TTL_SECONDS)
+
+    return obj
 
 
 def get_policy_state(policy=None) -> RegistrationPolicyState:
