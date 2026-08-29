@@ -225,7 +225,7 @@ class Notification(models.Model):
     dedup_key = models.CharField(max_length=128)
     expires_at = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     objects = NotificationManager()
 
@@ -278,7 +278,10 @@ class NotificationRecipient(models.Model):
 
     class Meta:
         unique_together = ("notification", "user")
-        indexes = [models.Index(fields=["user", "done_at"])]
+        indexes = [
+            models.Index(fields=["user", "done_at"]),
+            models.Index(fields=["user", "seen_at", "dismissed_at"]),
+        ]
 
 
 class NotificationDelivery(models.Model):
