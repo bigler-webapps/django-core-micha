@@ -56,6 +56,7 @@ class RegistrationContextSerializer(serializers.Serializer):
     event_ref = serializers.CharField(required=False, allow_blank=False)
     course_ref = serializers.CharField(required=False, allow_blank=False)
     group_ref = serializers.CharField(required=False, allow_blank=False)
+    organization_ref = serializers.CharField(required=False, allow_blank=False)
     labels = serializers.ListField(
         child=serializers.CharField(),
         required=False,
