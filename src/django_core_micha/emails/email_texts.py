@@ -31,6 +31,9 @@ def get_preferred_language(user) -> str:
         lang = "en"
     return lang
 
+def get_invite_link_ttl_days() -> int:
+    return getattr(settings, "INVITE_LINK_TIMEOUT_DAYS", 30)
+
 def get_greeting_name(user) -> str:
     """
     Bevorzugt vollständiger Name, sonst E-Mail.
@@ -89,21 +92,24 @@ INVITE_BODY = {
     "en": (
         "Hello {name},\n\n"
         "You have been invited to {project_name}.\n\n"
-        "To set your password and sign in for the first time, open the following link:\n"
+        "To set your password and sign in for the first time, open the following link. "
+        "The link is valid for {ttl_days} days:\n"
         "{url}\n\n"
         "If you did not expect this email, you can ignore it.\n"
     ),
     "de": (
         "Hallo {name},\n\n"
         "Sie wurden zu {project_name} eingeladen.\n\n"
-        "Um Ihr Passwort zu setzen und sich zum ersten Mal anzumelden, öffnen Sie bitte folgenden Link:\n"
+        "Um Ihr Passwort zu setzen und sich zum ersten Mal anzumelden, öffnen Sie bitte folgenden Link. "
+        "Der Link ist {ttl_days} Tage gültig:\n"
         "{url}\n\n"
         "Falls Sie diese E-Mail nicht erwartet haben, können Sie diese E-Mail ignorieren.\n"
     ),
     "fr": (
         "Bonjour {name},\n\n"
         "Vous avez été invité(e) à rejoindre {project_name}.\n\n"
-        "Pour définir votre mot de passe et vous connecter pour la première fois, ouvrez le lien suivant :\n"
+        "Pour définir votre mot de passe et vous connecter pour la première fois, ouvrez le lien suivant. "
+        "Le lien est valable {ttl_days} jours :\n"
         "{url}\n\n"
         "Si vous n'attendiez pas cet e-mail, vous pouvez l'ignorer.\n"
     ),
@@ -201,6 +207,7 @@ def render_invite_email(user, url, language=None):
         "name": get_greeting_name(user),
         "url": url,
         "project_name": project_name,
+        "ttl_days": get_invite_link_ttl_days(),
     }
     return subject_tpl.format(**ctx), body_tpl.format(**ctx)
 

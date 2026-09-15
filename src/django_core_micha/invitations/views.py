@@ -31,6 +31,7 @@ from .models import AccessCode
 from .serializers import AccessCodeSerializer
 from .conf import ACCESS_CODE_REGISTRATION_ENABLED
 from .access_codes import validate_access_code_or_error
+from .tokens import invite_token_generator
 
 ACCESS_CODE_REGISTRATION_ENABLED = getattr(
     settings,
@@ -146,9 +147,18 @@ class PasswordResetConfirmView(APIView):
         except Exception:
             return None
 
+    def _token_is_valid(self, user, token):
+        # Evaluate both checks unconditionally (no `or` short-circuit): a
+        # reset-valid token would otherwise run one HMAC check while every
+        # other case (invite-valid, expired, malformed) runs two, letting
+        # request timing distinguish which kind of link is being probed.
+        is_reset_valid = default_token_generator.check_token(user, token)
+        is_invite_valid = invite_token_generator.check_token(user, token)
+        return is_reset_valid or is_invite_valid
+
     def get(self, request, uidb64, token, *args, **kwargs):
         user = self.get_user_from_uid(uidb64)
-        if user and default_token_generator.check_token(user, token):
+        if user and self._token_is_valid(user, token):
             return Response({"code": self.link_valid_code})
         return Response(
             {"code": self.link_invalid_code},
@@ -170,7 +180,7 @@ class PasswordResetConfirmView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if not default_token_generator.check_token(user, token):
+        if not self._token_is_valid(user, token):
             return Response(
                 {"code": self.link_invalid_code},
                 status=status.HTTP_400_BAD_REQUEST,

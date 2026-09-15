@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.44.0] — 2026-09-15
+
+### Added
+
+DCM-AUTH-1: an admin-issued invite link (`users/invite/`, `users/<pk>/invite-link/`) now stays
+valid for 30 days instead of 3, via a new `InviteTokenGenerator` with its own key salt and
+lifetime — the password-reset link keeps Django's default 3-day `PASSWORD_RESET_TIMEOUT`
+unchanged, and `PasswordResetConfirmView` accepts a token valid under either generator. New
+setting `INVITE_LINK_TIMEOUT_DAYS` (default 30, ENV-overridable). The invite email texts (en/de/fr)
+now state the configured lifetime. No frontend change; consuming apps get the new lifetime by
+bumping their `django-core-micha` pin.
+
 ## [2.43.2] — 2026-08-27
 
 ### Fixed

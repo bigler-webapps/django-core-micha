@@ -370,6 +370,8 @@ SECURITY_LEVELS = ("anon", "recovery", "basic", "strong")
 # Per App konfigurierbar (in Projektsettings überschreibbar)
 SECURITY_DEFAULT_LEVEL = env("SECURITY_DEFAULT_LEVEL", default="basic")
 RECOVERY_REQUEST_TTL_MINUTES = env("RECOVERY_REQUEST_TTL_MINUTES", default=30)
+# Admin invite links remain valid for this many days (in Projektsettings überschreibbar).
+INVITE_LINK_TIMEOUT_DAYS = env("INVITE_LINK_TIMEOUT_DAYS", default=30)
 
 
 

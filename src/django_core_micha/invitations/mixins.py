@@ -18,6 +18,7 @@ from django_core_micha.auth.permissions import (
 from django_core_micha.auth.policy import get_policy_state
 from .serializers import InviteUserSerializer
 from .emails import send_invite_or_reset_email
+from .tokens import invite_token_generator
 
 User = get_user_model()
 
@@ -61,7 +62,10 @@ class InviteActionsMixin:
         profile.save()
 
     def _build_frontend_url(self, request, user, *, is_new_user: bool) -> str:
-        token = default_token_generator.make_token(user)
+        if is_new_user:
+            token = invite_token_generator.make_token(user)
+        else:
+            token = default_token_generator.make_token(user)
         uid = urlsafe_base64_encode(force_bytes(user.pk))
 
         base = request.build_absolute_uri("/").rstrip("/")

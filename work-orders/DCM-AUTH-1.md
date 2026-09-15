@@ -108,8 +108,199 @@ moved.
 
 ## Context package
 
-_Placeholder — the Orchestrator fills this on `git pull` (named files with `path:line`, key
-snippets, invariants). Do not dispatch while this placeholder stands._
+### Files to change
+
+- **NEW** `src/django_core_micha/invitations/tokens.py` — the invite token generator.
+- `src/django_core_micha/invitations/mixins.py:63-73` (`_build_frontend_url`) — mint with the new
+  generator when `is_new_user`.
+- `src/django_core_micha/invitations/views.py:130-177` (`PasswordResetConfirmView.get`/`.post`) —
+  accept either generator.
+- `src/django_core_micha/settings/settings_base.py:368-373` — new setting, next to
+  `RECOVERY_REQUEST_TTL_MINUTES`.
+- `src/django_core_micha/emails/email_texts.py:82-110` (`INVITE_SUBJECT`/`INVITE_BODY`,
+  `render_invite_email`) — add the lifetime sentence.
+- **NEW** test module, e.g. `tests/test_invite_link_lifetime.py`.
+
+### 1. New generator — `invitations/tokens.py`
+
+`django.contrib.auth.tokens.PasswordResetTokenGenerator.check_token` (Django 6.1, the version
+installed here — read `site-packages/django/contrib/auth/tokens.py` yourself if it differs) reads
+`settings.PASSWORD_RESET_TIMEOUT` **directly inside the method body**:
+
+```python
+def check_token(self, user, token):
+    if not (user and token):
+        return False
+    try:
+        ts_b36, _ = token.split("-")
+    except ValueError:
+        return False
+    try:
+        ts = base36_to_int(ts_b36)
+    except ValueError:
+        return False
+    for secret in [self.secret, *self.secret_fallbacks]:
+        if constant_time_compare(self._make_token_with_timestamp(user, ts, secret), token):
+            break
+    else:
+        return False
+    if (self._num_seconds(self._now()) - ts) > settings.PASSWORD_RESET_TIMEOUT:
+        return False
+    return True
+```
+
+Overriding an attribute (`timeout = ...`) or `_make_token_with_timestamp` changes nothing — the
+timeout line is hardcoded to the global setting. **You must override `check_token` itself**,
+duplicating the method verbatim except the last comparison, which reads your own setting instead.
+`make_token` needs no override (it doesn't consult the timeout).
+
+**`key_salt` must differ from the base class's.** `_make_token_with_timestamp` folds
+`self.key_salt` into the HMAC. If the invite generator kept the inherited salt, an actual
+password-reset token (minted by `default_token_generator`, same salt) would produce the *same*
+digest and would validate under the invite generator's `check_token` too — at which point it is
+checked against the 30-day timeout instead of 3, silently widening the reset link. Give the new
+class its own `key_salt` (e.g. the fully-qualified class name, Django's own convention) so a token
+from one generator never verifies under the other regardless of timeout.
+
+```python
+from datetime import datetime
+from django.conf import settings
+from django.contrib.auth.tokens import PasswordResetTokenGenerator
+from django.utils.crypto import constant_time_compare
+from django.utils.http import base36_to_int
+
+
+class InviteTokenGenerator(PasswordResetTokenGenerator):
+    """Own key_salt (so a reset token never verifies here) and own timeout
+    (so an invite token gets the longer window without touching
+    PASSWORD_RESET_TIMEOUT, which also governs the reset link).
+    check_token is Django's PasswordResetTokenGenerator.check_token verbatim
+    except the final comparison uses INVITE_LINK_TIMEOUT_DAYS instead of
+    settings.PASSWORD_RESET_TIMEOUT — check_token reads that setting directly,
+    so overriding _make_token_with_timestamp or an attribute would not work.
+    """
+
+    key_salt = "django_core_micha.invitations.tokens.InviteTokenGenerator"
+
+    def check_token(self, user, token):
+        if not (user and token):
+            return False
+        try:
+            ts_b36, _ = token.split("-")
+        except ValueError:
+            return False
+        try:
+            ts = base36_to_int(ts_b36)
+        except ValueError:
+            return False
+        for secret in [self.secret, *self.secret_fallbacks]:
+            if constant_time_compare(self._make_token_with_timestamp(user, ts, secret), token):
+                break
+        else:
+            return False
+        timeout_days = getattr(settings, "INVITE_LINK_TIMEOUT_DAYS", 30)
+        if (self._num_seconds(self._now()) - ts) > timeout_days * 86400:
+            return False
+        return True
+
+
+invite_token_generator = InviteTokenGenerator()
+```
+
+### 2. `mixins.py::_build_frontend_url`
+
+Mint with the invite generator only for the invite branch; the reset branch is untouched:
+
+```python
+def _build_frontend_url(self, request, user, *, is_new_user: bool) -> str:
+    if is_new_user:
+        token = invite_token_generator.make_token(user)
+    else:
+        token = default_token_generator.make_token(user)
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    ...
+```
+
+Add `from .tokens import invite_token_generator` to the imports.
+
+### 3. `views.py::PasswordResetConfirmView`
+
+Both `get` and `.post` currently call `default_token_generator.check_token(user, token)` once each
+(lines ~151 and ~173). Replace both call sites with a small helper on the view so the "either
+generator" rule lives in one place:
+
+```python
+def _token_is_valid(self, user, token):
+    return default_token_generator.check_token(
+        user, token
+    ) or invite_token_generator.check_token(user, token)
+```
+
+Add `from django_core_micha.invitations.tokens import invite_token_generator`. Nothing else in the
+view (password validation, `EmailAddress` marking, the `registration_completed` signal) changes.
+
+### 4. Setting — `settings_base.py`
+
+Next to `RECOVERY_REQUEST_TTL_MINUTES` (line 372):
+
+```python
+INVITE_LINK_TIMEOUT_DAYS = env("INVITE_LINK_TIMEOUT_DAYS", default=30)
+```
+
+Document it alongside the other auth settings the way `RECOVERY_REQUEST_TTL_MINUTES` is documented
+(inline comment or the same doc block — match whatever convention is already there).
+
+### 5. `emails/email_texts.py`
+
+Add one sentence to `INVITE_BODY` (all three languages) stating the configured lifetime, in the
+phrasing style `PENDING_REGISTRATION_BODY` already uses ("The link is valid for 24 hours:"). Do
+**not** hardcode "30" — render it from the setting. Add a small helper next to
+`get_project_name`/`get_preferred_language`:
+
+```python
+def get_invite_link_ttl_days() -> int:
+    return getattr(settings, "INVITE_LINK_TIMEOUT_DAYS", 30)
+```
+
+`render_invite_email` passes `"ttl_days": get_invite_link_ttl_days()` in `ctx`, and each
+`INVITE_BODY[lang]` template gains the sentence with a `{ttl_days}` placeholder, e.g. (en) "To set
+your password and sign in for the first time, open the following link. The link is valid for
+{ttl_days} days:\n{url}\n\n" — mirror the equivalent insertion in `de`/`fr`.
+
+**Do not touch** `src/django_core_micha/emails/__init__.py` — it has its own copies of
+`INVITE_BODY`/`PENDING_REGISTRATION_BODY`/`RESET_BODY` but nothing imports from it
+(`invitations/emails.py` imports `email_texts`, not this module); it is pre-existing dead code,
+out of scope for this WO.
+
+### Pitfall — writing the tests: throttle scope isn't configured in test settings
+
+`tests/settings.py` has **no `REST_FRAMEWORK` key at all** (see the docstring at the top of
+`tests/test_auth_throttles.py` — this repo's test settings deliberately ship without the
+`REST_FRAMEWORK` dict that `settings_base.py` defines). `PasswordResetConfirmView.throttle_classes
+= [ScopedRateThrottle, AnonRateThrottle]` with `throttle_scope = "password_reset"`.
+`ScopedRateThrottle.allow_request` calls `get_rate()` → `THROTTLE_RATES["password_reset"]`, and
+DRF's own built-in default rates are only `{"user": None, "anon": None}` — no `"password_reset"`
+key — so calling the view directly (RequestFactory + `as_view()`, or an API client) raises
+`django.core.exceptions.ImproperlyConfigured: No default throttle rate set for 'password_reset'
+scope`, not a 400/401. Wrap the calls that hit `PasswordResetConfirmView` in
+`@override_settings(REST_FRAMEWORK={"DEFAULT_THROTTLE_RATES": {"password_reset": "1000/hour"}})`
+(a partial `REST_FRAMEWORK` override is fine — DRF's `APISettings` falls back to its own built-in
+defaults for every key you don't include). This is test-only setup, not a production change.
+
+### Time control
+
+Django's own generator has `_now(self)` returning `datetime.now()`, with the comment "Used for
+mocking in tests" — patch `InviteTokenGenerator._now` / `default_token_generator.__class__._now`
+(or `monkeypatch.setattr`) on the generator instance/class, not `django.utils.timezone.now`, to
+move the clock for `+29`/`+31`/`+2`/`+4` day assertions.
+
+### Invariants / do-not-touch (restating the Envelope)
+
+- Reset lifetime and `RESET_BODY` stay untouched — the new test module's own regression test (#2 in
+  Required tests) is what proves this, using the confirm view, not by reasoning about the code.
+- No change to `auth/views.py`, the pending-registration flow, access codes, recovery, throttles
+  config values, or permission classes.
+- `ui-core-micha` unrelated — no frontend diff in this repo.
 
 ## Target repo working directory (absolute)
 
