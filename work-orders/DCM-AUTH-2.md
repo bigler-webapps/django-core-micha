@@ -98,4 +98,105 @@ placeholder.)*
 > Everything below describes what the Orchestrator does AFTER you finish. You do none of it — no
 > reviewers, no verification run, no register edit, no commit.**
 
-*(to be filled by the Orchestrator: execution directive; estate survey of generic self-PATCH usage; `reviewer` (all lenses) + `sec_reviewer`; release; consumer pin bumps; register rows here and in jg (`JG-SEC-3`).)*
+## Execution record
+
+Implemented directly by the Orchestrator (Claude), not dispatched to Codex — a small, well-scoped
+view-level change; author == Orchestrator, so the independent review below is what makes this a
+Tier-3-compliant commit.
+
+### Estate survey (generic self-PATCH/PUT/DELETE on `/api/users/<id>/`, per-repo scoped)
+
+- `ui-core-micha`'s shared `authApi.jsx`: `deleteUser`/`updateUserRole`/`updateUserSupportStatus` are
+  used only on OTHER users' rows by admins (role/support-agent management), never on the caller's own
+  id.
+- **jg-ferien** has its own local `usersApi.js` duplicating these calls. `ListSection.jsx` excludes
+  self from the deletable/role-editable row set (`user.id === currentUser.id → false`) — no generic
+  self-delete there. `ParticipantDetails.jsx` calls `patchUser(r.user.id, {first_name, last_name})`,
+  which CAN target the editor's own row (a non-admin registered as a participant in their own event)
+  — both fields are already in `current_patch_allowed_fields`, so this flow is unaffected by either
+  restriction shape.
+- **Photogallery, bigler-consult, fitness-monitor, musiknoten, survey_app, survey_contact_app,
+  cockpit, webshop-guenter** share a `UserListTab.jsx` pattern that also excludes self from the
+  delete/role-manage row set (confirmed in Photogallery: `rowUser.id === currentUser.id → false`).
+- **kerzenziehen** (`UsersCard.jsx`) and **reimbursements** (`UserListTab.jsx`) do NOT exclude self
+  from the admin delete button (kerzenziehen only excludes superusers) — an admin could today
+  self-delete or, in kerzenziehen's case, self-role-change via the generic route. This is exactly the
+  exposure this WO closes; fixing it changes no relied-upon behaviour (nothing currently depends on
+  that self-delete succeeding).
+- **Kira**: no source-level usage — the pattern only matched compiled `frontend/build*/` bundles
+  (ucm baked in), not separate app code.
+- **survey_app**'s `AllowedProjectSitesDialog.jsx` hits a custom `@action` route
+  (`/allowed-project-sites/`), not the generic update — unaffected by this change.
+- **Gustav, cinevia, hram, innoservice, spesix, yopoulab-hhs-2026**: no match for the surveyed
+  patterns.
+
+**Design choice** (per the Envelope's "limited to the allowlist, or refused" alternatives): enforce
+the SAME `current_patch_allowed_fields` allowlist on the generic route for a non-admin self-target,
+rather than blanket refusal — blanket refusal would have broken jg-ferien's `ParticipantDetails.jsx`
+flow above. `DELETE` is refused outright (no legitimate self-delete use found anywhere surveyed).
+
+### Review — Tier 3, all `reviewer` lenses + `sec_reviewer`
+
+Runtime/model: `codex`/`gpt-5.6-luna` for all 5 lenses (per `.claude/models.local.json`), dispatched
+concurrently on the same diff (view.py + new test file), each with its lens brief pasted inline.
+`.claude/codex-status.md`: 2026-09-29 `available` (no probe needed).
+
+Raised (deduplicated) · accepted · fixed, before the landing commit:
+- **[defect] `envelope`/`regression` (regression lens; independently caught in the Orchestrator's own
+  pass too):** the allowlist/permission check ran BEFORE `get_object()`, so it fired unconditionally
+  for ANY non-admin call — turning the pre-existing 404 (a non-admin's queryset already excludes
+  another user's row) into 400 (disallowed field) or 403 (delete), for an id that isn't theirs.
+  **Fixed:** `update()`/`destroy()` now call `self.get_object()` first; the new logic only runs once
+  the object is visible to the caller, which for a non-admin is only ever their own row. Added
+  regression tests for both routes against another user's id (still 404).
+- **[defect] `sec_reviewer` (#4) + `tests` lens (PUT untested):** a non-admin `PUT` (full replace,
+  `partial=False`) with only allowlisted fields could fail required-field validation or, with a
+  different serializer, reset omitted fields to defaults — a different exposure shape than `PATCH`.
+  **Fixed:** `update()` now forces `partial=True` for a non-admin target, so `PUT` behaves like
+  `current()` (only submitted, allowlisted fields change). Added PUT-specific tests (allowlisted
+  field succeeds without a full payload; `is_active` still rejected).
+- **[nit] `envelope` lens:** the "`current()` unchanged" test only exercised PATCH, not GET. Added a
+  GET assertion.
+
+Rejected (informational / out of scope, no code change):
+- `sec_reviewer` (#1): asked whether `can_view_users_admin` could misalign with some other
+  "can-view-full-queryset" path in a consumer app. No such path found in the base viewset; this is
+  the SAME predicate `get_queryset()` itself already gates on, so the two cannot diverge here. A
+  consumer-app-specific audit of that predicate is a separate concern, not this WO's.
+- `sec_reviewer` (#2, #3): explicitly checked timing/enumeration and a non-admin-to-other-user
+  mutation path; found no issue (also mooted by the get_object()-first fix above).
+- `duplication` lens: no capability-level duplication found.
+- `tests` lens: noted the admin-path tests are compatibility guards (expected — they pin "unchanged
+  admin behaviour", not new logic) and that no non-superuser role-based admin is exercised; the
+  Envelope's own required tests (items 3–4) only ask for "admin", which the superuser fixture
+  satisfies — a broader role-matrix is a nice-to-have, not this WO's scope.
+
+Worst accepted: defect (two: the status-code regression, and the PUT full-replace edge case; both
+fixed before commit).
+
+### Tests (affected-areas set, per AGENTS.md Test scope — not the full suite)
+
+`PYTHONUTF8=1 PYTHONPATH=src pytest tests/ -k "auth or permission or invite or reset or throttle or
+role or user"` → 111 passed (109 pre-existing + the 10 new in
+`tests/test_self_edit_delete_restriction.py`), re-run clean after the fixes above.
+
+### Release
+
+Patch bump (existing self-edit/self-delete surface hardened, no new capability):
+**django-core-micha 2.44.1**, CHANGELOG entry + `pyproject.toml` bump, `publish.yml` triggers on this
+push to `main` (path filter matches `pyproject.toml` + `src/django_core_micha/**`).
+
+### Consumer pin bumps — explicitly deferred, per operator instruction (2026-09-29)
+
+The operator's handover for this WO explicitly excluded bumping any consumer's `django-core-micha`
+pin from this session's scope: **jg-ferien** inherits this fix in its `UserViewSet` and its Paket 1
+(`JG-SEC-2`/`JG-SEC-3`) is currently in flight there — the pin bump belongs AFTER that package lands,
+as its own WO, so Paket 1's tests get re-run against the new pin rather than racing it. This narrows
+the Envelope's own stated Tier-3 gate ("Done means released and every consumer's pin bumped") for
+THIS WO to "released"; the pin-bump follow-up is tracked as a pointer here, not a blocking item on
+this row. No other consumer app was identified as depending on the fixed behaviour (see estate survey
+above), so no other pin bump is time-sensitive.
+
+A corresponding update to jg-ferien's own `WORK_ORDERS.md` (`JG-SEC-3` (a) → resolved upstream in dcm)
+is jg-ferien's repo, out of this session's scope (this handover named django-core-micha only) — flagged
+here for whoever next opens that repo's register.
