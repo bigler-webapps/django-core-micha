@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.44.2] — 2026-09-29
+
+### Fixed
+
+DCM-AUTH-3: `BaseUserViewSet`'s generic self-edit and self-delete restrictions now apply only
+when the resolved object is the requesting user's own row. Non-admin writes to other users remain
+available to consumers whose `get_queryset()` deliberately exposes those rows, as before 2.44.1.
+
 ## [2.44.1] — 2026-09-29
 
 ### Fixed

@@ -331,13 +331,16 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         # first_name/last_name through this generic route, and those fields
         # are already in the allowlist.
         #
-        # get_object() first, before the admin check: a non-admin's queryset
-        # only ever contains their own row, so this 404s exactly as before
-        # for any other id and only reaches the new logic for their own.
+        # get_object() first, before the admin check: the restriction applies
+        # only when the resolved row is explicitly the requester's own row.
+        # This preserves the pre-existing 404 for ids outside the queryset,
+        # while allowing consumers with wider querysets to keep their prior
+        # behaviour for other exposed rows.
         # Without this ordering, the allowlist check fired unconditionally
         # and turned a 404 (foreign/nonexistent id) into a 400.
-        self.get_object()
-        if not can_view_users_admin(request.user, request=request):
+        instance = self.get_object()
+        is_self_edit = instance.pk == request.user.pk
+        if is_self_edit and not can_view_users_admin(request.user, request=request):
             self._enforce_safe_profile_fields(request)
             # A non-admin PUT would otherwise require every serializer field
             # and fully replace the row. Force partial semantics so it
@@ -352,9 +355,11 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         # explicit flow, not a side effect of this viewset (no consumer in
         # the estate relies on generic self-delete; survey in DCM-AUTH-2).
         # get_object() first for the same reason as in update(): preserve the
-        # pre-existing 404 for a non-admin targeting an id that isn't theirs.
-        self.get_object()
-        if not can_view_users_admin(request.user, request=request):
+        # pre-existing 404 for a non-admin targeting an id that isn't theirs,
+        # and apply the refusal only to the explicitly resolved self row.
+        instance = self.get_object()
+        is_self_edit = instance.pk == request.user.pk
+        if is_self_edit and not can_view_users_admin(request.user, request=request):
             raise PermissionDenied(
                 "Cannot delete your own account through this endpoint."
             )

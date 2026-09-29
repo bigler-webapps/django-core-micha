@@ -23,8 +23,20 @@ class _UserViewSet(BaseUserViewSet):
     serializer_class = _MinimalUserSerializer
 
 
+class _WideningUserViewSet(BaseUserViewSet):
+    serializer_class = _MinimalUserSerializer
+
+    def get_queryset(self):
+        # Simulates a consumer like jg-ferien: a non-admin can still reach
+        # every user through this consumer's deliberately wider queryset.
+        return get_user_model().objects.all()
+
+
 _view = _UserViewSet.as_view(
     {"get": "retrieve", "patch": "partial_update", "put": "update", "delete": "destroy"}
+)
+_wide_view = _WideningUserViewSet.as_view(
+    {"patch": "partial_update", "put": "update", "delete": "destroy"}
 )
 
 
@@ -203,3 +215,52 @@ def test_non_admin_generic_put_is_active_on_self_is_rejected(non_admin):
     assert response.status_code == 400
     non_admin.refresh_from_db()
     assert non_admin.is_active is True
+
+
+@pytest.mark.django_db
+def test_non_admin_widened_queryset_patch_on_other_user_is_unaffected(
+    non_admin, other_non_admin
+):
+    request = _authed(
+        "patch", f"/users/{other_non_admin.pk}/", non_admin, {"is_active": False}
+    )
+    response = _wide_view(request, pk=other_non_admin.pk)
+
+    assert response.status_code == 200
+    other_non_admin.refresh_from_db()
+    assert other_non_admin.is_active is False
+
+
+@pytest.mark.django_db
+def test_non_admin_widened_queryset_delete_on_other_user_is_unaffected(
+    non_admin, other_non_admin
+):
+    request = _authed("delete", f"/users/{other_non_admin.pk}/", non_admin)
+    response = _wide_view(request, pk=other_non_admin.pk)
+
+    assert response.status_code == 204
+    assert not get_user_model().objects.filter(pk=other_non_admin.pk).exists()
+
+
+@pytest.mark.django_db
+def test_non_admin_widened_queryset_self_target_still_gated(non_admin):
+    request = _authed("patch", f"/users/{non_admin.pk}/", non_admin, {"is_active": False})
+    response = _wide_view(request, pk=non_admin.pk)
+    assert response.status_code == 400
+
+    request = _authed(
+        "patch", f"/users/{non_admin.pk}/", non_admin, {"first_name": "Wide Self"}
+    )
+    response = _wide_view(request, pk=non_admin.pk)
+    assert response.status_code == 200
+    non_admin.refresh_from_db()
+    assert non_admin.first_name == "Wide Self"
+
+    request = _authed("put", f"/users/{non_admin.pk}/", non_admin, {"first_name": "Wide Put"})
+    response = _wide_view(request, pk=non_admin.pk)
+    assert response.status_code == 200
+
+    request = _authed("delete", f"/users/{non_admin.pk}/", non_admin)
+    response = _wide_view(request, pk=non_admin.pk)
+    assert response.status_code == 403
+    assert get_user_model().objects.filter(pk=non_admin.pk).exists()
