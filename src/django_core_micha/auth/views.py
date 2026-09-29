@@ -294,13 +294,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
 
         return throttles
 
-    @action(detail=False, methods=["get", "patch"], url_path="current")
-    def current(self, request):
-        user = request.user
-        if request.method == "GET":
-            serializer = self.get_serializer(user)
-            return Response(serializer.data)
-
+    def _enforce_safe_profile_fields(self, request):
         incoming_keys = set(request.data.keys())
         disallowed = sorted(incoming_keys - self.current_patch_allowed_fields)
         if disallowed:
@@ -313,10 +307,58 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                 }
             )
 
+    @action(detail=False, methods=["get", "patch"], url_path="current")
+    def current(self, request):
+        user = request.user
+        if request.method == "GET":
+            serializer = self.get_serializer(user)
+            return Response(serializer.data)
+
+        self._enforce_safe_profile_fields(request)
+
         serializer = self.get_serializer(user, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        # S-DCM-AUTH-2: get_queryset() already scopes a non-admin to their own
+        # row, so the generic update/partial_update route on this row is a
+        # second, unguarded path to the same account `current()` protects.
+        # Without this, a non-admin can PATCH e.g. `is_active` on themselves.
+        # Mirror `current()`'s allowlist rather than refusing outright: at
+        # least one consumer (jg-ferien) PATCHes a participant's own
+        # first_name/last_name through this generic route, and those fields
+        # are already in the allowlist.
+        #
+        # get_object() first, before the admin check: a non-admin's queryset
+        # only ever contains their own row, so this 404s exactly as before
+        # for any other id and only reaches the new logic for their own.
+        # Without this ordering, the allowlist check fired unconditionally
+        # and turned a 404 (foreign/nonexistent id) into a 400.
+        self.get_object()
+        if not can_view_users_admin(request.user, request=request):
+            self._enforce_safe_profile_fields(request)
+            # A non-admin PUT would otherwise require every serializer field
+            # and fully replace the row. Force partial semantics so it
+            # behaves like `current()`: only the (already allowlisted)
+            # submitted fields change, nothing is reset to a default.
+            kwargs["partial"] = True
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        # S-DCM-AUTH-2: same generic-route exposure as `update()` above, but
+        # for DELETE there is no safe subset — account deletion is a separate
+        # explicit flow, not a side effect of this viewset (no consumer in
+        # the estate relies on generic self-delete; survey in DCM-AUTH-2).
+        # get_object() first for the same reason as in update(): preserve the
+        # pre-existing 404 for a non-admin targeting an id that isn't theirs.
+        self.get_object()
+        if not can_view_users_admin(request.user, request=request):
+            raise PermissionDenied(
+                "Cannot delete your own account through this endpoint."
+            )
+        return super().destroy(request, *args, **kwargs)
 
     @action(
         detail=False,

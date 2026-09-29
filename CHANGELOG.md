@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.44.1] — 2026-09-29
+
+### Fixed
+
+DCM-AUTH-2: `BaseUserViewSet`'s generic `update`/`partial_update`/`destroy` routes let a non-admin
+bypass the `current()` action's field allowlist on their own account, because `get_queryset()`
+already scopes a non-admin to their own row -- `PATCH`/`PUT /api/users/<own-id>/` could write
+`is_active` and other unsafe fields, and `DELETE /api/users/<own-id>/` could delete the account
+outright. The generic `update()` now enforces the same `current_patch_allowed_fields` allowlist for
+a non-admin target (a full `PUT` is treated as partial for a non-admin, so it does not need to
+supply every field); `destroy()` now refuses a non-admin's self-delete (403). Both checks resolve
+the object first, so a non-admin targeting an id that isn't theirs still gets the pre-existing 404.
+Admin behaviour and `current()` are unchanged. No frontend change; an estate-wide survey found no
+consumer relying on generic self-delete, and jg-ferien's one generic self-PATCH use
+(`ParticipantDetails.jsx`, `first_name`/`last_name`) stays within the allowlist.
+
 ## [2.44.0] — 2026-09-15
 
 ### Added
