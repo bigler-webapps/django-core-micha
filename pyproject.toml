@@ -24,7 +24,7 @@ dependencies = [
     "channels_redis",
     "cryptography>=42",
     "django-allauth[mfa,socialaccount]",
-    "Pillow>=10",
+    "Pillow>=12.3.0",
     "pypdf>=6.13.1",
     "openai>=2.41.0",
     "anthropic",
