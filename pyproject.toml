@@ -26,7 +26,7 @@ dependencies = [
     "django-allauth[mfa,socialaccount]",
     "Pillow>=10",
     "pypdf>=6.13.1",
-    "openai>=2.41.0",
+    "openai>=3.24.0",
     "anthropic",
     "whitenoise",
 ]
