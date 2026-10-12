@@ -53,6 +53,8 @@ _DEFAULT_MODEL_COSTS_CENTS_PER_1K = {
     "gpt-4o": {"input": 0.25, "output": 1.0},
     "gpt-4.1-mini": {"input": 0.04, "output": 0.16},
     "gpt-4.1": {"input": 0.2, "output": 0.8},
+    # GPT-6 Luna list price: $0.10 input / $0.50 output per 1M tokens.
+    "gpt-6-luna": {"input": 0.01, "output": 0.05},
     # Claude Sonnet 5 list price: $3 input / $15 output per 1M tokens.
     "claude-sonnet-5": {"input": 0.3, "output": 1.5},
 }

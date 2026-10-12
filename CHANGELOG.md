@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.44.5] — 2026-10-12
+
+### Added
+
+RMB-AI-7: the default AI cost rate table gains `gpt-6-luna` at 0.01 cents per 1k input tokens and
+0.05 cents per 1k output tokens (OpenAI list price USD 0.10 / 0.50 per 1M). Before, that model was
+accounted at the pessimistic unknown-model fallback (1.5 / 6.0). No other entry, rounding rule or
+override semantics change; an operator-supplied `AI_MODEL_COST_TABLE_CENTS_PER_1K` still replaces
+the whole table.
+
 ## [2.44.4] — 2026-10-12
 
 ### Fixed

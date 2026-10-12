@@ -294,6 +294,25 @@ def test_estimate_claude_model_uses_own_list_price():
     ) == 2
 
 
+def test_estimate_gpt_6_luna_uses_table_rates():
+    assert estimate_cost_cents(
+        model="gpt-6-luna", input_tokens=1_000_000, output_tokens=0
+    ) == 10
+    assert estimate_cost_cents(
+        model="gpt-6-luna", input_tokens=0, output_tokens=1_000_000
+    ) == 50
+    assert estimate_cost_cents(
+        model="gpt-6-luna", input_tokens=1000, output_tokens=1000
+    ) == 1
+
+
+@override_settings(AI_MODEL_COST_TABLE_CENTS_PER_1K={"gpt-4o-mini": {"input": 0.015, "output": 0.060}})
+def test_estimate_operator_cost_table_replaces_defaults():
+    assert estimate_cost_cents(
+        model="gpt-6-luna", input_tokens=1000, output_tokens=1000
+    ) == 8
+
+
 def test_estimate_unknown_model_uses_conservative_fallback():
     assert estimate_cost_cents(
         model="unknown-model", input_tokens=1000, output_tokens=1000
