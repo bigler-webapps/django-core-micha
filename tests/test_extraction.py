@@ -947,3 +947,53 @@ def test_cache_failure_blocks_provider_before_call(monkeypatch):
             user_id=210, client=client,
         )
     assert client.responses.calls == []
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=3)
+def test_admission_reads_reservations_before_settled_spend(monkeypatch):
+    import django_core_micha.extraction.cost_guard as cost_guard
+
+    order = []
+    real = cost_guard._read_counter
+    monkeypatch.setattr(cost_guard, "_read_counter", lambda key: (order.append(key), real(key))[1])
+    reservation = reserve_for_extraction(user_id=212, request=_request(), model="gpt-4o-mini")
+    release_reservation(reservation=reservation)
+    settled_at = [i for i, key in enumerate(order) if ":ai:cost:" in key]
+    reserved_at = [i for i, key in enumerate(order) if ":ai:reservation:" in key]
+    assert settled_at and reserved_at and max(reserved_at) < min(settled_at)
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=3)
+def test_admission_window_covers_a_reservation_in_the_next_bucket(monkeypatch):
+    import django_core_micha.extraction.cost_guard as cost_guard
+
+    start = 1_800_000_000.0
+    day = cost_guard._today_key()
+    next_bucket = int((start + cost_guard._RESERVATION_BUCKET_SECONDS) // cost_guard._RESERVATION_BUCKET_SECONDS)
+    # A competitor already holds the whole cap in the NEXT bucket.
+    cache.set(cost_guard._reservation_key(213, day, next_bucket), 3, timeout=3600)
+    clock = iter([start, start + cost_guard._RESERVATION_BUCKET_SECONDS + 1])
+    last = [start]
+
+    def fake_time():
+        try:
+            last[0] = next(clock)
+        except StopIteration:
+            pass
+        return last[0]
+
+    # Replace only cost_guard's clock; LocMemCache keeps the real time.time.
+    monkeypatch.setattr(cost_guard, "time", SimpleNamespace(time=fake_time))
+    with pytest.raises(AICostLimitExceeded):
+        reserve_for_extraction(user_id=213, request=_request(), model="gpt-4o-mini")
+
+
+def test_reservation_estimate_is_pessimistic_for_dense_scripts():
+    import django_core_micha.extraction.cost_guard as cost_guard
+
+    request = ExtractionRequest(
+        system_prompt="s", user_prompt="u", schema=_valid_schema(), max_output_tokens=1,
+        effort="low", thinking={"type": "disabled"}, pdf_text="\u6f22" * 100_000,
+    )
+    floor = estimate_cost_cents(model="gpt-4o", input_tokens=50_000, output_tokens=1)
+    assert cost_guard._reservation_estimate(request, "gpt-4o") >= floor

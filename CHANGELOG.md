@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.44.4] — 2026-10-12
+
+### Fixed
+
+RMB-AI-6 (second review pass on the 2.44.3 lock-free admission): admission now reads outstanding
+reservations BEFORE settled spend, so a call settling between the two reads can be double-counted
+(conservative) but never missed; the reservation window is recomputed after the add and spans a
+concurrent request's reservation in the next 5-minute bucket; and the input-token estimate is more
+pessimistic (about 2 characters per token instead of 4) so dense scripts such as CJK text are not
+badly under-reserved. No API or setting changes.
+
 ## [2.44.3] — 2026-10-12
 
 ### Fixed

@@ -129,7 +129,10 @@ def _read_counter(key: str) -> int:
 def _reservation_estimate(request, model: str) -> int:
     """Estimate prompt and bounded input bytes without reserving the whole cap."""
     text = f"{request.system_prompt}\n{request.user_prompt}\n{request.schema!r}\n{request.pdf_text or ''}"
-    input_tokens = max(1, (len(text) + 3) // 4)
+    # ~2 characters per token is deliberately pessimistic for Latin text and still
+    # an approximation for dense scripts (CJK); the residual under-count is bounded
+    # by the output cap and settles against the real usage afterwards.
+    input_tokens = max(1, (len(text) + 1) // 2)
     payload = request.image_bytes if request.image_bytes is not None else request.upload_bytes
     if payload:
         # Binary/image tokenization varies by provider; use a conservative capped
@@ -166,11 +169,15 @@ def reserve_user_budget(*, user_id: int | None, cents: int) -> _Reservation | No
                 if not cache.add(key, cents, timeout=bucket_ttl):
                     cache.incr(key, cents)
         added = True
+        # Re-read the clock after the add: a reservation placed in the next bucket
+        # by a concurrent request must be inside this request's window.
+        check_now = time.time()
+        buckets = _reservation_buckets(max(now, check_now), ttl)
+        reserved = sum(_read_counter(_reservation_key(user_id, day, item)) for item in buckets)
+        # Settled spend is read AFTER reservations: settlement increments the settled
+        # counter before releasing its reservation, so this order can double-count
+        # a settling call (conservative) but never miss it.
         settled = _read_counter(_cache_key_for_day(user_id, day))
-        reserved = sum(
-            _read_counter(_reservation_key(user_id, day, item))
-            for item in _reservation_buckets(now, ttl)
-        )
         limit = int(getattr(settings, "AI_DAILY_COST_LIMIT_CENTS", 500))
         if settled + reserved > limit:
             _decrement_reservation(reservation)
