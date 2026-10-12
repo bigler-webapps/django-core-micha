@@ -106,6 +106,7 @@ def extract(
                 REQUEST_FAILED,
                 "The AI provider request failed.",
                 getattr(exc, "status_code", 502) or 502,
+                provider_request_started=True,
             ) from exc
 
         if getattr(response, "status", None) == "incomplete":
@@ -114,6 +115,7 @@ def extract(
                 "The AI provider output was truncated.",
                 502,
                 response=response,
+                provider_request_started=True,
             )
         raw_text = _response_text(response)
         return ExtractionResult(raw_text, response_to_data(response), usage_from_response(response))

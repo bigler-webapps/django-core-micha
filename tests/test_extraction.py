@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -12,12 +15,21 @@ from django.test import override_settings
 from PIL import Image
 
 from django_core_micha.extraction.cost_guard import (
+    AICostAccountingUnavailable,
     AICostLimitExceeded,
     _cache_key,
+    _cache_key_for_day,
+    _read_counter,
+    _reservation_buckets,
+    _reservation_key,
+    _today_key,
     charge_user,
     charge_user_for_response,
     current_user_spend_cents,
     estimate_cost_cents,
+    release_reservation,
+    reserve_for_extraction,
+    settle_reservation,
 )
 from django_core_micha.extraction.drivers import anthropic_driver, openai_driver
 from django_core_micha.extraction.errors import (
@@ -31,7 +43,7 @@ from django_core_micha.extraction.input_prep import extract_pdf_text, resize_ima
 from django_core_micha.extraction.salvage import extract_json_payload
 from django_core_micha.extraction.schema_contract import validate_schema
 from django_core_micha.extraction.service import extract_document
-from django_core_micha.extraction.types import ExtractionRequest
+from django_core_micha.extraction.types import ExtractionRequest, ExtractionResult
 
 
 @pytest.fixture(autouse=True)
@@ -700,3 +712,238 @@ def test_truncated_provider_response_is_charged_before_error_is_raised():
         )
     assert error.value.code == OUTPUT_TRUNCATED
     assert current_user_spend_cents(90) == 1
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=1)
+def test_exhausted_budget_blocks_both_providers_before_client_call(provider):
+    charge_user(201, 1)
+    client = _openai_client() if provider == "openai" else _anthropic_client()
+    for _ in range(3):
+        with pytest.raises(AICostLimitExceeded):
+            extract_document(
+                _request(), provider=provider, api_key="key", model="gpt-4o-mini",
+                user_id=201, client=client,
+            )
+    endpoint = client.responses if provider == "openai" else client.messages
+    assert endpoint.calls == []
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=1)
+def test_outstanding_reservation_blocks_provider_at_exhaustion():
+    reservation = reserve_for_extraction(user_id=202, request=_request(), model="gpt-4o-mini")
+    client = _openai_client()
+    with pytest.raises(AICostLimitExceeded):
+        extract_document(
+            _request(), provider="openai", api_key="key", model="gpt-4o-mini",
+            user_id=202, client=client,
+        )
+    assert client.responses.calls == []
+    release_reservation(reservation=reservation)
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=10)
+def test_success_settles_once_and_releases_reservation(monkeypatch):
+    import django_core_micha.extraction.service as service
+
+    seen = []
+    real_driver = service.openai_driver.extract
+
+    def observing_driver(*args, **kwargs):
+        seen.append(sum(
+            _read_counter(_reservation_key(203, _today_key(), bucket))
+            for bucket in _reservation_buckets(time.time(), 30 * 60)
+        ))
+        return real_driver(*args, **kwargs)
+
+    monkeypatch.setattr(service.openai_driver, "extract", observing_driver)
+    client = _openai_client()
+    extract_document(
+        _request(), provider="openai", api_key="key", model="gpt-4o-mini",
+        user_id=203, client=client,
+    )
+    assert len(client.responses.calls) == 1
+    assert seen and seen[0] > 0  # admitted BEFORE the provider ran
+    assert current_user_spend_cents(203) == 1
+    now = time.time()
+    outstanding = sum(
+        _read_counter(_reservation_key(203, _today_key(), bucket))
+        for bucket in _reservation_buckets(now, 30 * 60)
+    )
+    assert outstanding == 0
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=1)
+def test_definitively_unbilled_provider_error_releases_reservation(monkeypatch):
+    import django_core_micha.extraction.service as service
+
+    seen = []
+    real_driver = service.openai_driver.extract
+
+    def observing_driver(*args, **kwargs):
+        seen.append(sum(
+            _read_counter(_reservation_key(204, _today_key(), bucket))
+            for bucket in _reservation_buckets(time.time(), 30 * 60)
+        ))
+        return real_driver(*args, **kwargs)
+
+    monkeypatch.setattr(service.openai_driver, "extract", observing_driver)
+    error = Exception("bad request")
+    error.status_code = 400
+    with pytest.raises(DocumentExtractionError):
+        extract_document(
+            _request(), provider="openai", api_key="key", model="gpt-4o-mini",
+            user_id=204, client=_openai_client(error=error),
+        )
+    assert seen and seen[0] > 0  # reserved while the provider ran...
+    assert sum(
+        _read_counter(_reservation_key(204, _today_key(), bucket))
+        for bucket in _reservation_buckets(time.time(), 30 * 60)
+    ) == 0  # ...and released afterwards
+    assert current_user_spend_cents(204) == 0
+    client = _openai_client()
+    extract_document(
+        _request(), provider="openai", api_key="key", model="gpt-4o-mini",
+        user_id=204, client=client,
+    )
+    assert len(client.responses.calls) == 1
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=1)
+def test_ambiguous_provider_error_keeps_reservation_and_blocks_retries():
+    client = _openai_client(error=_ProviderFailure())
+    with pytest.raises(DocumentExtractionError):
+        extract_document(
+            _request(), provider="openai", api_key="key", model="gpt-4o-mini",
+            user_id=205, client=client,
+        )
+    assert len(client.responses.calls) == 1
+    with pytest.raises(AICostLimitExceeded):
+        extract_document(
+            _request(), provider="openai", api_key="key", model="gpt-4o-mini",
+            user_id=205, client=_openai_client(),
+        )
+    client = _openai_client()
+    with pytest.raises(AICostLimitExceeded):
+        extract_document(
+            _request(), provider="openai", api_key="key", model="gpt-4o-mini",
+            user_id=205, client=client,
+        )
+    assert client.responses.calls == []
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=10)
+def test_reservation_expiry_releases_abandoned_allowance(monkeypatch):
+    import django_core_micha.extraction.cost_guard as cost_guard
+
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(cost_guard.time, "time", lambda: now[0])
+    reservation = reserve_for_extraction(user_id=206, request=_request(), model="gpt-4o-mini")
+    key = _reservation_key(reservation.user_id, reservation.day, reservation.bucket)
+    assert _read_counter(key) == reservation.cents
+    # Advance the patched clock past the reservation lifetime (LocMemCache reads
+    # the same time.time): the abandoned reservation expires on its own.
+    now[0] += 3600
+    assert _read_counter(key) == 0
+    assert reserve_for_extraction(user_id=206, request=_request(), model="gpt-4o-mini")
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=10)
+def test_midnight_settlement_uses_admission_day(monkeypatch):
+    import django_core_micha.extraction.cost_guard as cost_guard
+
+    days = ["20261011", "20261012"]
+    monkeypatch.setattr(cost_guard, "_today_key", lambda: days[0])
+    reservation = reserve_for_extraction(user_id=207, request=_request(), model="gpt-4o-mini")
+    days[0] = days[1]
+    response = SimpleNamespace(usage=SimpleNamespace(input_tokens=10, output_tokens=5))
+    settle_reservation(reservation=reservation, response=response, model="gpt-4o-mini")
+    assert cache.get(_cache_key_for_day(207, "20261011")) == 1
+    assert cache.get(_cache_key_for_day(207, "20261012"), 0) == 0
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=10, ENV_TYPE="test-a")
+def test_budget_is_isolated_by_environment_and_existing_rollout_usage():
+    charge_user(208, 10)
+    with pytest.raises(AICostLimitExceeded):
+        reserve_for_extraction(user_id=208, request=_request(), model="gpt-4o-mini")
+    with override_settings(ENV_TYPE="test-b"):
+        reservation = reserve_for_extraction(user_id=208, request=_request(), model="gpt-4o-mini")
+        release_reservation(reservation=reservation)
+    assert current_user_spend_cents(208) == 10
+    assert current_user_spend_cents(209) == 0
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=3)
+def test_concurrent_admission_uses_real_atomic_cache_and_limits_provider_calls(monkeypatch):
+    import django_core_micha.extraction.service as service
+
+    workers = 6
+    ready = threading.Barrier(workers)
+    release_provider = threading.Event()
+    calls = []
+
+    def blocked_provider(*args, **kwargs):
+        calls.append(1)
+        assert release_provider.wait(5)
+        return ExtractionResult("{}", {}, SimpleNamespace(input_tokens=10, output_tokens=5))
+
+    monkeypatch.setattr(service.openai_driver, "extract", blocked_provider)
+
+    def worker():
+        ready.wait(timeout=5)
+        try:
+            service.extract_document(
+                _request(), provider="openai", api_key="key", model="gpt-4o-mini",
+                user_id=209, client=object(),
+            )
+            return "admitted"
+        except AICostLimitExceeded:
+            return "denied"
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(worker) for _ in range(workers)]
+        # Denied workers finish at once; at most 3 can ever be admitted (blocked).
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and sum(f.done() for f in futures) < workers - 3:
+            time.sleep(0.01)
+        # Admission is conservative under contention: concurrent requests may deny
+        # each other, but the reserved total never exceeds the cap.
+        outstanding = sum(
+            _read_counter(_reservation_key(209, _today_key(), bucket))
+            for bucket in _reservation_buckets(time.time(), 30 * 60)
+        )
+        assert outstanding <= 3
+        release_provider.set()
+        outcomes = [future.result(timeout=5) for future in futures]
+    admitted = outcomes.count("admitted")
+    assert admitted <= 3
+    assert len(calls) == admitted
+    assert outcomes.count("denied") == workers - admitted
+    assert current_user_spend_cents(209) == admitted
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=3)
+def test_sequential_admission_admits_exactly_the_affordable_count():
+    reservations = [
+        reserve_for_extraction(user_id=211, request=_request(), model="gpt-4o-mini")
+        for _ in range(3)
+    ]
+    assert all(reservations)
+    with pytest.raises(AICostLimitExceeded):
+        reserve_for_extraction(user_id=211, request=_request(), model="gpt-4o-mini")
+    # The denied attempt rolled itself back: releasing one makes room for one.
+    release_reservation(reservation=reservations[0])
+    assert reserve_for_extraction(user_id=211, request=_request(), model="gpt-4o-mini")
+
+
+@override_settings(AI_COST_LIMIT_ENABLED=True, AI_DAILY_COST_LIMIT_CENTS=10)
+def test_cache_failure_blocks_provider_before_call(monkeypatch):
+    monkeypatch.setattr(cache, "add", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("cache down")))
+    client = _openai_client()
+    with pytest.raises(AICostAccountingUnavailable):
+        extract_document(
+            _request(), provider="openai", api_key="key", model="gpt-4o-mini",
+            user_id=210, client=client,
+        )
+    assert client.responses.calls == []

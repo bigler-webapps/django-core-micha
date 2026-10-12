@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.44.3] — 2026-10-12
+
+### Fixed
+
+RMB-AI-6: `extract_document` now reserves budget BEFORE any provider call. The daily per-user cap
+was only enforced after the provider answered, so every call made while over the cap still spent
+money and its result was then discarded. Admission now adds a conservative, expiring reservation
+(atomic cache `add`/`incr`, rolled back on denial, 30-minute bounded lifetime, keyed to the admission
+UTC day) against settled spend plus outstanding reservations and raises `AICostLimitExceeded` before
+the provider runs; concurrent callers can be denied conservatively but never over-admitted. Settlement
+charges reported usage to the admission day without raising; billed truncation still counts;
+definitively unbilled failures (pre-provider validation, provider 4xx other than 408/409/429) release
+the reservation; ambiguous failures hold it until expiry. A cache failure during admission raises the
+new `AICostAccountingUnavailable` instead of admitting unmetered work. `DocumentExtractionError` gains
+the additive `provider_request_started` attribute. The settled counter key, cap
+(`AI_DAILY_COST_LIMIT_CENTS`, default 500), `AI_COST_LIMIT_ENABLED`, the rate table, `charge_user*`
+and `current_user_spend_cents` are unchanged; disabled/local behaviour and `user_id=None` are
+unchanged. Optional new setting `AI_COST_RESERVATION_TTL_SECONDS` (default 1800).
+
 ## [2.44.2] — 2026-09-29
 
 ### Fixed

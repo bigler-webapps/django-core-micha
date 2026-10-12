@@ -26,9 +26,11 @@ class DocumentExtractionError(Exception):
         status_code: int = 400,
         *,
         response=None,
+        provider_request_started: bool = False,
     ):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
         self.response = response
+        self.provider_request_started = provider_request_started

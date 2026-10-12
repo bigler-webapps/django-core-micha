@@ -114,6 +114,7 @@ def extract(
                 REQUEST_FAILED,
                 "The AI provider request failed.",
                 getattr(exc, "status_code", 502) or 502,
+                provider_request_started=True,
             ) from exc
 
         if getattr(response, "stop_reason", None) == "max_tokens":
@@ -122,6 +123,7 @@ def extract(
                 "The AI provider output was truncated.",
                 502,
                 response=response,
+                provider_request_started=True,
             )
         raw_text = "\n".join(
             str(getattr(block, "text", ""))
