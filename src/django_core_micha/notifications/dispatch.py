@@ -31,11 +31,13 @@ class Dispatcher(Protocol):
         """Deliver one notification to one recipient."""
 
 
-def _recipient_language(user) -> str:
+def _recipient_language(user, *, app_profile_fallback=False) -> str:
     try:
         profile = user.contact_profile
     except AttributeError:
         profile = None
+    if profile is None and app_profile_fallback:
+        profile = getattr(user, "profile", None)
     language = getattr(profile, "language", "de")
     return language if language in {"de", "en", "fr"} else "de"
 
@@ -69,7 +71,7 @@ def _resolve_text_key(key: str, language: str, params: dict, *, kind: str, requi
         return key
 
 
-def _render_content(content: dict, user, transient=None) -> tuple[str, str, str]:
+def _render_content(content: dict, user, transient=None, *, app_profile_fallback=False) -> tuple[str, str, str]:
     """Render text for a recipient. ``content["require_registered_text"]`` opts a
     caller into the text-registry i18n path (see ``_resolve_text_key``)."""
 
@@ -79,7 +81,7 @@ def _render_content(content: dict, user, transient=None) -> tuple[str, str, str]
     params = params if isinstance(params, dict) else {}
     params = {**params, **(transient or {})}
     require_registered = bool(content.get("require_registered_text"))
-    language = _recipient_language(user)
+    language = _recipient_language(user, app_profile_fallback=app_profile_fallback)
     title = _resolve_text_key(title_key, language, params, kind="title", require_registered=require_registered)
     body = _resolve_text_key(body_key, language, params, kind="body", require_registered=require_registered)
     link = content.get("link", "")
@@ -118,7 +120,9 @@ class EmailDispatcher:
     channel = "email"
 
     def deliver(self, notification, recipient, ctx=None) -> DeliveryResult:
-        title, body, url = _render_content(notification.content, recipient.user, ctx)
+        title, body, url = _render_content(
+            notification.content, recipient.user, ctx, app_profile_fallback=True,
+        )
         _send_email(
             title=title,
             body=body,

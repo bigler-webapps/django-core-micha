@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.44.6] — 2026-10-14
+
+### Fixed
+
+DCM-NOTIF-29: notification email rendering falls back to `user.profile.language` when no contact
+profile is available, while preserving contact-profile precedence and the German default for
+missing or unsupported languages.
+Push and feed rendering retain their existing contact-profile-only behavior.
+
 ## [2.44.5] — 2026-10-12
 
 ### Added
