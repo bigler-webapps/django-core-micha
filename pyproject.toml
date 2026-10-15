@@ -15,7 +15,7 @@ dependencies = [
     "PyYAML",
     "psycopg2-binary",
     "filetype>=1.2,<2.0",
-    "django-anymail>=10",
+    "django-anymail>=15.2",
     "pywebpush",
     "django-environ",
     "django-cors-headers",
