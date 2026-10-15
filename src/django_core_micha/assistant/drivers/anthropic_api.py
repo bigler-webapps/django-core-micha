@@ -1,6 +1,6 @@
 """Anthropic Messages driver with native tool use and per-call cost admission."""
 import json
-from .base import DriverError, arguments_json, call_with_budget, invoke_tool, map_effort, tool_specs
+from .base import DriverError, arguments_json, call_with_budget, invoke_tool, map_effort, tool_specs, log_provider_error
 
 
 class AnthropicDriver:
@@ -67,5 +67,6 @@ class AnthropicDriver:
         except DriverError:
             raise
         except Exception as exc:
+            log_provider_error("anthropic_api", model, exc)
             code = "quota_exceeded" if getattr(exc, "status_code", None) == 429 else "provider_error"
             raise DriverError(code) from exc

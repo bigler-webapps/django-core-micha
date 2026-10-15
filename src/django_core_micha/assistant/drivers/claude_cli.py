@@ -152,6 +152,7 @@ class ClaudeCliDriver:
                             isinstance(servers[0], dict) and servers[0].get("name") == "dcm_tools" and servers[0].get("status") == "connected")
                         if actual != expected or not valid_servers: raise DriverError("security_violation")
                         saw_init = True
+                        yield {"type": "init"}
                     elif not saw_init:
                         if event.get("type") == "system":
                             continue

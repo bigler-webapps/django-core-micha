@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.0.2] — 2026-10-15
+
+### Fixed
+
+DCM-CHAT-7: a provider timeout before the Claude Code CLI's `init` event now also discards a resumed session. The turn runner
+enforces its own provider timeout, which replaced the driver's signal; the CLI driver now yields an internal `init` marker
+event (consumed by the turn runner, never sent to clients) and the runner clears the session reference when a resumed turn
+times out without having seen `init`. A timeout after `init` keeps the session.
+
+### Added
+
+DCM-CHAT-8: failed provider calls in the OpenAI and Anthropic chat drivers are logged on the server with one warning entry
+(logger `django_core_micha.assistant.drivers.base`): driver, model, HTTP status, the provider's error type, code, parameter
+and message. API-key-like tokens (`sk-...`) are redacted and each field is capped at 1000 characters; request bodies, prompts
+and tool content are never logged. Client-facing error codes and the 429 mapping are unchanged.
+
+
 ## [3.0.1] — 2026-10-15
 
 ### Fixed

@@ -1,6 +1,6 @@
 """OpenAI Responses API driver with native function calls."""
 import json
-from .base import DriverError, arguments_json, invoke_tool, map_effort, tool_specs, _reserve
+from .base import DriverError, arguments_json, invoke_tool, map_effort, tool_specs, _reserve, log_provider_error
 from django_core_micha.extraction.cost_guard import release_reservation, settle_reservation
 
 
@@ -75,5 +75,6 @@ class OpenAIDriver:
         except DriverError:
             raise
         except Exception as exc:
+            log_provider_error("openai_api", model, exc)
             code = "quota_exceeded" if getattr(exc, "status_code", None) == 429 else "provider_error"
             raise DriverError(code) from exc

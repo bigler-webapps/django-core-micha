@@ -2,9 +2,42 @@
 import asyncio
 import inspect
 import json
+import logging
+import re
 from dataclasses import dataclass
 
 from asgiref.sync import sync_to_async
+
+log = logging.getLogger(__name__)
+_API_KEY_RE = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
+
+
+def log_provider_error(driver, model, exc):
+    """Log provider error details without allowing logging failures to mask the error."""
+    try:
+        body = getattr(exc, "body", None)
+        fields = body if isinstance(body, dict) else {}
+        nested = fields.get("error")
+        if isinstance(nested, dict):
+            fields = {**fields, **nested}
+        message = fields.get("message") or (body if isinstance(body, str) else None) or getattr(exc, "message", None) or str(exc)
+        error_type = fields.get("type") or getattr(exc, "type", None) or type(exc).__name__
+        status = getattr(exc, "status_code", None)
+        code = fields.get("code") or getattr(exc, "code", None)
+        param = fields.get("param") or getattr(exc, "param", None)
+
+        def clean(value):
+            if value is None:
+                return None
+            return _API_KEY_RE.sub("[REDACTED]", str(value))[:1000]  # bounded: a provider message may quote request parts
+
+        log.warning(
+            "Provider call failed driver=%s model=%s status=%s type=%s code=%s param=%s message=%s",
+            clean(driver), clean(model), clean(status), clean(error_type), clean(code), clean(param), clean(message),
+        )
+    except Exception:
+        # Diagnostics must never replace the provider exception being handled.
+        return
 
 
 class DriverError(Exception):

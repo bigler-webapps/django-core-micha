@@ -122,6 +122,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
     beat = asyncio.create_task(_heartbeat(turn.pk))
     chunks, trace, usage, session_id = [], [], {}, None
     session_file = False
+    saw_init = False
     try:
         # Resolver is deliberately the one credential seam and runs exactly once per turn.
         credential, billing = resolve_credential(user, turn.driver)
@@ -164,6 +165,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
                     await emit(event)
                 elif event.get("type") == "usage": usage = event.get("usage", {})
                 elif event.get("type") == "session": session_id = event.get("session_id")
+                elif event.get("type") == "init": saw_init = True
         text = "".join(chunks)
         await sync_to_async(_finish)(turn.pk, text, "completed", usage=usage, trace=trace, session_id=session_id)
     except asyncio.CancelledError as exc:
@@ -177,7 +179,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
             pass
         raise
     except TimeoutError as exc:
-        if getattr(exc, "before_init", False) and session_file:
+        if session_file and not saw_init:
             await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
         await sync_to_async(_finish)(turn.pk, "".join(chunks), "failed", "timeout", usage, trace)
         await _emit_final(turn.pk, emit)
