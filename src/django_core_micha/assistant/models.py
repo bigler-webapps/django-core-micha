@@ -14,6 +14,8 @@ class AssistantChat(models.Model):
     selected_effort = models.CharField(max_length=12, blank=True, default="medium")
     session_driver = models.CharField(max_length=32, blank=True, default="")
     session_reference = models.CharField(max_length=255, blank=True, default="")
+    session_tokens = models.PositiveIntegerField(default=0)
+    session_prompt_version = models.CharField(max_length=64, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

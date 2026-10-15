@@ -11,10 +11,10 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.http import Http404
 from django_core_micha.auth.ws_permissions import BaseSecureConsumer, IsAuthenticatedWs, WsPermission
 
-from .hooks import can_access_scope
+from .hooks import availability_reason, can_access_scope
 from .limits import get_limit
 from .models import AssistantChat
-from .turns import reconcile_interrupted, run_turn, turn_payload
+from .turns import AccessLost, reconcile_interrupted, run_turn, turn_payload
 
 class IsChatOwnerWs(WsPermission):
     async def has_permission(self, scope, consumer):
@@ -63,8 +63,11 @@ class ChatConsumer(BaseSecureConsumer, AsyncJsonWebsocketConsumer):
             await self.send_json({"type":"error","code":"invalid_frame"}); return
         if self.chat.archived_at: await self.send_json({"type":"error","code":"archived"}); return
         if self.task and not self.task.done(): await self.send_json({"type":"error","code":"turn_active"}); return
+        reason=await sync_to_async(availability_reason)(self.scope["user"],self.chat.scope)
+        if reason: await self.send_json({"type":"error","code":"unavailable","reason":reason}); return
         async def execute():
-            try: await run_turn(self.chat,self.scope["user"],content["message"],self.send_json)
+            try: await run_turn(self.chat,self.scope["user"],content["message"],self.send_json,authorize=self._session_valid)
+            except AccessLost: await self.close(code=4403)
             except Exception as exc: await self.send_json({"type":"error","code":getattr(exc,"code","provider_error")})
         self.task=asyncio.create_task(execute())
     async def disconnect(self,code):

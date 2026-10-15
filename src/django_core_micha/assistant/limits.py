@@ -7,6 +7,8 @@ DEFAULTS = {
     "max_message_length": 20_000, "max_prompt_bytes": 120_000, "max_output_bytes": 512 * 1024,
     "provider_timeout": 120, "idle_timeout": 30, "heartbeat_seconds": 5, "stale_turn_seconds": 30,
     "max_tool_calls": 10,
+    "access_recheck_seconds": 1,
+    "session_rebuild_tokens": 200_000,
 }
 
 def get_limit(name):

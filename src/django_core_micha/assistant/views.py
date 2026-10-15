@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 
 from .availability import availability
 from .catalogue import default_entry, entries, entry_by_id, entry_id, selection_of, validate
-from .hooks import can_access_scope
+from .hooks import availability_reason, can_access_scope
 from .models import AssistantChat
 from .pagination import InvalidCursor, decode_cursor, encode_cursor
 from .turns import delete_session, reconcile_interrupted, turn_payload
@@ -45,7 +45,14 @@ class CatalogueView(APIView):
 
 class AvailabilityView(APIView):
     permission_classes=[IsAuthenticated]
-    def get(self,request): return Response(availability())
+    def get(self,request):
+        result=availability()
+        if "scope" in request.query_params:
+            scope=request.query_params.get("scope","")
+            if not can_access_scope(request.user,scope): return _problem("not_found",404)
+            reason=availability_reason(request.user,scope)
+            if reason: return Response({"status":"unavailable","reason":reason,"providers":result.get("providers",{})})
+        return Response(result)
 
 class ChatListCreateView(APIView):
     permission_classes=[IsAuthenticated]
@@ -53,8 +60,11 @@ class ChatListCreateView(APIView):
         archived=request.query_params.get("archived","false").lower() in {"1","true","yes"}
         try: limit=min(100,max(1,int(request.query_params.get("limit",20))))
         except (TypeError,ValueError): return _problem("invalid_cursor")
-        context=_cursor_context("chats",request.user,archived=archived,limit=limit)
+        scope=request.query_params.get("scope")
+        if scope is not None and not can_access_scope(request.user,scope): return _problem("not_found",404)
+        context=_cursor_context("chats",request.user,archived=archived,limit=limit,scope=scope)
         qs=AssistantChat.objects.filter(owner=request.user,archived_at__isnull=not archived)
+        if scope is not None: qs=qs.filter(scope=scope)
         if request.query_params.get("cursor"):
             try:
                 c=decode_cursor(request.query_params["cursor"],context); stamp=timezone.datetime.fromisoformat(c["updated_at"]); cid=uuid.UUID(c["id"])

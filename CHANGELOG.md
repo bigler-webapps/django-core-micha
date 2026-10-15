@@ -1,5 +1,30 @@
 # Changelog
 
+## [3.1.0] — 2026-10-15
+
+### Added
+
+DCM-CHAT-10: optional hooks and behaviours of the chat core for a research consumer (maana). All are off or neutral when not
+configured; apps that use none of them (cockpit) behave as before. Migration `0002_session_upkeep` adds `session_tokens` and
+`session_prompt_version` to the chat.
+- `DCM_ASSISTANT_TURN_CONTEXT(chat, user, message, turn)`: context text sent with that turn only (CLI: `context` key of the prompt;
+  API drivers: prefix of the user message), never stored in the turn's `user_text` or the history. A raising hook fails the turn
+  with `provider_error` before any provider call.
+- `DCM_ASSISTANT_AFTER_TURN(chat, user, turn, text)`: may return a replacement text and app frames
+  (`AfterTurnResult(text, frames)`), delivered as `{"type":"app","name":...,"payload":...}` before the final `turn` frame. A raising
+  hook keeps the raw text and the turn completed.
+- `DCM_ASSISTANT_AVAILABILITY(user, scope)` returns a reason code or None: `GET status/?scope=` reports
+  `{"status":"unavailable","reason":...}` (a scope the user may not access answers 404), and a `send` in an unavailable scope is
+  answered with the error `unavailable` (with `reason`) before any turn or provider call.
+- Live access check: while a turn runs the scope permission, the optional `DCM_ASSISTANT_TURN_VALIDITY(chat, user, turn)` hook and
+  the session are re-checked every `access_recheck_seconds` (default 1; also once right before the provider call). A failure cancels
+  the turn and closes the socket with 4403.
+- `GET chats/?scope=` returns only that scope's chats (forbidden scope: 404; cursors are bound to the scope).
+- Claude Code session upkeep: a resumed session whose summed input tokens exceed the limit `session_rebuild_tokens` (default
+  200000) or whose stored `DCM_ASSISTANT_PROMPT_VERSION` differs from the configured one is not resumed (history is rebuilt);
+  a rebuilt history that exceeds `max_prompt_bytes` drops the oldest turns and sends `{"type":"notice","code":"history_trimmed","left_out":n}`.
+
+
 ## [3.0.2] — 2026-10-15
 
 ### Fixed

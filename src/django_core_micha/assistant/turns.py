@@ -17,13 +17,18 @@ from django.utils import timezone
 from .catalogue import validate
 from .credentials import resolve_credential
 from .drivers.base import DriverError
-from .hooks import build_system_prompt, can_access_scope, tool_registry
+from .hooks import (AfterTurnResult, availability_reason, build_system_prompt,
+    build_turn_context, can_access_scope, process_after_turn, prompt_version,
+    tool_registry, turn_is_valid)
 from .history import build_history
 from .limits import get_limit
 from .models import AssistantChat, AssistantTurn
 
 log = logging.getLogger(__name__)
 TITLE_DEFAULT = AssistantChat._meta.get_field("title").default
+
+class AccessLost(DriverError):
+    def __init__(self): super().__init__("access_lost")
 
 def reconcile_interrupted(chat=None, everything=False):
     qs = AssistantTurn.objects.filter(state="generating")
@@ -69,7 +74,7 @@ def _create_turn(chat_id, user_id, message):
     except IntegrityError as exc:
         raise DriverError("turn_active") from exc
 
-def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=None):
+def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=None, session_tokens=None, session_version=None):
     with transaction.atomic():
         turn = AssistantTurn.objects.select_for_update().select_related("chat").get(pk=turn_id)
         if turn.state != "generating": return False
@@ -84,10 +89,12 @@ def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=N
             chat.title = title[:60] or TITLE_DEFAULT
         if session_id and turn.driver == "claude_cli":
             chat.session_driver, chat.session_reference = turn.driver, session_id
+            if session_tokens is not None: chat.session_tokens = session_tokens
+            if session_version is not None: chat.session_prompt_version = session_version
         elif turn.driver != "claude_cli":
             chat.session_driver, chat.session_reference = "", ""
         chat.updated_at = timezone.now()
-        chat.save(update_fields=("title", "session_driver", "session_reference", "updated_at"))
+        chat.save(update_fields=("title", "session_driver", "session_reference", "session_tokens", "session_prompt_version", "updated_at"))
         return True
 
 async def _heartbeat(turn_id):
@@ -115,7 +122,7 @@ def _make_driver(name, credential):
         return AnthropicDriver(AsyncAnthropic(api_key=credential))
     raise DriverError("not_configured")
 
-async def run_turn(chat, user, message, emit, cancel_event=None):
+async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None):
     if not isinstance(message, str) or not message.strip(): raise DriverError("invalid_output")
     if len(message) > get_limit("max_message_length"): raise DriverError("prompt_too_long")
     turn = await sync_to_async(_start)(chat.pk, user.pk, message)
@@ -123,6 +130,9 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
     chunks, trace, usage, session_id = [], [], {}, None
     session_file = False
     saw_init = False
+    task = asyncio.current_task()
+    access_lost = False
+    watcher = None
     try:
         # Resolver is deliberately the one credential seam and runs exactly once per turn.
         credential, billing = resolve_credential(user, turn.driver)
@@ -131,29 +141,70 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
             raise DriverError("not_configured")
         current = await sync_to_async(AssistantChat.objects.get)(pk=chat.pk)
         prompt = await sync_to_async(build_system_prompt)(current)
+        context_text = await sync_to_async(build_turn_context)(current, user, message, turn)
         history = await sync_to_async(build_history)(current)
         tools = await sync_to_async(tool_registry)()
+        configured_version = await sync_to_async(prompt_version)()
+        resumed = False
         if turn.driver == "claude_cli" and current.session_driver == turn.driver and current.session_reference:
             from .drivers.claude_cli import _session_dirs
             _, config_dir, _ = _session_dirs(current.pk)
             session_file = any((config_dir / "projects").glob(f"*/{current.session_reference}.jsonl"))
-        prompt_data = json.dumps({"system": prompt, "message": message} if session_file else
-            {"system": prompt, "history": history, "message": message}, ensure_ascii=False)
+            resumed = session_file
+            if current.session_tokens > get_limit("session_rebuild_tokens"):
+                session_file = resumed = False
+            if configured_version and current.session_prompt_version != configured_version:
+                session_file = resumed = False
+        rebuilding = turn.driver != "claude_cli" or not session_file
+        history_rows = history if rebuilding else []
+        def make_prompt(rows):
+            data = {"system": prompt, "message": message} if not rebuilding else {"system": prompt, "history": rows, "message": message}
+            if context_text: data["context"] = context_text
+            return json.dumps(data, ensure_ascii=False)
+        prompt_data = make_prompt(history_rows)
+        trimmed = 0
+        while len(prompt_data.encode("utf-8")) > get_limit("max_prompt_bytes") and history_rows:
+            history_rows = history_rows[2:]
+            trimmed += 1
+            prompt_data = make_prompt(history_rows)
         if len(prompt_data.encode("utf-8")) > get_limit("max_prompt_bytes"):
             raise DriverError("prompt_too_long")
+        if trimmed:
+            await emit({"type":"notice", "code":"history_trimmed", "left_out":trimmed})
         if turn.driver == "claude_cli" and not session_file and current.session_reference:
             await emit({"type":"notice","code":"history_rebuilt"})
-        # A provider switch or missing CLI session rebuilds history from durable turns.
-        if turn.driver == "claude_cli" and (current.session_driver != turn.driver or not current.session_reference):
-            history_rows = history
-        else: history_rows = history
+        provider_message = message
+        if context_text and turn.driver != "claude_cli":
+            provider_message = f"{context_text}\n\n---\n\n{message}"
         driver = _make_driver(turn.driver, credential)
-        kwargs = {"prompt": prompt_data, "messages": history_rows + [{"role": "user", "content": message}],
+        kwargs = {"prompt": prompt_data, "messages": history_rows + [{"role": "user", "content": provider_message}],
             "system": prompt, "tools": tools, "user": user, "chat": current, "credential": credential,
             "effort": turn.effort, "cancel_event": cancel_event,
             "session_id": current.session_reference if session_file else None,
             "max_tool_calls": get_limit("max_tool_calls")}
+        async def access_ok():
+            try:
+                allowed = await sync_to_async(can_access_scope)(user, current.scope)
+                valid = await sync_to_async(turn_is_valid)(current, user, turn)
+                session_ok = await authorize() if authorize else True
+            except Exception:
+                log.exception("Assistant live access check failed")
+                return False
+            return bool(allowed and valid and session_ok)
+        async def watch_access():
+            nonlocal access_lost
+            while True:
+                await asyncio.sleep(get_limit("access_recheck_seconds"))
+                if not await access_ok():
+                    access_lost = True
+                    task.cancel()
+                    return
+        # Checked once more right before the provider call: the watcher's first look comes one interval later.
+        if not await access_ok():
+            access_lost = True
+            raise asyncio.CancelledError
         async with asyncio.timeout(get_limit("provider_timeout")):
+            watcher = asyncio.create_task(watch_access())
             async for event in driver.stream(model=turn.model, **kwargs):
                 if cancel_event and cancel_event.is_set(): raise asyncio.CancelledError
                 if event.get("type") == "delta":
@@ -166,8 +217,31 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
                 elif event.get("type") == "usage": usage = event.get("usage", {})
                 elif event.get("type") == "session": session_id = event.get("session_id")
                 elif event.get("type") == "init": saw_init = True
+        # The stream is over: a permission change during after-turn processing must not turn a finished answer into a cancelled one.
+        watcher.cancel()
+        try: await watcher
+        except BaseException: pass
+        watcher = None
         text = "".join(chunks)
-        await sync_to_async(_finish)(turn.pk, text, "completed", usage=usage, trace=trace, session_id=session_id)
+        try:
+            result = await sync_to_async(process_after_turn)(current, user, turn, text)
+            if isinstance(result, str): text = result
+            elif isinstance(result, AfterTurnResult):
+                if result.text is not None: text = result.text
+                for frame in result.frames or ():
+                    try:
+                        if not isinstance(frame, dict) or not isinstance(frame.get("name"), str) or not frame["name"] or "payload" not in frame: raise ValueError("malformed frame")
+                        json.dumps(frame["payload"])
+                        await emit({"type":"app", "name":frame["name"], "payload":frame["payload"]})
+                    except Exception:
+                        log.exception("Malformed assistant app frame")
+        except Exception:
+            log.exception("Assistant after-turn hook failed")
+            text = "".join(chunks)
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        session_tokens = (current.session_tokens + input_tokens) if resumed else input_tokens
+        await sync_to_async(_finish)(turn.pk, text, "completed", usage=usage, trace=trace, session_id=session_id,
+            session_tokens=session_tokens, session_version=configured_version or None)
     except asyncio.CancelledError as exc:
         if getattr(exc, "before_init", False) and session_file:
             await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
@@ -177,6 +251,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
             await emit({"type":"turn","turn":turn_payload(cancelled)})
         except Exception:
             pass
+        if access_lost: raise AccessLost() from exc
         raise
     except TimeoutError as exc:
         if session_file and not saw_init:
@@ -194,6 +269,10 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
         log.exception("Assistant provider turn failed")
         raise DriverError(code) from exc
     finally:
+        if watcher:
+            watcher.cancel()
+            try: await watcher
+            except BaseException: pass
         beat.cancel()
         try: await beat
         except BaseException: pass
