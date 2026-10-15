@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.45.1] — 2026-10-15
+
+### Changed
+
+DCM-DEPS-2: dependency floors and workflow pins from the Renovate bundle. Runtime floors: django-anymail >=15.2, Pillow >=12.3.0, pypdf >=6.19.0, openai >=2.54.0, cryptography >=42.0.8. Test floors: pytest >=9.1.1, pytest-django >=4.14.0, pytest-asyncio >=1.4.0. Publish workflow: actions/checkout v7.0.1, actions/setup-python v7.0.0, Python 3.14.8, pypi-publish v1.14.2. Not taken in: the Django >=6.1.2 floor, cryptography >=50.0.2 and openai >=3.26.1, because apps pin Django 6.1/6.1.1, cryptography 50.0.0 (cockpit) and openai 3.24.0 (cockpit, reimbursements, spesix) below those floors.
+
+
 ## [2.45.0] — 2026-10-15
 
 ### Added
