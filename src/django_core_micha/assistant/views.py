@@ -54,7 +54,7 @@ class ChatListCreateView(APIView):
         try: limit=min(100,max(1,int(request.query_params.get("limit",20))))
         except (TypeError,ValueError): return _problem("invalid_cursor")
         context=_cursor_context("chats",request.user,archived=archived,limit=limit)
-        qs=AssistantChat.objects.filter(owner=request.user,archived_at__isnull=archived)
+        qs=AssistantChat.objects.filter(owner=request.user,archived_at__isnull=not archived)
         if request.query_params.get("cursor"):
             try:
                 c=decode_cursor(request.query_params["cursor"],context); stamp=timezone.datetime.fromisoformat(c["updated_at"]); cid=uuid.UUID(c["id"])

@@ -1,12 +1,16 @@
 """Shared provider errors, effort mapping, tool execution and spend accounting."""
 import asyncio
+import inspect
 import json
 from dataclasses import dataclass
+
+from asgiref.sync import sync_to_async
 
 
 class DriverError(Exception):
     def __init__(self, code="provider_error", message=None):
         self.code = code
+        self.before_init = False
         super().__init__(message or code)
 
 
@@ -62,8 +66,12 @@ async def invoke_tool(tool, user, chat, arguments, trust_class):
     if not isinstance(arguments, dict):
         raise DriverError("invalid_output")
     try:
-        result = tool.handler(user, chat, arguments, trust_class)
-        if asyncio.iscoroutine(result):
+        handler = tool.handler
+        if inspect.iscoroutinefunction(handler):
+            result = await handler(user, chat, arguments, trust_class)
+        else:
+            result = await sync_to_async(handler)(user, chat, arguments, trust_class)
+        if inspect.isawaitable(result):
             result = await result
         content, sources = result
         if not isinstance(sources, list):

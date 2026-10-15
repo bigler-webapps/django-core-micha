@@ -121,6 +121,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
     turn = await sync_to_async(_start)(chat.pk, user.pk, message)
     beat = asyncio.create_task(_heartbeat(turn.pk))
     chunks, trace, usage, session_id = [], [], {}, None
+    session_file = False
     try:
         # Resolver is deliberately the one credential seam and runs exactly once per turn.
         credential, billing = resolve_credential(user, turn.driver)
@@ -131,7 +132,6 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
         prompt = await sync_to_async(build_system_prompt)(current)
         history = await sync_to_async(build_history)(current)
         tools = await sync_to_async(tool_registry)()
-        session_file = False
         if turn.driver == "claude_cli" and current.session_driver == turn.driver and current.session_reference:
             from .drivers.claude_cli import _session_dirs
             _, config_dir, _ = _session_dirs(current.pk)
@@ -166,7 +166,9 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
                 elif event.get("type") == "session": session_id = event.get("session_id")
         text = "".join(chunks)
         await sync_to_async(_finish)(turn.pk, text, "completed", usage=usage, trace=trace, session_id=session_id)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
+        if getattr(exc, "before_init", False) and session_file:
+            await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
         await sync_to_async(_finish)(turn.pk, "".join(chunks), "cancelled", "cancelled", usage, trace)
         try:
             cancelled = await sync_to_async(AssistantTurn.objects.get)(pk=turn.pk)
@@ -175,11 +177,15 @@ async def run_turn(chat, user, message, emit, cancel_event=None):
             pass
         raise
     except TimeoutError as exc:
+        if getattr(exc, "before_init", False) and session_file:
+            await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
         await sync_to_async(_finish)(turn.pk, "".join(chunks), "failed", "timeout", usage, trace)
         await _emit_final(turn.pk, emit)
         raise DriverError("timeout") from exc
     except Exception as exc:
         code = getattr(exc, "code", "provider_error")
+        if isinstance(exc, DriverError) and getattr(exc, "before_init", False) and session_file:
+            await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
         await sync_to_async(_finish)(turn.pk, "".join(chunks), "failed", code, usage, trace)
         await _emit_final(turn.pk, emit)
         if isinstance(exc, DriverError): raise

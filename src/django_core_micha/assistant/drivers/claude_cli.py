@@ -153,6 +153,8 @@ class ClaudeCliDriver:
                         if actual != expected or not valid_servers: raise DriverError("security_violation")
                         saw_init = True
                     elif not saw_init:
+                        if event.get("type") == "system":
+                            continue
                         raise DriverError("security_violation")
                     elif event.get("type") == "rate_limit_event" and (event.get("rate_limit_info") or {}).get("status") == "rejected":
                         raise DriverError("quota_exceeded")
@@ -178,13 +180,20 @@ class ClaudeCliDriver:
             for item in tool_events: yield item
             yield {"type": "session", "session_id": active_id}
         except asyncio.TimeoutError as exc:
-            raise DriverError("timeout") from exc
-        except asyncio.CancelledError:
+            error = DriverError("timeout")
+            error.before_init = not saw_init
+            raise error from exc
+        except asyncio.CancelledError as exc:
+            exc.before_init = not saw_init  # lets the turn runner discard a resumed session that never reached init
             raise
-        except DriverError:
+        except DriverError as exc:
+            if not saw_init:
+                exc.before_init = True
             raise
         except Exception as exc:
-            raise DriverError("provider_error") from exc
+            error = DriverError("provider_error")
+            error.before_init = not saw_init
+            raise error from exc
         finally:
             if proc.returncode is None:
                 self.kill_tree(proc)

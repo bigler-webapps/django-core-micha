@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.0.1] — 2026-10-15
+
+### Fixed
+
+DCM-CHAT-4: the chat core accepts synchronous tool handlers. A synchronous handler runs in a worker thread that permits ORM
+access (before, it ran on the event loop and a database read failed with `SynchronousOnlyOperation`); an async handler is
+awaited as before. A running synchronous handler is not interrupted when a turn is stopped, which is why tools stay read-only.
+
+DCM-CHAT-5: a chat survives an interrupted Claude Code turn. Events of type `system` before the CLI's `init` event (for example
+`ui_invalidate` after a resumed session) are ignored; any other event before `init` and a wrong `init` still fail closed. A resumed
+session that fails or is stopped before `init` is discarded, so the next turn starts a fresh provider session and rebuilds the
+history from the stored turns.
+
+DCM-CHAT-6: the chat list archive filter was inverted. The default list now returns the owner's active chats and
+`?archived=true` returns the archived ones.
+
+
 ## [3.0.0] — 2026-10-15
 
 ### Changed (breaking for consumers)
