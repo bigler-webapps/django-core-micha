@@ -1,0 +1,17 @@
+"""Maana-derived defaults with a single settings override seam."""
+from django.conf import settings
+
+DEFAULTS = {
+    "frame_rate_window": 10, "frame_rate_count": 30,
+    "max_concurrent_turns": 4, "max_turns_per_user": 2,
+    "max_message_length": 20_000, "max_prompt_bytes": 120_000, "max_output_bytes": 512 * 1024,
+    "provider_timeout": 120, "idle_timeout": 30, "heartbeat_seconds": 5, "stale_turn_seconds": 30,
+    "max_tool_calls": 10,
+}
+
+def get_limit(name):
+    if name not in DEFAULTS: raise KeyError(name)
+    overrides = getattr(settings, "DCM_ASSISTANT_LIMITS", {}) or {}
+    value = int(overrides.get(name, DEFAULTS[name]))
+    if value <= 0: raise ValueError(f"DCM_ASSISTANT_LIMITS.{name} must be positive")
+    return value

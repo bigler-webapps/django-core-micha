@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.45.0] — 2026-10-15
+
+### Added
+
+DCM-CHAT-1: opt-in module `django_core_micha.assistant` (app label `dcm_assistant`, not part of `CORE_APPS`): persistent per-user AI chats with a durable turn lifecycle, an owner-only WebSocket stream and REST surface, three drivers (Claude Code CLI on a subscription token, OpenAI API, Anthropic API), a per-chat model and effort choice from an app-defined catalogue, and read-only tools the app registers (each handler receives the driver's trust class and returns sources). API drivers go through the extraction cost guard for every provider call. Credential resolution is one seam and every turn stores its billing source. The binding transport contract is `docs/design/assistant-chat.md`. Apps that do not install the module get no tables and no routes.
+
+
 ## [2.44.6] — 2026-10-14
 
 ### Fixed

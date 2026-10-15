@@ -1,0 +1,61 @@
+"""App-owned model catalogue and startup consistency check."""
+from django.conf import settings
+from django.core.checks import Error, register
+from django.core.exceptions import ImproperlyConfigured
+
+DRIVERS = {"claude_cli", "openai_api", "anthropic_api"}
+EFFORTS = {"low", "medium", "high", "max"}
+
+def entries():
+    rows = getattr(settings, "DCM_ASSISTANT_CATALOGUE", ()) or ()
+    return [dict(row) for row in rows]
+
+def default_entry():
+    rows = entries()
+    return next((row for row in rows if row.get("default")), rows[0] if rows else None)
+
+def entry_id(row):
+    return f"{row['driver']}:{row['model']}"
+
+def selection_of(row, effort=None):
+    efforts = row.get("efforts") or ["medium"]
+    return {"entry": entry_id(row), "effort": effort if effort in efforts else efforts[0]}
+
+def entry_by_id(value):
+    return next((row for row in entries() if entry_id(row) == value), None)
+
+def validate(driver, model, effort):
+    for row in entries():
+        if row.get("driver") == driver and row.get("model") == model and effort in row.get("efforts", []):
+            return row
+    raise ValueError("invalid_selection")
+
+def validate_catalogue():
+    rows = entries()
+    if not rows: return
+    defaults = 0
+    keys = set()
+    for row in rows:
+        if row.get("driver") not in DRIVERS or not isinstance(row.get("model"), str) or not row.get("model"):
+            raise ImproperlyConfigured("Invalid DCM_ASSISTANT_CATALOGUE driver or model")
+        key = (row["driver"], row["model"])
+        if key in keys: raise ImproperlyConfigured("Duplicate DCM_ASSISTANT_CATALOGUE entry")
+        keys.add(key)
+        if row.get("default") is True: defaults += 1
+        if not row.get("efforts") or not set(row["efforts"]) <= EFFORTS:
+            raise ImproperlyConfigured("Invalid DCM_ASSISTANT_CATALOGUE effort list")
+        if row.get("billing") not in {"subscription", "pay_per_use"}:
+            raise ImproperlyConfigured("Invalid DCM_ASSISTANT_CATALOGUE billing tag")
+    if defaults != 1: raise ImproperlyConfigured("DCM_ASSISTANT_CATALOGUE must have exactly one default")
+
+@register()
+def catalogue_check(app_configs, **kwargs):
+    errors = []
+    try: validate_catalogue()
+    except ImproperlyConfigured as exc: return [Error(str(exc), id="dcm_assistant.E000")]
+    from django_core_micha.extraction.cost_guard import _get_cost_table
+    rates = _get_cost_table()
+    for row in entries():
+        if row.get("billing") == "pay_per_use" and row["model"] not in rates:
+            errors.append(Error(f"Pay-per-use assistant model {row['model']} has no AI cost rate", id="dcm_assistant.E001"))
+    return errors
