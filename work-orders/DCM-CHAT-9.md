@@ -66,7 +66,46 @@ Tier 3: a change inside shared-core on the security boundary of a chat (which to
 
 # B. Implementation map — addressed to the implementer
 
-To be filled by the Orchestrator on `git pull`, after `DCM-CHAT-10` has landed: context package with `path:line`, target working directory, progress contract and the preamble. Not dispatchable until then.
+Work from this package; do not explore broadly. Part A is the authoritative spec.
+
+## Target repo working directory (absolute)
+
+`C:\Users\Micha Bigler\Documents\webapps\django-core-micha` (branch `main`). Never the workspace root. `DCM-CHAT-10` has landed (3.1.0); this order builds on it.
+
+## Context package (verified against the landed code, paths under `src/django_core_micha/assistant/`)
+
+- `hooks.py`: `ToolSpec`; `_hook(name, default)` resolves `DCM_ASSISTANT_<NAME>` (dotted path or callable); `tool_registry()` reads `DCM_ASSISTANT_TOOL_REGISTRY` and validates it (names unique and matching `[A-Za-z0-9_-]{1,64}`, `input_schema` a dict, else `ValueError("invalid_tool_registry")`). Add `tools_for_chat(chat)` here: the hook is `DCM_ASSISTANT_TOOLS_FOR_CHAT(chat) -> iterable[ToolSpec] | None`. Not configured: return `tool_registry()` for every chat (today's behaviour). Configured: a returned iterable is exactly that chat's set (an empty one means no tools) and is validated with the SAME checks as the global registry (extract the validation into one helper both use); `None` means the global registry when `chat.scope` is empty and an empty list when the chat has a scope. A raising hook or an invalid list raises, and `run_turn` already turns any exception raised before the provider call into a failed turn with `provider_error` and no provider call (the tools are resolved before `_make_driver`).
+- `turns.py` `run_turn`: the line `tools = await sync_to_async(tool_registry)()` (about line 146) becomes `tools = await sync_to_async(tools_for_chat)(current)`; the import list at the top (`from .hooks import ... tool_registry ...`) changes accordingly. Nothing else in the runner changes.
+- Drivers already receive only the chat's `tools` per call and refuse names that are not in it: `drivers/openai_api.py` (`tool_map = {t.name: t for t in tools}`, refusal `if calls > max_tool_calls or call["name"] not in tool_map: raise DriverError("security_violation")`), `drivers/anthropic_api.py` (same), `drivers/claude_cli.py` (the bridge `handle` closure looks the requested name up in `tools` and answers `tool_not_allowed`; `cli_bridge.py` offers only the tools in its per-chat config and refuses other names; the init event must list exactly the offered tools). Do NOT change driver behaviour unless a test shows a driver can reach a tool outside its `tools` list; the work here is to prove it per driver.
+- `drivers/base.py` `invoke_tool(tool, user, chat, arguments, trust_class)` already passes the chat to the handler; a test pins that `chat.scope` is the scope the chat was created with.
+- Docs: `docs/design/assistant-chat.md` (describe the hook, the `None` rule, that the per-scope system prompt comes from the existing `DCM_ASSISTANT_SYSTEM_PROMPT_BUILDER(chat)`, and that handlers receive the chat). Do NOT edit `CHANGELOG.md`, `pyproject.toml`, `WORK_ORDERS.md` or `webapp-management` (the Orchestrator releases).
+
+## Tests
+
+New file `assistant/tests/test_tools_for_chat.py` only (do not edit existing test files). Imitate `assistant/tests/test_turn_hooks.py` (fake drivers through `run_turn`: `_run(monkeypatch, chat, user, driver, frames)` pattern, `override_settings`) and `assistant/tests/test_core.py` (`test_openai_stream_and_tool_round_trip_reserves_each_call`, `test_anthropic_native_tool_round_trip_and_cost_per_provider_call`, the `_cli_proc` fake-process helpers in `test_core.py` and `test_cli_pre_init.py`). Cover every bullet of Part A "Required tests to write", including per driver: OpenAI and Anthropic with fake clients that request a tool outside the chat's list (the handler must not be called, `DriverError` code `security_violation`); Claude Code: the bridge refuses a name that is not in the chat's offered list (test `cli_bridge` with a config file naming only the chat's tools via `DCM_ASSISTANT_BRIDGE_CONFIG`, and the init-event check with a fake process listing an extra tool). Run your tests with the interpreter from the dispatch note.
+
+## Invariants
+Unset hook = identical behaviour; a scoped chat never inherits global tools when the hook is configured and returns `None`; no driver change that weakens a refusal; tools stay read-only by contract.
+
+## Preamble — REQUIRED block
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md` and the app `MEMORY.md` ONLY for conventions.
+> Stay in scope; do not touch auth/permissions/deps/schema/CI unless the spec says so; do not update
+> `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` — the register row and the review verdicts are the
+> orchestrator's alone.** **Your tools are for editing source and test files and for running the tests
+> you wrote — nothing else.** Do NOT install dependencies, touch a lockfile, run a package manager, or
+> tidy up stray files; if something in the repo state blocks you, stop and report it as
+> `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests
+> the `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute
+> and pass — that is the ONLY test run you do (NOT the affected/full suite, NOT any review). The
+> orchestrator re-runs the authoritative set + does the independent review after you finish.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`. Use explicit UTF-8 for all file I/O.
 
 # C. Orchestrator only — not addressed to the implementer
 
