@@ -81,3 +81,69 @@ to these releases (`<TOKEN>-DEP(S)-<n>` in each app repo, e.g. `SPX-DEP-6`, `JG-
   whose message names the extra.
 - Driver: under the test settings, `django.db.connection` uses psycopg 3 (the backend's `Database`
   module is `psycopg`).
+
+# B. Implementation map — filled by the Orchestrator — ADDRESSED TO THE IMPLEMENTER
+
+Work from this package; do not explore broadly from scratch; open only the named files to verify. If you must dig deeper, delegate to a read-only Explore sub-agent (Haiku). Part A is the authoritative spec; this map points at the seams.
+
+## Target repo working directory (absolute)
+
+`C:\Users\Micha Bigler\Documents\webapps\django-core-micha` (branch `main`). Never the workspace root.
+
+## Context package
+
+**Import sites of the moved packages (verified):**
+- `openai`: `src/django_core_micha/extraction/drivers/openai_driver.py:38` (lazy, inside a try that already raises `DocumentExtractionError(MISSING_DEPENDENCY, ...)`), `src/django_core_micha/assistant/turns.py:103` (`_make_driver`, lazy).
+- `anthropic`: `extraction/drivers/anthropic_driver.py:40` (lazy, same pattern), `assistant/turns.py:107`.
+- `Pillow`: `extraction/input_prep.py:8` is a TOP-LEVEL `from PIL import Image`; `messaging/attachments.py:59` is lazy. Verify whether anything reached on app start imports `extraction.input_prep`; either way make the PIL import lazy there.
+- `pypdf`: `extraction/input_prep.py:61` (lazy, inside try).
+- `pywebpush`: `notifications/delivery.py:13` is already import-guarded; keep that behaviour, add no error.
+- `PyYAML`: top-level `import yaml` in `scripts/drift_check.py`, `generate_env.py`, `provision_app.py`, `provision_server_access.py`, `run_dev.py`, `sync_secrets.py` only (entry points); nothing else under `src/` imports it. Leave them as they are.
+- Postgres: `settings/settings_base.py:151` uses `django.db.backends.postgresql`; the `OPTIONS` (`connect_timeout`, `keepalives*`) are libpq parameters valid for psycopg 3, keep them.
+
+**Packaging (`pyproject.toml`):** `[project].dependencies` currently lists `psycopg2-binary`, `PyYAML`, `pywebpush`, `Pillow`, `pypdf`, `openai`, `anthropic` (these move or change); keep every other entry as is, add `redis` and `psycopg[binary]`. Add extras `ai`, `extraction`, `push`, `scripts` under `[project.optional-dependencies]` with the SAME version floors the packages carry today (openai>=2.54.0, anthropic unpinned, pypdf>=6.19.0, Pillow>=12.3.0, pywebpush unpinned, PyYAML unpinned). The `test` extra stays unchanged. Do NOT touch `version` or `CHANGELOG.md` (the Orchestrator releases 3.0.0 and writes the migration table), and do NOT touch `.github/workflows/`.
+
+**Tests that must change with the move:**
+- `tests/test_declared_dependencies.py`: `_declared_distribution_names()` reads only `[project].dependencies`; after the move the lazy imports of openai, anthropic, pypdf, PIL, pywebpush, yaml must count as declared when present in an extra. Use the union of dependencies and the four feature extras, not `test`.
+- `tests/test_extraction.py` imports `PIL` and the `openai`/`anthropic` drivers and runs in an environment that has all extras installed (CI installs them); do not weaken it.
+- New tests go in a NEW file `tests/test_optional_extras.py` (the repo-root `tests` package is already in `testpaths`): (1) boot without extras in a subprocess whose `sys.meta_path` blocks `openai`, `anthropic`, `pypdf`, `PIL`, `pywebpush`, `yaml` (a finder raising `ModuleNotFoundError`), importing the CORE_APPS app configs and models, `django_core_micha.api_urls` and `settings_base` (see `tests/test_settings_base_dependencies.py` for how it already runs `settings_base` in a subprocess and which env it needs); (2) one `ai`-gated and one `extraction`-gated entry point (suggested: `assistant.turns._make_driver("openai_api", "x")` and the `extraction/input_prep.py` image path with PIL blocked) raise an error whose message contains `django-core-micha[ai]` / `django-core-micha[extraction]`; (3) driver: `django.db.backends.postgresql.base.Database.__name__ == "psycopg"` and `psycopg2` is not declared in `pyproject.toml`.
+
+**Suggested seam for the error:** one small helper module (for example `src/django_core_micha/_extras.py`) with a function that turns a missing import into an `ImportError` naming the extra; the lazy import sites call it. For `extraction`, keep the existing `DocumentExtractionError(MISSING_DEPENDENCY, ...)` contract and put the extra name in its message instead of inventing a new exception type there. For `assistant/turns.py` the surrounding code maps `DriverError`; the client-facing code stays `not_configured`, the extra name goes into the exception message and log, never a stack trace to the client.
+
+**Invariants and pitfalls:**
+- Nothing reached on app start may import a moved package at module level (CORE_APPS app configs and `ready()`, models, `api_urls`, `settings_base`). If you find one besides `input_prep`, make it lazy and say so in your final report.
+- Do not change behaviour for consumers that DO have the extras installed.
+- If a test cannot run because an extra or psycopg 3 is missing from the local environment, report `RESULT: BLOCKED` naming what is missing instead of installing anything.
+- Windows host: use `pathlib`, explicit UTF-8 for file I/O.
+
+## Required tests
+
+As in Part A "Required tests to WRITE" and the file list above.
+
+## Preamble — REQUIRED block
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`, and the
+> app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI
+> unless the spec says so; do not update `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` — the register
+> row and the review verdicts are the orchestrator's alone.** **Your tools are for editing source
+> and test files and for running the tests you wrote — nothing else.** Do NOT install dependencies,
+> touch a lockfile, run a package manager, or tidy up stray files; if something in the repo state
+> blocks you, stop and report it as `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT
+> `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests
+> the `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute
+> and pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any review).
+> The orchestrator re-runs the authoritative set + does the independent review after you finish —
+> those are the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`. Use explicit UTF-8 for all file I/O.
+
+# C. Orchestrator only — not addressed to the implementer
+
+> **If this WO was dispatched to you as an implementer: STOP here.** Everything below is what the Orchestrator does after you finish. You do none of it.
+
+Gate #1 recorded at django-core-micha@83a0a7b. Tier 3 · tests: boot without extras, feature without extra, driver. Execution: codex/gpt-6-luna (`implementation`), cwd = repo root; Codex available per the record of 2026-10-15. Orchestrator-owned: version 3.0.0, CHANGELOG with the migration table, `.github/workflows/publish.yml` install line (`pip install -e ".[test,ai,extraction,push,scripts]"`), a fresh venv with the extras plus psycopg 3 for the authoritative run, review lenses (all four plus `sec_reviewer`), register row, commit, push and observing the publish run. Report back to local_d0c99207-e683-4325-94e7-9889d999eb6e.
