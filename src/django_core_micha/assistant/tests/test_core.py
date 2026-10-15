@@ -66,7 +66,7 @@ def test_history_rebuild_uses_database_after_driver_switch(chat):
 def _run_turn_with_driver(turns, monkeypatch, driver, chat, user, frames):
     monkeypatch.setattr(turns,"resolve_credential",lambda u,d:("credential","deployment"))
     monkeypatch.setattr(turns,"build_system_prompt",lambda c:"system")
-    monkeypatch.setattr(turns,"tool_registry",lambda:[])
+    monkeypatch.setattr(turns, "tools_for_chat", lambda chat: [])
     monkeypatch.setattr(turns,"_make_driver",lambda *a:driver)
     async def collect(frame): frames.append(frame)
     async def run(): return await turns.run_turn(chat,user,"question",collect)
@@ -133,7 +133,7 @@ def test_tool_handler_receives_cloud_trust_and_turn_sources_are_stored(user, cha
             yield {"type":"usage","usage":{"input_tokens":2,"output_tokens":1}}
     resolver=Mock(return_value=("credential","deployment")); monkeypatch.setattr(turns,"resolve_credential",resolver)
     monkeypatch.setattr(turns,"build_system_prompt",lambda c:"system")
-    monkeypatch.setattr(turns,"tool_registry",lambda:[])
+    monkeypatch.setattr(turns, "tools_for_chat", lambda chat: [])
     monkeypatch.setattr(turns,"_make_driver",lambda *a:FakeDriver())
     frames=[]
     async def run(): return await turns.run_turn(chat,user,"question",lambda frame: collect(frames,frame))

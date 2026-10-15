@@ -27,7 +27,7 @@ def _setup(monkeypatch, driver):
     from django_core_micha.assistant import turns
     monkeypatch.setattr(turns,"resolve_credential",lambda *_:("key","deployment"))
     monkeypatch.setattr(turns,"build_system_prompt",lambda *_:"system")
-    monkeypatch.setattr(turns,"tool_registry",lambda:[])
+    monkeypatch.setattr(turns, "tools_for_chat", lambda chat: [])
     monkeypatch.setattr(turns,"_make_driver",lambda *_:driver)
 
 def test_turn_validity_loss_cancels_and_closes_socket_4403(monkeypatch, chat, user):

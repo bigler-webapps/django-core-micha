@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.2.0] — 2026-10-15
+
+### Added
+
+DCM-CHAT-9: a scope-aware tool set for the chat core. New optional hook `DCM_ASSISTANT_TOOLS_FOR_CHAT(chat)` returning an
+iterable of `ToolSpec` or `None`. Not configured: the global `DCM_ASSISTANT_TOOL_REGISTRY` applies to every chat, as before.
+Configured: a returned list is exactly that chat's tool set (an empty list means no tools) and is validated like the global
+registry; `None` means the global registry for an unscoped chat and no tools for a scoped chat. A hook that raises, returns an
+invalid list or returns a scalar fails the turn with `provider_error` before any provider call. All drivers already refuse a tool
+outside the chat's offered list (now tested per driver). Handlers receive the chat, so a handler can bind to `chat.scope`; a
+different system prompt per scope comes from the existing `DCM_ASSISTANT_SYSTEM_PROMPT_BUILDER(chat)`.
+For consumers' tests: `turns.run_turn` now resolves tools through `hooks.tools_for_chat(chat)`; a test that patched
+`turns.tool_registry` patches `turns.tools_for_chat` instead (`lambda chat: [...]`).
+
+
 ## [3.1.0] — 2026-10-15
 
 ### Added

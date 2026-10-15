@@ -123,7 +123,7 @@ def test_non_system_before_init_and_wrong_init_still_fail_closed(monkeypatch, tm
 def _run_turn(turns, monkeypatch, driver, chat, user, frames):
     monkeypatch.setattr(turns, "resolve_credential", lambda current_user, name: ("credential", "deployment"))
     monkeypatch.setattr(turns, "build_system_prompt", lambda current_chat: "system")
-    monkeypatch.setattr(turns, "tool_registry", lambda: [])
+    monkeypatch.setattr(turns, "tools_for_chat", lambda chat: [])
     monkeypatch.setattr(turns, "_make_driver", lambda *args: driver)
 
     async def emit(frame):

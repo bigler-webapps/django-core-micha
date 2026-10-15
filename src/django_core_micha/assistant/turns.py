@@ -19,7 +19,7 @@ from .credentials import resolve_credential
 from .drivers.base import DriverError
 from .hooks import (AfterTurnResult, availability_reason, build_system_prompt,
     build_turn_context, can_access_scope, process_after_turn, prompt_version,
-    tool_registry, turn_is_valid)
+    tools_for_chat, turn_is_valid)
 from .history import build_history
 from .limits import get_limit
 from .models import AssistantChat, AssistantTurn
@@ -143,7 +143,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None)
         prompt = await sync_to_async(build_system_prompt)(current)
         context_text = await sync_to_async(build_turn_context)(current, user, message, turn)
         history = await sync_to_async(build_history)(current)
-        tools = await sync_to_async(tool_registry)()
+        tools = await sync_to_async(tools_for_chat)(current)
         configured_version = await sync_to_async(prompt_version)()
         resumed = False
         if turn.driver == "claude_cli" and current.session_driver == turn.driver and current.session_reference:

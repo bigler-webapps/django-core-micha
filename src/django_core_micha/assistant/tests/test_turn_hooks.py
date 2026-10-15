@@ -28,7 +28,7 @@ def _run(monkeypatch, chat, user, driver, frames):
     from django_core_micha.assistant import turns
     monkeypatch.setattr(turns, "resolve_credential", lambda *_: ("key", "deployment"))
     monkeypatch.setattr(turns, "build_system_prompt", lambda *_: "system")
-    monkeypatch.setattr(turns, "tool_registry", lambda: [])
+    monkeypatch.setattr(turns, "tools_for_chat", lambda chat: [])
     monkeypatch.setattr(turns, "_make_driver", lambda *_: driver)
     async def emit(frame): frames.append(frame)
     async def run(): return await turns.run_turn(chat, user, "question", emit)
