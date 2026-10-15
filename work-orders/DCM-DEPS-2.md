@@ -57,7 +57,7 @@ None beyond the adaptations of decision 2. The evidence is the CI run of decisio
 
 # B. Implementation map — addressed to the implementer
 
-*To be filled by the Orchestrator.*
+Not dispatched: the change is manifest floors and workflow pins, which are Orchestrator repo-state work. Decision-5 pin check read the apps' requirements files; the excluded updates are named in the register row.
 
 # C. Orchestrator only — not addressed to the implementer
 
