@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.0.0] — 2026-10-15
+
+### Changed (breaking for consumers)
+
+DCM-DEPS-3: `django-core-micha` now declares only what every consumer needs on app start. Optional features moved
+behind extras, the Postgres driver is psycopg 3, and `redis` is declared.
+
+| Extra | dcm features that need it | Packages it brings |
+|---|---|---|
+| `ai` | `assistant` (OpenAI and Anthropic drivers), `extraction` provider drivers | `openai>=2.54.0`, `anthropic` |
+| `extraction` | `extraction` (PDF text, image resize); also image validation in `SafeImageField` and image attachments in `messaging` (without Pillow those reject image uploads) | `pypdf>=6.19.0`, `Pillow>=12.3.0` |
+| `push` | web push delivery in `notifications` (delivery is disabled when the package is absent, as before) | `pywebpush` |
+| `scripts` | the console scripts `generate-env`, `sync-secrets`, `run-dev`, `provision-app`, `provision-server-access` | `PyYAML` |
+
+Core now also declares `psycopg[binary]` (psycopg 3) instead of `psycopg2-binary`, and `redis` (the cache backend and
+`cached_db` sessions in `settings_base` use it). Using an `ai` or `extraction` feature without its extra raises an error
+that names `django-core-micha[ai]` or `django-core-micha[extraction]`.
+
+How to migrate an app: in `requirements.txt` pin `django-core-micha[<extras>]==3.0.0` with the extras from the table that
+the app uses, or keep pinning the package itself (for example `Pillow==12.3.0`). An app that pins `psycopg2-binary` itself
+should move to `psycopg[binary]`; the `DATABASES` OPTIONS that `settings_base` sets are libpq parameters and work unchanged.
+
+
 ## [2.45.1] — 2026-10-15
 
 ### Changed

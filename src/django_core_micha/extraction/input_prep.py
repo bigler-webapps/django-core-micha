@@ -5,8 +5,6 @@ from __future__ import annotations
 import base64
 from io import BytesIO
 
-from PIL import Image
-
 from .errors import (
     DocumentExtractionError,
     EMPTY_FILE,
@@ -25,6 +23,14 @@ def resize_image_bytes(
     """Downscale an image if needed and return optimized RGB JPEG bytes."""
     if not content:
         raise DocumentExtractionError(EMPTY_FILE, "The uploaded file is empty.")
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise DocumentExtractionError(
+            MISSING_DEPENDENCY,
+            "Image extraction support requires django-core-micha[extraction].",
+            500,
+        ) from exc
     try:
         with Image.open(BytesIO(content)) as image:
             if image.mode != "RGB":
@@ -62,7 +68,7 @@ def extract_pdf_text(content: bytes, *, character_cap: int = 12000) -> str:
     except Exception as exc:
         raise DocumentExtractionError(
             MISSING_DEPENDENCY,
-            "PDF extraction support is not installed.",
+            "PDF extraction support requires django-core-micha[extraction].",
             500,
         ) from exc
 

@@ -5,9 +5,9 @@ from dataclasses import dataclass
 
 
 class DriverError(Exception):
-    def __init__(self, code="provider_error"):
+    def __init__(self, code="provider_error", message=None):
         self.code = code
-        super().__init__(code)
+        super().__init__(message or code)
 
 
 @dataclass

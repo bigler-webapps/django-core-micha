@@ -32,7 +32,11 @@ MODULE_TO_DISTRIBUTION = {
 
 def _declared_distribution_names() -> set[str]:
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as pyproject_file:
-        dependencies = tomllib.load(pyproject_file)["project"]["dependencies"]
+        project = tomllib.load(pyproject_file)["project"]
+        dependencies = list(project["dependencies"])
+        optional_dependencies = project["optional-dependencies"]
+        for extra in ("ai", "extraction", "push", "scripts"):
+            dependencies.extend(optional_dependencies[extra])
 
     return {
         dependency.split("[", 1)[0].split(";", 1)[0]

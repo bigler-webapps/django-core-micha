@@ -41,7 +41,7 @@ def extract(
         except Exception as exc:
             raise DocumentExtractionError(
                 MISSING_DEPENDENCY,
-                "The configured AI provider SDK is not installed.",
+                "The configured AI provider SDK is not installed; install django-core-micha[ai].",
                 500,
             ) from exc
         client = Anthropic(api_key=api_key)

@@ -100,11 +100,17 @@ def _make_driver(name, credential):
         from .drivers.claude_cli import ClaudeCliDriver
         return ClaudeCliDriver()
     if name == "openai_api":
-        from openai import AsyncOpenAI
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise DriverError("not_configured", "Install django-core-micha[ai] to use AI providers.") from exc
         from .drivers.openai_api import OpenAIDriver
         return OpenAIDriver(AsyncOpenAI(api_key=credential))
     if name == "anthropic_api":
-        from anthropic import AsyncAnthropic
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as exc:
+            raise DriverError("not_configured", "Install django-core-micha[ai] to use AI providers.") from exc
         from .drivers.anthropic_api import AnthropicDriver
         return AnthropicDriver(AsyncAnthropic(api_key=credential))
     raise DriverError("not_configured")
