@@ -15,6 +15,9 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .catalogue import validate
+from .access import can_view_chat
+from django.core.exceptions import ObjectDoesNotExist
+from django.contrib.auth import get_user_model
 from .credentials import resolve_credential
 from .drivers.base import DriverError
 from .hooks import (AfterTurnResult, availability_reason, build_system_prompt,
@@ -40,12 +43,16 @@ def reconcile_interrupted(chat=None, everything=False):
 def _beat(turn_id):
     AssistantTurn.objects.filter(pk=turn_id, state="generating").update(heartbeat_at=timezone.now())
 
+def _by_user(user_id):
+    # Turns written before the sender column existed have no sender: they belong to the chat's owner.
+    return Q(sender_id=user_id) | Q(sender__isnull=True, chat__owner_id=user_id)
+
 def _over_limit(turn, user_id):
     """Re-count after commit: concurrent starts cannot see each other's uncommitted rows."""
     fresh = timezone.now() - timedelta(seconds=get_limit("stale_turn_seconds"))
     active = AssistantTurn.objects.filter(state="generating", heartbeat_at__gte=fresh).order_by("created_at", "pk")
     ids = list(active.values_list("pk", flat=True))
-    mine = list(active.filter(chat__owner_id=user_id).values_list("pk", flat=True))
+    mine = list(active.filter(_by_user(user_id)).values_list("pk", flat=True))
     return (turn.pk in ids and ids.index(turn.pk) >= get_limit("max_concurrent_turns")) or         (turn.pk in mine and mine.index(turn.pk) >= get_limit("max_turns_per_user"))
 
 def _start(chat_id, user_id, message):
@@ -59,16 +66,19 @@ def _create_turn(chat_id, user_id, message):
     reconcile_interrupted()
     try:
         with transaction.atomic():
-            chat = AssistantChat.objects.select_for_update().get(pk=chat_id, owner_id=user_id)
+            chat = AssistantChat.objects.select_for_update().get(pk=chat_id)
+            user = get_user_model().objects.get(pk=user_id)
+            if not can_view_chat(user, chat): raise AccessLost()
+
             if chat.archived_at: raise DriverError("archived")
             if not chat.selected_driver or not chat.selected_model: raise DriverError("invalid_selection")
             validate(chat.selected_driver, chat.selected_model, chat.selected_effort)
             if chat.turns.filter(state="generating").exists(): raise DriverError("turn_active")
             active = AssistantTurn.objects.filter(state="generating", heartbeat_at__gte=timezone.now()-timedelta(seconds=get_limit("stale_turn_seconds")))
-            if active.count() >= get_limit("max_concurrent_turns") or active.filter(chat__owner_id=user_id).count() >= get_limit("max_turns_per_user"):
+            if active.count() >= get_limit("max_concurrent_turns") or active.filter(_by_user(user_id)).count() >= get_limit("max_turns_per_user"):
                 raise DriverError("rate_limited")
             seq = (chat.turns.order_by("-sequence").values_list("sequence", flat=True).first() or 0) + 1
-            return AssistantTurn.objects.create(chat=chat, sequence=seq, user_text=message,
+            return AssistantTurn.objects.create(chat=chat, sender_id=user_id, sequence=seq, user_text=message,
                 driver=chat.selected_driver, model=chat.selected_model, effort=chat.selected_effort,
                 heartbeat_at=timezone.now())
     except IntegrityError as exc:
@@ -122,7 +132,7 @@ def _make_driver(name, credential):
         return AnthropicDriver(AsyncAnthropic(api_key=credential))
     raise DriverError("not_configured")
 
-async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None):
+async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None, client_context=None):
     if not isinstance(message, str) or not message.strip(): raise DriverError("invalid_output")
     if len(message) > get_limit("max_message_length"): raise DriverError("prompt_too_long")
     turn = await sync_to_async(_start)(chat.pk, user.pk, message)
@@ -141,7 +151,8 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None)
             raise DriverError("not_configured")
         current = await sync_to_async(AssistantChat.objects.get)(pk=chat.pk)
         prompt = await sync_to_async(build_system_prompt)(current)
-        context_text = await sync_to_async(build_turn_context)(current, user, message, turn)
+        context_text = await sync_to_async(build_turn_context)(current, user, message, turn,
+            **({"client_context": client_context} if client_context is not None else {}))
         history = await sync_to_async(build_history)(current)
         tools = await sync_to_async(tools_for_chat)(current)
         configured_version = await sync_to_async(prompt_version)()
@@ -184,7 +195,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None)
             "max_tool_calls": get_limit("max_tool_calls")}
         async def access_ok():
             try:
-                allowed = await sync_to_async(can_access_scope)(user, current.scope)
+                allowed = await sync_to_async(can_view_chat)(user, current)  # scope permission, and for a non-creator the shared-scope decision
                 valid = await sync_to_async(turn_is_valid)(current, user, turn)
                 session_ok = await authorize() if authorize else True
             except Exception:
@@ -203,41 +214,69 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None)
         if not await access_ok():
             access_lost = True
             raise asyncio.CancelledError
-        async with asyncio.timeout(get_limit("provider_timeout")):
-            watcher = asyncio.create_task(watch_access())
-            async for event in driver.stream(model=turn.model, **kwargs):
-                if cancel_event and cancel_event.is_set(): raise asyncio.CancelledError
-                if event.get("type") == "delta":
-                    chunks.append(event.get("text", ""))
-                    if sum(len(chunk.encode("utf-8")) for chunk in chunks) > get_limit("max_output_bytes"): raise DriverError("invalid_output")
-                    await emit({"type": "delta", "text": event["text"]})
-                elif event.get("type") == "tool":
-                    if event.get("phase") == "end": trace.append({"name": event["name"], "label": event["label"], "sources": event.get("sources", [])})
-                    await emit(event)
-                elif event.get("type") == "usage": usage = event.get("usage", {})
-                elif event.get("type") == "session": session_id = event.get("session_id")
-                elif event.get("type") == "init": saw_init = True
-        # The stream is over: a permission change during after-turn processing must not turn a finished answer into a cancelled one.
+        structured = bool(getattr(settings, "DCM_ASSISTANT_STRUCTURED_TURNS", False))
+        async def collect_round(call_kwargs):
+            nonlocal usage, session_id, saw_init
+            chunks.clear()  # the failure branches store the partial text of the round that was running
+            round_chunks = chunks
+            async with asyncio.timeout(get_limit("provider_timeout")):
+                async for event in driver.stream(model=turn.model, **call_kwargs):
+                    if cancel_event and cancel_event.is_set(): raise asyncio.CancelledError
+                    if event.get("type") == "delta":
+                        value = event.get("text", "")
+                        round_chunks.append(value)
+                        if sum(len(chunk.encode("utf-8")) for chunk in round_chunks) > get_limit("max_output_bytes"):
+                            raise DriverError("invalid_output")
+                        if not structured: await emit({"type":"delta", "text":value})
+                    elif event.get("type") == "tool":
+                        if event.get("phase") == "end": trace.append({"name":event["name"], "label":event["label"], "sources":event.get("sources", [])})
+                        await emit(event)
+                    elif event.get("type") == "usage":
+                        for key, value in (event.get("usage", {}) or {}).items(): usage[key] = usage.get(key, 0) + (value or 0)
+                    elif event.get("type") == "session": session_id = event.get("session_id")
+                    elif event.get("type") == "init": saw_init = True
+            return "".join(round_chunks)
+        watcher = asyncio.create_task(watch_access())
+        raw_text = await collect_round(kwargs)
+        result = None
+        try:
+            result = await sync_to_async(process_after_turn)(current, user, turn, raw_text)
+        except Exception:
+            log.exception("Assistant after-turn hook failed")
+        repairs = 0
+        while isinstance(result, AfterTurnResult) and result.repair and repairs < get_limit("max_repair_rounds"):
+            repairs += 1
+            feedback = result.repair
+            if len(feedback.encode("utf-8")) > get_limit("max_prompt_bytes"): raise DriverError("prompt_too_long")
+            if turn.driver != "claude_cli":
+                follow_up = kwargs["messages"] + [{"role":"assistant","content":raw_text},{"role":"user","content":feedback}]
+                if len(json.dumps(follow_up, ensure_ascii=False).encode("utf-8")) > get_limit("max_prompt_bytes"): raise DriverError("prompt_too_long")
+            if turn.driver == "claude_cli":
+                kwargs = {**kwargs, "prompt": json.dumps({"message": feedback}, ensure_ascii=False), "session_id": session_id}
+            else:
+                kwargs = {**kwargs, "messages": kwargs["messages"] + [{"role":"assistant","content":raw_text},{"role":"user","content":feedback}]}
+            raw_text = await collect_round(kwargs)
+            try: result = await sync_to_async(process_after_turn)(current, user, turn, raw_text)
+            except Exception:
+                log.exception("Assistant after-turn hook failed")
+                result = None
+                break
         watcher.cancel()
         try: await watcher
         except BaseException: pass
         watcher = None
-        text = "".join(chunks)
-        try:
-            result = await sync_to_async(process_after_turn)(current, user, turn, text)
-            if isinstance(result, str): text = result
-            elif isinstance(result, AfterTurnResult):
-                if result.text is not None: text = result.text
-                for frame in result.frames or ():
-                    try:
-                        if not isinstance(frame, dict) or not isinstance(frame.get("name"), str) or not frame["name"] or "payload" not in frame: raise ValueError("malformed frame")
-                        json.dumps(frame["payload"])
-                        await emit({"type":"app", "name":frame["name"], "payload":frame["payload"]})
-                    except Exception:
-                        log.exception("Malformed assistant app frame")
-        except Exception:
-            log.exception("Assistant after-turn hook failed")
-            text = "".join(chunks)
+        text = raw_text
+        accepted = isinstance(result, AfterTurnResult) and not result.repair
+        if isinstance(result, str): text = result
+        elif isinstance(result, AfterTurnResult):
+            if result.text is not None: text = result.text
+            for frame in result.frames or ():
+                try:
+                    if not isinstance(frame, dict) or not isinstance(frame.get("name"), str) or not frame["name"] or "payload" not in frame: raise ValueError("malformed frame")
+                    json.dumps(frame["payload"])
+                    await emit({"type":"app", "name":frame["name"], "payload":frame["payload"]})
+                except Exception: log.exception("Malformed assistant app frame")
+        elif result is None: text = raw_text
         input_tokens = int(usage.get("input_tokens", 0) or 0)
         session_tokens = (current.session_tokens + input_tokens) if resumed else input_tokens
         await sync_to_async(_finish)(turn.pk, text, "completed", usage=usage, trace=trace, session_id=session_id,
@@ -277,23 +316,27 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None)
         try: await beat
         except BaseException: pass
     final = await sync_to_async(AssistantTurn.objects.get)(pk=turn.pk)
-    payload = turn_payload(final)
+    payload = turn_payload(final, current)
     await emit({"type": "turn", "turn": payload})
     return final
 
 async def _emit_final(turn_id, emit):
     try:
-        row = await sync_to_async(AssistantTurn.objects.get)(pk=turn_id)
+        row = await sync_to_async(AssistantTurn.objects.select_related("chat").get)(pk=turn_id)
         await emit({"type": "turn", "turn": turn_payload(row)})
     except Exception:
         log.exception("Could not emit the final turn frame")
 
-def turn_payload(turn):
-    return {"id": str(turn.pk), "seq": turn.sequence, "user_text": turn.user_text,
+def turn_payload(turn, chat=None):
+    chat = chat or turn.chat
+    result = {"id": str(turn.pk), "seq": turn.sequence, "user_text": turn.user_text,
         "assistant_text": turn.assistant_text, "state": turn.state, "error_code": turn.error_code or None,
         "sources": [source for item in turn.tool_trace for source in item.get("sources", [])],
         "driver": turn.driver, "model": turn.model, "effort": turn.effort,
         "usage": turn.usage or {}, "billing_source": turn.billing_source}
+    from .hooks import is_shared_scope
+    if is_shared_scope(chat.scope): result["sender_id"] = turn.sender_id
+    return result
 
 def delete_session(chat):
     root = Path(getattr(settings, "DCM_ASSISTANT_CLI_ROOT", Path(tempfile.gettempdir()) / "dcm-assistant")).resolve()

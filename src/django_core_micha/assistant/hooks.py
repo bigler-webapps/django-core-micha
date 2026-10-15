@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+import inspect
 from django.conf import settings
 from django.utils.module_loading import import_string
 @dataclass(frozen=True)
@@ -14,6 +15,7 @@ class ToolSpec:
 class AfterTurnResult:
     text: str | None = None
     frames: list = ()
+    repair: str | None = None
 
 def _hook(name, default=None):
     value=getattr(settings, "DCM_ASSISTANT_"+name, default)
@@ -51,13 +53,31 @@ def tools_for_chat(chat):
     if tools is None:
         return tool_registry() if not chat.scope else []
     return _validate_tool_registry(tools)
+def is_shared_scope(scope):
+    if not scope:
+        return False
+    try:
+        fn = _hook("SHARED_SCOPE")
+        return bool(fn(scope)) if fn else False
+    except Exception:
+        return False
+
+def validate_client_context(chat, user, context):
+    fn = _hook("CLIENT_CONTEXT")
+    return fn(chat, user, context) if fn else context
+
 def can_access_scope(user, scope):
     fn=_hook("SCOPE_PERMISSION")
     return bool(fn(user, scope)) if fn else not scope
 
-def build_turn_context(chat, user, message, turn):
+def build_turn_context(chat, user, message, turn, client_context=None):
     fn = _hook("TURN_CONTEXT")
-    return fn(chat, user, message, turn) if fn else None
+    if not fn: return None
+    try:
+        params = inspect.signature(fn).parameters.values()
+        accepts = any(p.name == "client_context" or p.kind == p.VAR_KEYWORD for p in params)
+    except (TypeError, ValueError): accepts = False
+    return fn(chat, user, message, turn, client_context=client_context) if accepts else fn(chat, user, message, turn)
 
 def process_after_turn(chat, user, turn, text):
     fn = _hook("AFTER_TURN")

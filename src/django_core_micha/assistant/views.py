@@ -10,15 +10,16 @@ from rest_framework.views import APIView
 
 from .availability import availability
 from .catalogue import default_entry, entries, entry_by_id, entry_id, selection_of, validate
-from .hooks import availability_reason, can_access_scope
+from .hooks import availability_reason, can_access_scope, is_shared_scope
+from .access import can_view_chat, is_creator
 from .models import AssistantChat
 from .pagination import InvalidCursor, decode_cursor, encode_cursor
 from .turns import delete_session, reconcile_interrupted, turn_payload
 
 def _chat(user, chat_id):
-    try: chat = AssistantChat.objects.get(pk=chat_id, owner=user)
+    try: chat = AssistantChat.objects.get(pk=chat_id)
     except (AssistantChat.DoesNotExist, ValueError): raise Http404
-    if not can_access_scope(user, chat.scope): raise Http404
+    if not can_view_chat(user, chat): raise Http404
     reconcile_interrupted(chat)
     return chat
 
@@ -64,13 +65,14 @@ class ChatListCreateView(APIView):
         if scope is not None and not can_access_scope(request.user,scope): return _problem("not_found",404)
         context=_cursor_context("chats",request.user,archived=archived,limit=limit,scope=scope)
         qs=AssistantChat.objects.filter(owner=request.user,archived_at__isnull=not archived)
-        if scope is not None: qs=qs.filter(scope=scope)
+        if scope is not None:
+            qs=AssistantChat.objects.filter(scope=scope,archived_at__isnull=not archived) if is_shared_scope(scope) else qs.filter(scope=scope)
         if request.query_params.get("cursor"):
             try:
                 c=decode_cursor(request.query_params["cursor"],context); stamp=timezone.datetime.fromisoformat(c["updated_at"]); cid=uuid.UUID(c["id"])
                 qs=qs.filter(Q(updated_at__lt=stamp)|Q(updated_at=stamp,pk__lt=cid))
             except Exception: return _problem("invalid_cursor")
-        rows=[row for row in qs.order_by("-updated_at","-pk") if can_access_scope(request.user,row.scope)][:limit+1]
+        rows=[row for row in qs.order_by("-updated_at","-pk") if can_view_chat(request.user,row)][:limit+1]
         more=len(rows)>limit; rows=rows[:limit]
         nxt=encode_cursor({"updated_at":rows[-1].updated_at.isoformat(),"id":str(rows[-1].pk)},context) if more and rows else None
         return Response({"results":[payload(x) for x in rows],"next":nxt,"has_more":more})
@@ -120,7 +122,9 @@ class ChatDetailView(APIView):
             chat.selected_driver,chat.selected_model,chat.selected_effort=driver,model,effort
         chat.save(); return Response(payload(chat))
     def delete(self,request,chat_id):
-        chat=_chat(request.user,chat_id); delete_session(chat); chat.delete(); return Response(status=204)
+        chat=_chat(request.user,chat_id)
+        if not is_creator(request.user,chat): return _problem("forbidden",403)
+        delete_session(chat); chat.delete(); return Response(status=204)
 
 class TurnsView(APIView):
     permission_classes=[IsAuthenticated]
@@ -136,4 +140,4 @@ class TurnsView(APIView):
             except Exception: return _problem("invalid_cursor")
         rows=list(qs.order_by("-sequence")[:limit+1]); more=len(rows)>limit; rows=rows[:limit]; rows.reverse()
         nxt=encode_cursor({"sequence":rows[0].sequence},context) if more and rows else None
-        return Response({"results":[turn_payload(row) for row in rows],"next":nxt,"has_more":more})
+        return Response({"results":[turn_payload(row,chat) for row in rows],"next":nxt,"has_more":more})

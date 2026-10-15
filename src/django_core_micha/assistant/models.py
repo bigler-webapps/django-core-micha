@@ -23,6 +23,7 @@ class AssistantTurn(models.Model):
     STATES = tuple((x,x) for x in ("generating","completed","failed","cancelled","interrupted"))
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     chat = models.ForeignKey(AssistantChat, on_delete=models.CASCADE, related_name="turns")
+    sender = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     sequence = models.PositiveIntegerField()
     user_text = models.TextField()
     assistant_text = models.TextField(blank=True)

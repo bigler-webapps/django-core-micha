@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.3.0] — 2026-10-15
+
+### Added
+
+DCM-CHAT-12: shared chats in a scope. New optional hook `DCM_ASSISTANT_SHARED_SCOPE(scope) -> bool` (an empty scope is never
+shared; a missing, failing or broken hook means not shared). In a shared scope every user who passes the scope permission can list
+(`chats/?scope=`), read, send, rename, change model and effort, archive and restore the chats; only the creator can delete (others
+get 403 `forbidden`). Owner-only stays the default and is unchanged. Each turn records its sender (`AssistantTurn.sender`, migration
+`0003_turn_sender`); credentials, cost guard and the per-user turn limit use the sender, and turn payloads of shared scopes carry
+`sender_id`. Running-turn frames reach every open socket of the chat through a Channels group; every delivery re-checks the
+receiving user (session, scope permission, shared scope) at most once per `access_recheck_seconds` and closes with 4403 on a failure
+(or on a failing re-check). The live access check of a running turn now uses the same visibility rule, and a second `send` during a running turn
+gets `turn_active`. A `stop` frame only cancels the turn started on the same connection.
+
+DCM-CHAT-11: chat core for a structured consumer. The `send` frame accepts an optional `context` object (bounded by the new limit
+`max_client_context_bytes`, default 65536; an optional `DCM_ASSISTANT_CLIENT_CONTEXT(chat, user, context)` hook validates and may
+normalise it; a rejected context ends the send with `invalid_frame` before any turn row or provider call). The context reaches
+`DCM_ASSISTANT_TURN_CONTEXT` as `client_context=` when that hook declares it (hooks written for 3.1 are unchanged) and is never
+stored. `DCM_ASSISTANT_STRUCTURED_TURNS = True` stops `delta` frames for an app's turns. `AfterTurnResult(repair="feedback")`
+asks for a repair round inside the same turn (resume for the Claude Code driver, next message for the API drivers), bounded by the new limit
+`max_repair_rounds` (default 2) and by `max_prompt_bytes`; after the last round the hook's own text and frames are the fallback.
+New Python API `django_core_micha.assistant.completion.complete()` / `acomplete()`: one prompt to one catalogue entry, no chat, no
+persistence and no tools, with the calling user's credentials, the cost guard, the provider timeout and the size bounds; the Claude
+Code throwaway session directory is removed afterwards.
+
+
 ## [3.2.0] — 2026-10-15
 
 ### Added

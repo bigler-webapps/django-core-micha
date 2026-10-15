@@ -17,7 +17,7 @@ pytestmark = pytest.mark.django_db
 def catalogue():
     rows = [{"driver": "openai_api", "model": "gpt-test", "name": "test", "efforts": ["low", "medium"],
              "billing": "pay_per_use", "default": True}]
-    with override_settings(DCM_ASSISTANT_CATALOGUE=rows):
+    with override_settings(DCM_ASSISTANT_CATALOGUE=rows, DCM_ASSISTANT_SCOPE_PERMISSION=lambda u, s: True):
         yield
 
 
