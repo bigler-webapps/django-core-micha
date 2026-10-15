@@ -22,7 +22,7 @@ dependencies = [
     "djangorestframework",
     "channels",
     "channels_redis",
-    "cryptography>=42.0.8",
+    "cryptography>=50.0.2",
     "django-allauth[mfa,socialaccount]",
     "Pillow>=12.3.0",
     "pypdf>=6.19.0",
