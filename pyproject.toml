@@ -33,7 +33,7 @@ test = [
     "pytest-asyncio>=1.4.0",
 ]
 ai = [
-    "openai>=2.54.0",
+    "openai>=3.26.1",
     "anthropic",
 ]
 extraction = [
