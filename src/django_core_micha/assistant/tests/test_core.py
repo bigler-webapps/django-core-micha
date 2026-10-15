@@ -224,6 +224,8 @@ def test_anthropic_native_tool_round_trip_and_cost_per_provider_call(monkeypatch
     assert any(e.get("type")=="tool" and e.get("phase")=="end" for e in events)
 
 def test_cli_environment_and_stdin_prompt_and_init_fail_closed(monkeypatch,tmp_path):
+    import django_core_micha.assistant.drivers.claude_cli as cli
+    monkeypatch.setattr(cli.shutil,"which",lambda name:"claude")
     monkeypatch.setenv("ANTHROPIC_API_KEY","must-not-pass"); monkeypatch.setenv("UNRELATED_SECRET","no")
     env=safe_environment("oauth",tmp_path)
     assert env["CLAUDE_CODE_OAUTH_TOKEN"]=="oauth" and "ANTHROPIC_API_KEY" not in env and "UNRELATED_SECRET" not in env
