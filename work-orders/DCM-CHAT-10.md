@@ -97,10 +97,74 @@ Tier 3: a change inside shared-core that extends the WebSocket contract and the 
 
 # B. Implementation map — addressed to the implementer
 
-*To be filled by the Orchestrator.*
+Work from this package; do not explore broadly. Part A is the authoritative spec; this map fixes the seams and the shapes Part A leaves open so that `ui-core-micha/UCM-CHAT-3` and `maana/MAANA-CHAT-11` can be built against them. Everything is optional and neutral when unused (cockpit must behave exactly as before). Do NOT write a skeleton: every item below must be fully implemented and tested.
+
+## Target repo working directory (absolute)
+
+`C:\Users\Micha Bigler\Documents\webapps\django-core-micha` (branch `main`). Never the workspace root. Do not touch `ui-core-micha`, `maana`, `cockpit` or `webapp-management`.
+
+## Context package (verified against the landed code, all paths under `src/django_core_micha/assistant/`)
+
+- `hooks.py`: `_hook(name, default)` reads `DCM_ASSISTANT_<NAME>` from settings (dotted path string or callable); `build_system_prompt`, `tool_registry`, `can_access_scope(user, scope)` (default: allowed only for an empty scope). Add the new hooks here in the same style.
+- `limits.py`: `DEFAULTS` dict + `get_limit(name)` (override via `DCM_ASSISTANT_LIMITS`). Add `access_recheck_seconds: 1` and `session_rebuild_tokens: 200_000`.
+- `models.py`: `AssistantChat` has `session_driver`, `session_reference`. Add `session_tokens` (`PositiveIntegerField`, default 0) and `session_prompt_version` (`CharField(max_length=64, blank=True, default="")`). Write the migration by hand as `migrations/0002_session_upkeep.py` (two `AddField` operations, dependency on `0001_initial`), because the tests run with migrations; the Orchestrator verifies it with `makemigrations --check`.
+- `turns.py`: `_start`, `_finish(turn_id, text, state, error="", usage=None, trace=None, session_id=None)`, `run_turn(chat, user, message, emit, cancel_event=None)`, `turn_payload`, `_emit_final`. `run_turn` builds `prompt`, `history`, `session_file` (resume only when the CLI session `.jsonl` exists), `prompt_data` (JSON for the CLI prompt; checks `max_prompt_bytes`), sends `notice history_rebuilt`, builds `kwargs` (`messages=history + [user message]` for the API drivers), streams inside `asyncio.timeout(provider_timeout)`, then `_finish(..., "completed", ..., session_id=session_id)` and emits the final `turn` frame. The failure branches (CancelledError / TimeoutError / Exception) are covered by existing tests; keep their behaviour.
+- `consumers.py`: `ChatConsumer.receive` (frame rate 4429, `_session_valid` 4401, `get_object` + `can_access_scope` 4403) and `receive_json` (stop / send, archived check, `execute()` wrapper that calls `run_turn(...)` and maps exceptions to `{"type":"error","code":...}`).
+- `views.py`: `AvailabilityView` (route `assistant/status/`, uses `availability.availability()`), `ChatListCreateView.get` (list with cursor; owner filter; in-Python scope filter), `CatalogueView`.
+- `history.py`: `build_history(chat)` returns role/content dicts, two per completed turn.
+- `drivers/claude_cli.py` yields `{"type":"usage","usage":{"input_tokens":..,"output_tokens":..}}` and `{"type":"session","session_id":..}`; API drivers yield `usage` too.
+
+## Fixed shapes
+
+**Settings and hooks (all optional; names resolved with `_hook`; sync callables, call them via `sync_to_async`):**
+- `DCM_ASSISTANT_TURN_CONTEXT(chat, user, message, turn) -> str | None`. Called once per turn after the system prompt is built and before the provider call. The text is added to THIS turn's provider input only and is never stored in `user_text` or history: for the CLI add a `"context"` key to the `prompt_data` JSON; for the API drivers prefix the last user message content with the context text followed by a blank line and a `---` line. A raising hook fails the turn with `provider_error` and no provider call happens (the generic failure branch already does this; add a test).
+- `DCM_ASSISTANT_AFTER_TURN(chat, user, turn, text) -> None | str | AfterTurnResult`. Define `AfterTurnResult` (dataclass, `text: str | None = None`, `frames: list = ()`) in `hooks.py`. Called once after the stream ended successfully, before the turn is finished. A `str` or `.text` replaces the stored `assistant_text` (so the final `turn` frame and history carry the replacement). Each frame is `{"name": str, "payload": any JSON-serialisable}`; the core emits `{"type":"app","name":name,"payload":payload}` for each before the final `turn` frame; drop (and log) malformed frames. A raising hook: log with `log.exception`, finish the turn completed with the raw text, emit no app frames.
+- `DCM_ASSISTANT_AVAILABILITY(user, scope) -> None | str`. `None` means available, a non-empty string is the app's reason code.
+- `DCM_ASSISTANT_TURN_VALIDITY(chat, user, turn) -> bool`.
+- `DCM_ASSISTANT_PROMPT_VERSION`: int or str; unset means no prompt-version behaviour.
+
+**Availability surface:** `GET status/?scope=<s>`: when the hook returns a reason, respond `{"status":"unavailable","reason":<code>,"providers":{...}}`; otherwise unchanged (`available`/`not_configured` as today, also unchanged without `scope`). In `ChatConsumer.receive_json`, for a `send` in a chat whose scope the hook marks unavailable, answer `{"type":"error","code":"unavailable","reason":<code>}` before `run_turn` (so no turn row and no provider call). Add `unavailable` to the documented error codes.
+
+**Live access check:** `run_turn` gains an optional `authorize=None` parameter (an async callable returning bool; the consumer passes its `_session_valid`). While the provider stream runs, a watcher task re-checks every `get_limit("access_recheck_seconds")` seconds: `can_access_scope(user, chat.scope)`, the turn-validity hook (if set) and `authorize()` (if given). On a failure the watcher marks the turn as access-lost and cancels the task running `run_turn` (`asyncio.current_task()` captured at the start). The cancelled branch then finishes the turn as `cancelled` as today and, when the access-lost flag is set, raises a new `AccessLost(DriverError)` (code `access_lost`) instead of re-raising `CancelledError`; `ChatConsumer.execute` catches `AccessLost` and calls `await self.close(code=4403)` instead of sending an error frame. The watcher is always cancelled in the `finally` and never runs when no stream is running. A user Stop must still behave exactly as before.
+
+**Scoped list:** `GET chats/?scope=<s>`: if `can_access_scope(user, s)` is false answer 404 (`{"code":"not_found","error":"not_found"}` like the other 404 problems; check how `_chat`/`Http404` is rendered and stay consistent), otherwise return only chats with that scope. The cursor context must include the scope so a cursor does not page into another scope. Without `scope` nothing changes.
+
+**Session upkeep (Claude Code driver only):**
+- Token threshold: after a `completed` CLI turn, `chat.session_tokens` is the running sum of `usage.input_tokens` of the turns that used the same provider session (reset to this turn's input tokens when the turn started a fresh session; add when it resumed). Before resuming, if `session_tokens > get_limit("session_rebuild_tokens")` treat the session as not resumable (`session_file = False`): fresh session, history rebuilt, `notice history_rebuilt` as today.
+- Prompt version: when `DCM_ASSISTANT_PROMPT_VERSION` is set, store `str(version)` in `session_prompt_version` whenever a CLI session id is stored; if the stored value differs from the configured one, do not resume (same path). When the setting is unset, ignore the field.
+- History budget: where the history is rebuilt (no resumable session, and for the API drivers every turn), if `prompt_data` would exceed `max_prompt_bytes`, drop the oldest completed turns (two history rows each) until it fits and emit `{"type":"notice","code":"history_trimmed","left_out":<number of dropped turns>}`; only when nothing is left to drop does it fail with `prompt_too_long` as today. Apply the same trimmed history to `messages` for the API drivers.
+
+## Docs
+`docs/design/assistant-chat.md`: document every hook, the `app` frame, the `unavailable` error and reason, `status/?scope=`, `chats/?scope=`, the two new limits, the prompt-version setting and the two notices. Do NOT edit `CHANGELOG.md`, `pyproject.toml`, `WORK_ORDERS.md` or `webapp-management` (the Orchestrator releases and writes the capability row).
+
+## Tests
+New files only (do not edit existing test files except where an existing assertion must change because of a deliberate new field): `assistant/tests/test_turn_hooks.py` (context, after-turn, raising hooks, availability incl. `send`), `assistant/tests/test_access_recheck.py` (watcher, 4403, Stop unchanged), `assistant/tests/test_scope_list_status.py`, `assistant/tests/test_session_upkeep.py` (threshold, prompt version, history trimming). Imitate `assistant/tests/test_cli_pre_init.py` and `test_pre_init_timeout.py` for fake drivers run through `run_turn` and `override_settings(DCM_ASSISTANT_LIMITS=...)`, `assistant/tests/test_core.py` for REST (`APIRequestFactory`, `force_authenticate`) and consumer tests (`ChatConsumer` with mocked `send_json`/`close`). Cover every bullet of Part A "Required tests to write", including that a stop frame still cancels and that, with no new hook or setting configured, the existing assistant tests pass unchanged (they are part of the Orchestrator's run).
+
+## Invariants
+Hooks never receive credentials; app frames go only to the owner's socket via the existing `emit`; nothing here may change behaviour when no new hook or setting is configured; a raising hook never leaves a turn in `generating`; do not weaken any existing check (init fail-closed, ownership, archived refusal, rate limit 4429).
+
+## Preamble — REQUIRED block
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md` and the app `MEMORY.md` ONLY for conventions.
+> Stay in scope; do not touch auth/permissions/deps/schema/CI unless the spec says so; do not update
+> `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` — the register row and the review verdicts are the
+> orchestrator's alone.** **Your tools are for editing source and test files and for running the tests
+> you wrote — nothing else.** Do NOT install dependencies, touch a lockfile, run a package manager, or
+> tidy up stray files; if something in the repo state blocks you, stop and report it as
+> `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests
+> the `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute
+> and pass — that is the ONLY test run you do (NOT the affected/full suite, NOT any review). The
+> orchestrator re-runs the authoritative set + does the independent review after you finish.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`. Use explicit UTF-8 for all file I/O.
 
 # C. Orchestrator only — not addressed to the implementer
 
-> **If this WO was dispatched to you as an implementer: STOP here.**
+> **If this WO was dispatched to you as an implementer: STOP here.** Everything below is the Orchestrator's work after you finish.
 
-Gate #1 open until recorded in the register row. Minor release (additive contract). `DCM-CHAT-9` (scope-aware tools, cockpit) also changes `assistant/hooks.py` and the turn runner: sequence the two, or release them together, so that neither rebases over the other mid-review. `UCM-CHAT-3` can be built against this contract in parallel; `MAANA-CHAT-11` starts after both are published.
+Gate #1 recorded at django-core-micha@fa2ba9d. Tier 3 · tests: the groups of Part A. One codex/gpt-6-luna dispatch at high effort (the 2026-10-15 first run of DCM-CHAT-1 returned a skeleton at medium effort, so the map is explicit and a continuation is expected to be possible). Orchestrator-owned: migration check, `CHANGELOG` + minor version 3.1.0, `webapp-management/SHARED_CAPABILITIES.md` row, review lenses (envelope, regression, duplication, tests) plus security over the combined diff, register row, publish observed. `DCM-CHAT-9` (scope-aware tools) has no Envelope yet: implement this order alone and let DCM-CHAT-9 rebase onto 3.1.0. Report back to local_03d1141f-9577-4c9e-8ccf-3343b3b34a19; UCM-CHAT-3 builds against the shapes above in parallel.
