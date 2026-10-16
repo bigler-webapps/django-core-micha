@@ -17,7 +17,8 @@ Expected outcome: every reply stores its tokens and cost; long chats are summari
 3. **Current state from lookups:** the summary does not restate the project state; the app's lookup tools provide it fresh.
 4. **Billing hook:** after each reply the core calls an app hook with the recorded usage, so an app can debit tokens (DCM-BILL-1); without the hook nothing changes.
 5. **Visible per reply:** the reply carries its usage for display (UCM-CHAT-6).
-6. **Picker data:** the model catalogue offered to a person contains only entries usable for that account and app (provider configured, account allowed, subscription driver only for the operator's own account); each entry carries its plain name, its provider, its level (top / best / balanced / fast; operator setting per model: Fable and Astra top, Opus best, Sonnet and Sol balanced, Haiku and Luna fast; all configured models are offered), its supported efforts, and an estimate range per effort for the current chat length in the app's token unit (or a relative cost level 1–3 when the app has no tokens). The estimate uses the cost table and the chat's current context size.
+6. **Default:** a new chat starts with a model of the level „Ausgewogen" (operator 2026-10-16; app setting).
+7. **Picker data:** the model catalogue offered to a person contains only entries usable for that account and app (provider configured, account allowed, subscription driver only for the operator's own account); each entry carries its plain name, its provider, its level (top / best / balanced / fast; operator setting per model: Fable and Astra top, Opus best, Sonnet and Sol balanced, Haiku and Luna fast; all configured models are offered), its supported efforts, and an estimate range per effort for the current chat length in the app's token unit (or a relative cost level 1–3 when the app has no tokens). The estimate uses the cost table and the chat's current context size.
 
 ### Scope and acceptance
 
@@ -43,4 +44,4 @@ Placeholder — dispatch-blocking. The Orchestrator fills the context package, t
 
 STOP — this part is not an instruction to the implementer.
 
-Gate #1 pending. Seams: `assistant/turns.py` (`_finish`, usage aggregation), `assistant/drivers/*`, `assistant/history.py`, `assistant/hooks.py`, `extraction/cost_guard.py`. Tier 3: all lenses plus `sec_reviewer`. Release and consumer pin bumps per the dcm publish flow.
+Gate #1 approved by the operator 2026-10-16 (in the Maana Expertenchat, session local_cbfc9d51-5217-42a4-99ba-27a315c854ce). Seams: `assistant/turns.py` (`_finish`, usage aggregation), `assistant/drivers/*`, `assistant/history.py`, `assistant/hooks.py`, `extraction/cost_guard.py`. Tier 3: all lenses plus `sec_reviewer`. Release and consumer pin bumps per the dcm publish flow.
