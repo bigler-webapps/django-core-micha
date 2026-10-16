@@ -72,7 +72,7 @@ Placeholder — dispatch-blocking.
 
 STOP — this part is not an instruction to the implementer.
 
-Gate #1 pending. Seams: `billing/views.py` (`me`, `team_seats`), `billing/services.py`
+Gate #1 approved by the operator 2026-10-17 (in the Maana Expertenchat, session local_cbfc9d51-5217-42a4-99ba-27a315c854ce). Seams: `billing/views.py` (`me`, `team_seats`), `billing/services.py`
 (`access_state`, `token_balance`, grants), `billing/models.py` (FreeAccess, TeamPackage, TeamSeat,
 token ledger, AI call records), the free-access management commands, the permission used by the
 shared Users tab. Tier 3: all lenses plus `sec_reviewer`. Release per the dcm publish flow.
