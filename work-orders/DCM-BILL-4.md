@@ -68,6 +68,6 @@ progress contract and implementer preamble before any dispatch.
 
 STOP — this part is not an instruction to the implementer.
 
-Gate #1 pending. Seams: the DCM-BILL-3 withdrawal service and its row lock, the billing webhook
+Gate #1 approved by the operator 2026-10-17 (in the Maana Expertenchat, session local_cbfc9d51-5217-42a4-99ba-27a315c854ce). Start after DCM-RCPT-1. Seams: the DCM-BILL-3 withdrawal service and its row lock, the billing webhook
 handler and event dispatch, the reconciliation command, the confirmation e-mail. Tier 3: all lenses
 plus `sec_reviewer`. Release and consumer pin bumps per the dcm publish flow.
