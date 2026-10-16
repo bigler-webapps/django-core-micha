@@ -81,7 +81,8 @@ def test_summary_failure_is_fail_soft(user, monkeypatch):
     assert len(old) == 3
 
 
-def test_catalogue_filters_entries_and_returns_estimate_units_and_default_level(user):
+def test_catalogue_filters_entries_and_returns_estimate_units_and_default_level(user, monkeypatch):
+    monkeypatch.setattr("django_core_micha.assistant.availability.shutil.which", lambda name: "/usr/bin/claude")  # the CI runner has no claude binary
     with override_settings(DCM_ASSISTANT_CATALOGUE=_catalogue(), OPENAI_API_KEY="key", ANTHROPIC_API_KEY="key",
                           CLAUDE_CODE_OAUTH_TOKEN="token", DCM_ASSISTANT_ENTRY_ALLOWED=lambda u, row: row["model"] != "claude-opus-5-5",
                           DCM_ASSISTANT_DEFAULT_LEVEL="balanced", DCM_ASSISTANT_COST_TO_TOKENS=lambda u, cost: cost // 100):
