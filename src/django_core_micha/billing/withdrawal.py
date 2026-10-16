@@ -95,6 +95,66 @@ def _send_after_commit(pk, now, calc, note):
     if purchase:
         _send_confirmation(purchase, now, calc, note)
 
+
+def withdrawal_key(app, purchase_pk):
+    return f"dcm-withdrawal:{app}:{purchase_pk}"
+
+
+def complete_withdrawal(purchase_pk, *, now, refund_cents, refund_id, calc=None, note=None, event=False):
+    """Apply the local effects of a confirmed refund while holding the purchase lock."""
+    with transaction.atomic():
+        purchase = Purchase.objects.select_for_update().select_related("user").get(pk=purchase_pk)
+        if purchase.status != "active":  # re-read under the lock: whatever happened meanwhile, only an active purchase completes
+            result = calc or RefundCalculation(0, 0, purchase.amount_paid_cents - (purchase.refund_cents or 0), purchase.refund_cents or 0)
+            return result, True
+
+        # Lock the owner's accounts before changing any token balances.
+        list(_owner_accounts(purchase).select_for_update().values_list("pk", flat=True))
+        if purchase.kind == "subscription":
+            sub = Subscription.objects.select_for_update().filter(stripe_subscription_id=purchase.stripe_object_id).first()
+            try:
+                from .stripe_service import _stripe
+                _stripe().Subscription.cancel(purchase.stripe_object_id)
+            except Exception as exc:
+                if "already canceled" not in str(exc).lower() and getattr(exc, "http_status", None) != 404:
+                    raise
+            if sub:
+                sub.status = "canceled"
+                sub.ended_at = now
+                sub.current_period_end = now
+                sub.cancel_at_period_end = False
+                sub.save(update_fields=("status", "ended_at", "current_period_end", "cancel_at_period_end"))
+        elif purchase.kind == "team_package":
+            TeamPackage.objects.filter(stripe_ref=purchase.stripe_object_id).update(ends_at=now)
+
+        entries = TokenEntry.objects.select_for_update().filter(
+            reference__in=purchase.grant_references, kind__in=("grant", "purchase"), remaining__gt=0,
+            account__in=_owner_accounts(purchase),
+        )
+        for entry in entries:
+            left = int(entry.remaining or 0)
+            if left:
+                entry.remaining = 0
+                entry.save(update_fields=("remaining",))
+                TokenEntry.objects.get_or_create(account=entry.account, kind="expiry",
+                    reference=f"withdrawal:{purchase.pk}:{entry.pk}",
+                    defaults={"amount": -left, "purpose": "withdrawal", "app": getattr(settings, "DCM_BILLING_APP", "")})
+
+        if calc is None:
+            calc = RefundCalculation(0, 0, int(purchase.amount_paid_cents) - int(refund_cents), int(refund_cents))
+        if note is None:
+            note = _note(calc, purchase.currency)
+        purchase.status = "withdrawn"
+        purchase.withdrawn_at = now
+        purchase.refund_cents = int(refund_cents)
+        purchase.stripe_refund_id = refund_id or ""
+        purchase.withdrawal_note = note
+        purchase.save(update_fields=("status", "withdrawn_at", "refund_cents", "stripe_refund_id", "withdrawal_note"))
+        pk = purchase.pk
+        transaction.on_commit(lambda: _send_after_commit(pk, now, calc, note))
+        return calc, False
+
+
 def withdraw(purchase, now=None):
     now = now or timezone.now()
     with transaction.atomic():
@@ -108,34 +168,14 @@ def withdraw(purchase, now=None):
         list(_owner_accounts(purchase).select_for_update().values_list("pk", flat=True))
         calc = refund_amount(purchase, now)
         if calc.refund_cents and not purchase.stripe_payment_intent_id: raise ValueError("payment_reference_missing")
-        if purchase.kind == "subscription":
-            sub = Subscription.objects.select_for_update().filter(stripe_subscription_id=purchase.stripe_object_id).first()
-            try:
-                from .stripe_service import _stripe
-                _stripe().Subscription.cancel(purchase.stripe_object_id)
-            except Exception as exc:
-                # Stripe can report that the subscription was already canceled by a prior attempt.
-                if "already canceled" not in str(exc).lower() and getattr(exc, "http_status", None) != 404: raise
-            if sub:
-                sub.status="canceled"; sub.ended_at=now; sub.current_period_end=now; sub.cancel_at_period_end=False
-                sub.save(update_fields=("status","ended_at","current_period_end","cancel_at_period_end"))
-        elif purchase.kind == "team_package":
-            TeamPackage.objects.filter(stripe_ref=purchase.stripe_object_id).update(ends_at=now)
-        for entry in TokenEntry.objects.select_for_update().filter(reference__in=purchase.grant_references, kind__in=("grant","purchase"), remaining__gt=0, account__in=_owner_accounts(purchase)):
-            left = int(entry.remaining or 0)
-            if left:
-                entry.remaining = 0; entry.save(update_fields=("remaining",))
-                TokenEntry.objects.get_or_create(account=entry.account, kind="expiry", reference=f"withdrawal:{purchase.pk}:{entry.pk}", defaults={"amount":-left,"purpose":"withdrawal","app":getattr(settings,"DCM_BILLING_APP","")})
         refund_id = ""
         if calc.refund_cents:
             from .stripe_service import _stripe
+            app = getattr(settings, "DCM_BILLING_APP", "")
+            key = withdrawal_key(app, purchase.pk)
             refund = _stripe().Refund.create(payment_intent=purchase.stripe_payment_intent_id, amount=calc.refund_cents,
-                metadata={"app":getattr(settings,"DCM_BILLING_APP",""),"purchase_id":str(purchase.pk)}, reason="requested_by_customer",
-                idempotency_key=f"dcm-withdrawal:{getattr(settings,'DCM_BILLING_APP','')}:{purchase.pk}")
+                metadata={"app": app, "purchase_id":str(purchase.pk), "dcm_withdrawal": key}, reason="requested_by_customer",
+                idempotency_key=key)
             refund_id = getattr(refund,"id","") or (refund.get("id","") if isinstance(refund,dict) else "")
-        note = _note(calc, purchase.currency)
-        purchase.status="withdrawn"; purchase.withdrawn_at=now; purchase.refund_cents=calc.refund_cents; purchase.stripe_refund_id=refund_id; purchase.withdrawal_note=note
-        purchase.save(update_fields=("status","withdrawn_at","refund_cents","stripe_refund_id","withdrawal_note"))
-        pk = purchase.pk
-        transaction.on_commit(lambda: _send_after_commit(pk, now, calc, note))
-        return calc, False
+        return complete_withdrawal(purchase.pk, now=now, refund_cents=calc.refund_cents,
+            refund_id=refund_id, calc=calc, note=_note(calc, purchase.currency))

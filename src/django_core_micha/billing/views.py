@@ -144,7 +144,8 @@ def withdrawal_execute(request,purchase_id):
     try: calc,already=execute_withdrawal(p)
     except ValueError as exc: return JsonResponse({"code":str(exc)},status=409)
     except Exception: return JsonResponse({"code":"withdrawal_unavailable"},status=502)
-    return JsonResponse({"already_withdrawn":already,"refund_cents":calc.refund_cents,"currency":p.currency,"withdrawn_at":timezone.now().isoformat(),"calculation":p.withdrawal_note})
+    p.refresh_from_db()  # the stored result: a webhook may have completed the withdrawal first
+    return JsonResponse({"already_withdrawn":already,"refund_cents":p.refund_cents if already else calc.refund_cents,"currency":p.currency,"withdrawn_at":p.withdrawn_at.isoformat() if p.withdrawn_at else timezone.now().isoformat(),"calculation":p.withdrawal_note})
 
 from django.http import HttpResponse
 

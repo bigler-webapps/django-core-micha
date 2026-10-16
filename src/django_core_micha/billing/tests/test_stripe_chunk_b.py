@@ -237,7 +237,8 @@ def test_reconcile_repairs_missed_subscription_event(monkeypatch, tmp_path):
         "current_period_end":now+86400, "metadata":{"app":"maana","plan_key":"monthly","user_id":str(user.pk)}}
     fake = SimpleNamespace(
         Subscription=SimpleNamespace(list=lambda **kw: _Page([remote])),
-        Event=SimpleNamespace(list=lambda **kw: _Page([])))
+        Event=SimpleNamespace(list=lambda **kw: _Page([])),
+        Refund=SimpleNamespace(list=lambda **kw: _Page([])))
     monkeypatch.setattr(stripe_service, "_stripe", lambda: fake)
     path = _config(tmp_path)
     with override_settings(DCM_BILLING_APP="maana", DCM_BILLING_FILE=path):

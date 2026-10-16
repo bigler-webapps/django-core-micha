@@ -245,14 +245,90 @@ def _event_app_and_metadata(event_type, obj):
     return metadata
 
 
+def _withdrawal_purchase_pk(app, *candidates):
+    """The purchase id out of our withdrawal key `dcm-withdrawal:<app>:<id>` (metadata or request idempotency key)."""
+    prefix = f"dcm-withdrawal:{app}:"
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.startswith(prefix):
+            tail = candidate[len(prefix):]
+            if tail.isascii() and tail.isdigit() and 0 < len(tail) <= 18 and int(tail) > 0:
+                return int(tail)
+    return None
+
+
+def withdrawal_refund_purchase(refund, idempotency_key=None):
+    """Return the active purchase only for a validated withdrawal refund.
+
+    A refund is ours only through the withdrawal key: the refund metadata `dcm_withdrawal`, or the idempotency
+    key of the request that created it (carried by the event; it is how refunds created before the metadata key existed are found).
+    Manual dashboard refunds and disputes carry neither."""
+    refund = _dict(refund)
+    app = getattr(settings, "DCM_BILLING_APP", "")
+    metadata = _dict(refund.get("metadata") or {})
+    purchase_pk = _withdrawal_purchase_pk(app, metadata.get("dcm_withdrawal"), idempotency_key)
+    if purchase_pk is None:
+        return None
+    if refund.get("status") != "succeeded":
+        return None
+    purchase = Purchase.objects.filter(pk=purchase_pk, status="active").first()
+    if not purchase:
+        return None
+    if metadata.get("app") not in (None, "", app):
+        return None
+    payment_intent = refund.get("payment_intent")
+    if isinstance(payment_intent, dict):
+        payment_intent = payment_intent.get("id")
+    if not purchase.stripe_payment_intent_id or payment_intent != purchase.stripe_payment_intent_id:
+        return None
+    amount = refund.get("amount")
+    if not isinstance(amount, int) or isinstance(amount, bool):
+        return None  # integer cents exactly as Stripe sends them, never truncated
+    if amount <= 0 or amount > int(purchase.amount_paid_cents):
+        return None
+    currency = refund.get("currency")
+    if not currency or str(currency).lower() != str(purchase.currency).lower():
+        return None
+    return purchase
+
+
+def complete_withdrawal_from_refund(refund, idempotency_key=None):
+    refund = _dict(refund)
+    purchase = withdrawal_refund_purchase(refund, idempotency_key)
+    if purchase is None:
+        return False
+    from .withdrawal import complete_withdrawal
+    created = refund.get("created")
+    now = _utc(created) if created else None
+    now = now or timezone.now()
+    currency = (refund.get("currency") or purchase.currency).lower()
+    amount = int(refund["amount"])
+    note = f"Completed from the Stripe refund event; refund: {amount} {currency} cents."
+    complete_withdrawal(purchase.pk, now=now, refund_cents=amount,
+        refund_id=refund.get("id") or "", note=note, event=True)
+    return True
+
+
 def process_stripe_event(event):
     """Process one verified Stripe event. Caller owns the event-row transaction."""
     event = _dict(event)
     kind = event.get("type", "")
     obj = ((event.get("data") or {}).get("object") or {})
     obj = _dict(obj)
+    if kind in ("refund.created", "refund.updated"):
+        request_info = event.get("request")
+        request_key = _dict(request_info).get("idempotency_key") if isinstance(request_info, dict) else None
+        complete_withdrawal_from_refund(obj, request_key)
+        return "processed"
     if kind == "charge.refunded":
-        return "processed"  # recorded only; our own refund must never change entitlements
+        payment_intent = obj.get("payment_intent")
+        if isinstance(payment_intent, dict):
+            payment_intent = payment_intent.get("id")
+        active = Purchase.objects.filter(status="active", stripe_payment_intent_id=payment_intent).exists() if payment_intent else False
+        if active:
+            refunds = _stripe().Refund.list(charge=obj.get("id"), limit=100)
+            for refund in getattr(refunds, "data", refunds if isinstance(refunds, list) else []):
+                complete_withdrawal_from_refund(refund)
+        return "processed"
     metadata = _event_app_and_metadata(kind, obj)
     if metadata.get("app") != getattr(settings, "DCM_BILLING_APP", ""):
         return "ignored"

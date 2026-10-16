@@ -6,7 +6,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils import timezone as django_timezone
 
 from django_core_micha.billing.models import StripeEvent
-from django_core_micha.billing.stripe_service import _dict, _stripe, process_stripe_event
+from django_core_micha.billing.stripe_service import _dict, _stripe, complete_withdrawal_from_refund, process_stripe_event, withdrawal_refund_purchase
 
 
 class Command(BaseCommand):
@@ -51,6 +51,13 @@ class Command(BaseCommand):
                     StripeEvent.objects.filter(pk=row.pk).update(status="failed", error_text=type(exc).__name__)
                     raise
                 count += 1
+            for refund in stripe.Refund.list(created={"gte": int(since.timestamp())}, limit=100).auto_paging_iter():
+                data = _dict(refund)
+                if withdrawal_refund_purchase(data) is None:
+                    continue
+                with transaction.atomic():
+                    if complete_withdrawal_from_refund(data):
+                        count += 1
             self.stdout.write(str(count))
         except Exception as exc:
             raise CommandError(f"billing reconciliation failed ({type(exc).__name__})") from None

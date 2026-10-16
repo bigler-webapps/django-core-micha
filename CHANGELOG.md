@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.6.1] — 2026-10-17
+
+### Fixed
+
+DCM-BILL-4: a withdrawal is completed from Stripe's refund event. If the server crashed after Stripe accepted the withdrawal refund but
+before the local commit, the purchase stayed active although the person was refunded. Ending the access, expiring the tokens, marking the
+purchase withdrawn and the confirmation e-mail are now one routine under the purchase row lock, shared by the POST path, the webhook
+(`refund.created`, `refund.updated`, `charge.refunded`) and `billing_reconcile`. Only refunds carrying the withdrawal key
+`dcm-withdrawal:<app>:<purchase id>` count; manual refunds and disputes are unchanged. The Stripe webhook endpoint must subscribe
+`refund.created` and `refund.updated`. Contract: `docs/design/billing.md`.
+
 ## [3.6.0] — 2026-10-16
 
 ### Added
