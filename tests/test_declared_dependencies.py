@@ -23,6 +23,7 @@ MODULE_TO_DISTRIBUTION = {
     "environ": "django-environ",
     "filetype": "filetype",
     "pywebpush": "pywebpush",
+    "stripe": "stripe",
     "pypdf": "pypdf",
     "openai": "openai",
     "rest_framework": "djangorestframework",
@@ -35,7 +36,7 @@ def _declared_distribution_names() -> set[str]:
         project = tomllib.load(pyproject_file)["project"]
         dependencies = list(project["dependencies"])
         optional_dependencies = project["optional-dependencies"]
-        for extra in ("ai", "extraction", "push", "scripts"):
+        for extra in ("ai", "extraction", "push", "scripts", "billing"):
             dependencies.extend(optional_dependencies[extra])
 
     return {

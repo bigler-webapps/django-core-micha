@@ -9,6 +9,7 @@ INSTALLED_APPS = [
     "django_core_micha.notifications",
     "django_core_micha.messaging",
     "django_core_micha.assistant",
+    "django_core_micha.billing",
     "django_core_micha.activity",
     "django_core_micha.onboarding",
     "allauth",
@@ -20,6 +21,7 @@ INSTALLED_APPS = [
 
 MIGRATION_MODULES = {
     "testapp": None,
+    "dcm_billing": None,
     "account": None,
     "mfa": None,
     "socialaccount": None,
