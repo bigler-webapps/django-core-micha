@@ -1,5 +1,15 @@
 # Changelog
 
+## [3.7.0] — 2026-10-17
+
+### Added
+
+DCM-BILL-5: operator billing data and a richer `me/`. Three operator endpoints guarded by the Users-tab permission (`can_view_users_admin`):
+`GET operator/overview/` (monthly aggregates: accounts by access source, new and ended subscriptions, team packages and seats, token packages,
+tokens granted/used/expired, AI cost by model and per used token), `GET operator/accounts/` (searchable, paginated, constant-query account list)
+and `POST|DELETE operator/accounts/<user_id>/free-access/` (reason mandatory, audited, revoking deletes nothing). `me/` adds `subscription`,
+`tokens.grants`, `team` (payer: seat holders) and `seat` (holder). Existing keys unchanged. Contract: `docs/design/billing.md`.
+
 ## [3.6.1] — 2026-10-17
 
 ### Fixed

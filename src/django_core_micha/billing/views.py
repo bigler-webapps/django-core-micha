@@ -3,14 +3,14 @@ from datetime import datetime, timezone as dt_timezone
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count, F
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 from .config import load_billing_config
 from .models import TeamPackage, TeamSeat, AICostRecord, TokenEntry, Purchase
-from .services import access_state, token_balance
+from .services import access_state, token_balance, models_q_expiry
 from .models import BillingCustomer, StripeEvent
 from .stripe_service import checkout_session_params, get_customer, process_stripe_event
 from .withdrawal import eligibility, refund_amount, withdraw as execute_withdrawal
@@ -28,7 +28,28 @@ def _plans():
 def me(request):
     if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
     s=access_state(request.user)
-    return JsonResponse({"access":{"status":s.status,"source":s.source,"ends_at":s.ends_at.isoformat() if s.ends_at else None},"tokens":{"balance":token_balance(request.user)},"plans":_plans()})
+    from .models import Subscription, TokenAccount
+    now=timezone.now(); plans={p["key"]:p["name"] for p in _plans()}
+    subs=list(Subscription.objects.filter(user=request.user).order_by("-current_period_end","-pk"))
+    chosen=next((x for x in subs if x.current_period_end and x.status in ("active","trialing","past_due") and x.current_period_end>now),None)
+    chosen=chosen or next((x for x in subs if not x.ended_at),None)
+    subscription=None if chosen is None else {"plan_key":chosen.plan_key,"plan_name":plans.get(chosen.plan_key,""),"status":chosen.status,"current_period_start":chosen.current_period_start.isoformat() if chosen.current_period_start else None,"current_period_end":chosen.current_period_end.isoformat() if chosen.current_period_end else None,"renews":bool(chosen.status in ("active","trialing") and not chosen.cancel_at_period_end and chosen.current_period_end and chosen.current_period_end>now),"cancel_at_period_end":chosen.cancel_at_period_end}
+    account=TokenAccount.objects.filter(user=request.user).first()
+    grants=[]
+    if account:
+        entries=account.entries.filter(kind__in=("grant","purchase"),remaining__gt=0).filter(models_q_expiry(now)).order_by(F("expires_at").asc(nulls_last=True),"created_at","pk")
+        grants=[{"source":"plan" if e.kind=="grant" else "package","amount":e.amount,"remaining":e.remaining,"expires_at":e.expires_at.isoformat() if e.expires_at else None} for e in entries]
+    from .models import TeamPackage, TeamSeat
+    owned=TeamPackage.objects.filter(owner=request.user,starts_at__lte=now,ends_at__gt=now).order_by("ends_at","pk").first()
+    held=TeamSeat.objects.filter(user=request.user,active=True,package__starts_at__lte=now,package__ends_at__gt=now).select_related("package").order_by("package__ends_at","pk").first()
+    team=None
+    if owned:
+        holders=list(TeamSeat.objects.filter(package=owned,active=True).select_related("user").order_by("user__email","user_id"))
+        team={"plan_key":owned.plan_key,"plan_name":plans.get(owned.plan_key,""),"ends_at":owned.ends_at.isoformat(),"seats_total":owned.seats,"seats_used":len(holders),"seat_holders":[{"user_id":x.user_id,"name":x.user.get_full_name() or "","email":x.user.email} for x in holders]}
+    result={"access":{"status":s.status,"source":s.source,"ends_at":s.ends_at.isoformat() if s.ends_at else None},"tokens":{"balance":token_balance(request.user),"grants":grants},"plans":_plans(),"subscription":subscription,"team":team}
+    if held: result["seat"]={"plan_key":held.package.plan_key,"plan_name":plans.get(held.package.plan_key,""),"ends_at":held.package.ends_at.isoformat()}
+    response=JsonResponse(result); response["Cache-Control"]="no-store"  # it now carries the seat holders' names and emails
+    return response
 def _target(data):
     value=data.get("user_id") or data.get("email")
     if not value: raise ValueError

@@ -1,3 +1,5 @@
 from django.urls import path
 from . import views
+from . import operator
 urlpatterns=[path("me/",views.me,name="billing-me"),path("team/seats/",views.team_seats,name="billing-team-seats"),path("cost-report/",views.cost_report,name="billing-cost-report"),path("checkout/",views.checkout,name="billing-checkout"),path("portal/",views.portal,name="billing-portal"),path("withdrawal/",views.withdrawal_list,name="billing-withdrawal-list"),path("withdrawal/<int:purchase_id>/preview/",views.withdrawal_preview,name="billing-withdrawal-preview"),path("withdrawal/<int:purchase_id>/",views.withdrawal_execute,name="billing-withdrawal"),path("webhook/",views.webhook,name="billing-webhook")]
+urlpatterns += [path("operator/overview/",operator.overview,name="billing-operator-overview"),path("operator/accounts/",operator.accounts,name="billing-operator-accounts"),path("operator/accounts/<int:user_id>/free-access/",operator.free_access,name="billing-operator-free-access")]
