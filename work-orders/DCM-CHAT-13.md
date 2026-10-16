@@ -17,6 +17,7 @@ Expected outcome: every reply stores its tokens and cost; long chats are summari
 3. **Current state from lookups:** the summary does not restate the project state; the app's lookup tools provide it fresh.
 4. **Billing hook:** after each reply the core calls an app hook with the recorded usage, so an app can debit tokens (DCM-BILL-1); without the hook nothing changes.
 5. **Visible per reply:** the reply carries its usage for display (UCM-CHAT-6).
+6. **Picker data:** the model catalogue offered to a person contains only entries usable for that account and app (provider configured, account allowed, subscription driver only for the operator's own account); each entry carries its plain name, one sentence on what it is good for, its supported efforts, and an estimate range per effort for the current chat length in the app's token unit (or a relative cost level 1–3 when the app has no tokens). The estimate uses the cost table and the chat's current context size.
 
 ### Scope and acceptance
 
