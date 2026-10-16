@@ -100,7 +100,7 @@ def test_heic_sniff_conversion_and_fake_reader(monkeypatch):
         assert read(b"different fake content")==read(b"different fake content")
 
 def test_real_heic_conversion_when_encoder_is_available():
-    import pillow_heif
+    pillow_heif=pytest.importorskip("pillow_heif",reason="needs the receipts extra (pillow-heif); the publish workflow does not install it")
     try:
         heif=pillow_heif.from_pillow(Image.new("RGB",(8,8),(90,120,150)))
         encoded=io.BytesIO();heif.save(encoded,format="HEIF");content=encoded.getvalue()
