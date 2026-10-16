@@ -51,7 +51,19 @@ async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=N
                     if sum(len(part.encode("utf-8")) for part in chunks)>get_limit("max_output_bytes"):
                         raise DriverError("invalid_output")
                 elif event.get("type")=="usage": usage.update(event.get("usage", {}) or {})
-        return CompletionResult("".join(chunks), usage)
+        result = CompletionResult("".join(chunks), usage)
+        from django.apps import apps
+        if usage and apps.is_installed("django_core_micha.billing"):
+            try:
+                from asgiref.sync import sync_to_async
+                from django_core_micha.billing.services import record_ai_call
+                await sync_to_async(record_ai_call, thread_sensitive=True)(user=user, provider=driver, model=model, input_tokens=int(usage.get("input_tokens",0) or 0),
+                    output_tokens=int(usage.get("output_tokens",0) or 0), cache_tokens=int(usage.get("cache_tokens",0) or 0),
+                    purpose="completion", reference=str(getattr(entry,"pk","")) or f"completion:{__import__('uuid').uuid4()}")
+            except Exception:
+                import logging
+                logging.getLogger(__name__).error("Completion billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
+        return result
     except TimeoutError as exc: raise DriverError("timeout") from exc
     except DriverError: raise
     except Exception as exc: raise DriverError(getattr(exc,"code","provider_error")) from exc

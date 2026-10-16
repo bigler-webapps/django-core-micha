@@ -21,7 +21,6 @@ INSTALLED_APPS = [
 
 MIGRATION_MODULES = {
     "testapp": None,
-    "dcm_billing": None,
     "account": None,
     "mfa": None,
     "socialaccount": None,

@@ -71,4 +71,17 @@ def extract_document(
         charge_user_for_response(user_id=user_id, response=result, model=model)
     else:
         settle_reservation(reservation=reservation, response=result, model=model)
+    from django.apps import apps
+    if apps.is_installed("django_core_micha.billing") and getattr(result, "usage", None):
+        try:
+            from django.contrib.auth import get_user_model
+            from django_core_micha.billing.services import record_ai_call
+            user = get_user_model().objects.filter(pk=user_id).first() if user_id is not None else None
+            usage = result.usage
+            record_ai_call(user=user, provider=provider, model=model,
+                input_tokens=int(getattr(usage,"input_tokens",0) or 0), output_tokens=int(getattr(usage,"output_tokens",0) or 0),
+                cache_tokens=int(getattr(usage,"cache_tokens",0) or 0), purpose="extraction", reference="")
+        except Exception:
+            import logging
+            logging.getLogger(__name__).error("Extraction billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
     return result

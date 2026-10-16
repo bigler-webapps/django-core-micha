@@ -68,6 +68,10 @@ def _get_cost_table():
     """Return the operator-configured rate table, or the safe defaults."""
     return getattr(settings, "AI_MODEL_COST_TABLE_CENTS_PER_1K", _DEFAULT_MODEL_COSTS_CENTS_PER_1K)
 
+def get_cost_table():
+    """Public read-only accessor for configured provider rates."""
+    return _get_cost_table()
+
 
 def estimate_cost_cents(*, model: str, input_tokens: int, output_tokens: int) -> int:
     """Estimate cost in integer cents, rounded up with a one-cent floor."""

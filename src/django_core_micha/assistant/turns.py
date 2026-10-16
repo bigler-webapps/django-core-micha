@@ -91,6 +91,15 @@ def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=N
         turn.assistant_text, turn.state, turn.error_code = text, state, error
         turn.finished_at, turn.usage, turn.tool_trace = timezone.now(), usage or {}, trace or []
         turn.save(update_fields=("assistant_text", "state", "error_code", "finished_at", "usage", "tool_trace"))
+        from django.apps import apps
+        if usage and apps.is_installed("django_core_micha.billing"):
+            try:
+                from django_core_micha.billing.services import record_ai_call
+                record_ai_call(user=turn.sender or turn.chat.owner, provider=turn.driver, model=turn.model,
+                    input_tokens=int(usage.get("input_tokens", 0) or 0), output_tokens=int(usage.get("output_tokens", 0) or 0),
+                    cache_tokens=int(usage.get("cache_tokens", 0) or 0), purpose="chat", reference=str(turn.pk))
+            except Exception:
+                log.error("Assistant billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
         chat = turn.chat
         if state == "completed" and turn.sequence == 1 and chat.title_source == "automatic" and chat.title == TITLE_DEFAULT:
             title = re.sub(r"\s+", " ", turn.user_text).strip()

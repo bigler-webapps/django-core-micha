@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.4.0] — 2026-10-16
+
+### Added
+
+DCM-BILL-1: shared subscriptions and AI tokens with Stripe Managed Payments, as the opt-in app `django_core_micha.billing`
+(label `dcm_billing`, extra `django-core-micha[billing]` = stripe + PyYAML; an app that does not install it gets no tables and no
+routes). Contract: `docs/design/billing.md`.
+- Plans, packages and token rates are declared in the app's `billing.yaml` (validated; system check and `billing_check`);
+  `billing_sync_plans` creates Stripe Products and immutable, versioned Prices idempotently (a changed price opens `v2`, a changed
+  tax code opens a new Product, existing subscriptions keep theirs). Every Stripe object carries `metadata.app`.
+- Checkout (`POST checkout/`), customer portal (`POST portal/`), signed and idempotent webhook (`POST webhook/`: events of another
+  app are ignored; subscription lifecycle, renewals, failed payments, team packages and token packages; entitlements are fixed at
+  checkout), `billing_reconcile` repairs missed events.
+- Access: `access_state(user)` is `active` through a subscription, a seat in a team package or an operator free access
+  (`billing_grant_free_access` / `billing_revoke_free_access`); otherwise `read_only` with the date access ended. Per operator
+  decision nothing is deleted automatically and there is no deletion date or notice.
+- Token account per person or team: grants (per term, expiring), purchases, atomic debits that never go below zero and are idempotent per
+  reference, expiry (`billing_expire_tokens`), `tokens_for(rate, units)`.
+- AI costs: every chat turn, completion and extraction call records provider, model, tokens and cost in USD micros per app
+  (`record_ai_call`); `GET cost-report/?month=YYYY-MM` (bearer token, SHA-256 digests in settings) returns only per-app sums.
+- Endpoints for the UI: `GET me/` (access, token balance, plans) and `GET|POST|DELETE team/seats/`.
+Known limits: the cache-token share of a call is stored but not yet priced (cache rates arrive with DCM-CHAT-13); a monthly
+subscription's allowance follows the current `billing.yaml` at each renewal; whether the Stripe account is enabled for Managed Payments
+is not verifiable from code.
+
+
 ## [3.3.0] — 2026-10-15
 
 ### Added
