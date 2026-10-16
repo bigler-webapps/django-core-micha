@@ -100,7 +100,7 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          pip install -e ".[test,ai,extraction,push,scripts]"
+          pip install -e ".[test,ai,extraction,push,scripts,billing,receipts]"
           pytest -q
 
       - name: Build package
