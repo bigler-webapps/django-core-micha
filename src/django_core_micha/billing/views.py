@@ -9,10 +9,11 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 from .config import load_billing_config
-from .models import TeamPackage, TeamSeat, AICostRecord, TokenEntry
+from .models import TeamPackage, TeamSeat, AICostRecord, TokenEntry, Purchase
 from .services import access_state, token_balance
 from .models import BillingCustomer, StripeEvent
 from .stripe_service import checkout_session_params, get_customer, process_stripe_event
+from .withdrawal import eligibility, refund_amount, withdraw as execute_withdrawal
 
 def _plans():
     result=[]
@@ -105,6 +106,45 @@ def portal(request):
     except Exception:
         return JsonResponse({"detail":"portal_unavailable"},status=502)
     return JsonResponse({"url":session.url})
+
+@csrf_protect
+@require_GET
+def withdrawal_list(request):
+    if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
+    now=timezone.now()
+    rows=[]
+    for p in Purchase.objects.filter(user=request.user).order_by("-purchased_at"):
+        result=eligibility(p,now)
+        rows.append({"id":p.pk,"kind":p.kind,"plan_key":p.plan_key,"purchased_at":p.purchased_at.isoformat(),"amount_paid_cents":p.amount_paid_cents,"currency":p.currency,"eligible":result.eligible,"reason":result.reason,"withdrawn_at":p.withdrawn_at.isoformat() if p.withdrawn_at else None})
+    return JsonResponse({"purchases":rows})
+
+def _purchase_or_404(request, purchase_id):
+    from django.shortcuts import get_object_or_404
+    return get_object_or_404(Purchase,user=request.user,pk=purchase_id)
+
+@csrf_protect
+@require_GET
+def withdrawal_preview(request,purchase_id):
+    if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
+    p=_purchase_or_404(request,purchase_id); now=timezone.now(); eligible=eligibility(p,now); calc=refund_amount(p,now)
+    line=f"Paid {p.amount_paid_cents} {p.currency}; time share {calc.time_share_cents}; token share {calc.token_share_cents}; amount used {calc.used_cents}; refund {calc.refund_cents} {p.currency}."
+    return JsonResponse({"eligible":eligible.eligible,"reason":eligible.reason,"amount_paid_cents":p.amount_paid_cents,"currency":p.currency,"time_share_cents":calc.time_share_cents,"token_share_cents":calc.token_share_cents,"used_cents":calc.used_cents,"refund_cents":calc.refund_cents,"calculation":line})
+
+@csrf_protect
+@require_http_methods(["POST"])
+def withdrawal_execute(request,purchase_id):
+    if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
+    import json
+    p=_purchase_or_404(request,purchase_id)
+    if p.status=="withdrawn":
+        return JsonResponse({"already_withdrawn":True,"withdrawn_at":p.withdrawn_at.isoformat() if p.withdrawn_at else None,"refund_cents":p.refund_cents or 0,"currency":p.currency,"calculation":p.withdrawal_note})
+    try: data=json.loads(request.body or b"{}")
+    except (ValueError,UnicodeDecodeError): return JsonResponse({"detail":"invalid_json"},status=400)
+    if not isinstance(data,dict) or data.get("confirm") is not True: return JsonResponse({"detail":"confirmation_required"},status=400)
+    try: calc,already=execute_withdrawal(p)
+    except ValueError as exc: return JsonResponse({"code":str(exc)},status=409)
+    except Exception: return JsonResponse({"code":"withdrawal_unavailable"},status=502)
+    return JsonResponse({"already_withdrawn":already,"refund_cents":calc.refund_cents,"currency":p.currency,"withdrawn_at":timezone.now().isoformat(),"calculation":p.withdrawal_note})
 
 from django.http import HttpResponse
 

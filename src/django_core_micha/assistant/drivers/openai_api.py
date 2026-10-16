@@ -58,8 +58,14 @@ class OpenAIDriver:
                     release_reservation(reservation=reservation)
                     raise
                 if final_usage:
-                    yield {"type": "usage", "usage": {"input_tokens": getattr(final_usage, "input_tokens", 0),
-                        "output_tokens": getattr(final_usage, "output_tokens", 0)}}
+                    def value(obj, key, default=0):
+                        return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+                    input_tokens = int(value(final_usage, "input_tokens") or 0)
+                    details = value(final_usage, "input_tokens_details", {}) or {}
+                    cached = int(value(details, "cached_tokens") or 0)
+                    yield {"type": "usage", "usage": {"input_tokens": max(0, input_tokens - cached),
+                        "output_tokens": int(value(final_usage, "output_tokens") or 0),
+                        "cache_read_tokens": cached, "cache_write_tokens": 0}}
                 if not function_calls:
                     return
                 for call in function_calls.values():

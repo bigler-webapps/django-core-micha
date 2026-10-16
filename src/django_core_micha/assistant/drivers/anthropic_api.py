@@ -40,8 +40,12 @@ class AnthropicDriver:
                     release_reservation(reservation=reservation)
                     raise
                 usage = getattr(msg, "usage", None)
-                yield {"type": "usage", "usage": {"input_tokens": getattr(usage, "input_tokens", 0),
-                    "output_tokens": getattr(usage, "output_tokens", 0)}}
+                def value(obj, key):
+                    return obj.get(key, 0) if isinstance(obj, dict) else getattr(obj, key, 0)
+                yield {"type": "usage", "usage": {"input_tokens": int(value(usage, "input_tokens") or 0),
+                    "output_tokens": int(value(usage, "output_tokens") or 0),
+                    "cache_read_tokens": int(value(usage, "cache_read_input_tokens") or 0),
+                    "cache_write_tokens": int(value(usage, "cache_creation_input_tokens") or 0)}}
                 content_blocks = list(getattr(msg, "content", []) or [])
                 blocks = [b for b in content_blocks if (b.get("type") if isinstance(b, dict) else getattr(b, "type", None)) == "tool_use"]
                 if not blocks:

@@ -125,13 +125,15 @@ class ClaudeCliDriver:
         err_task = asyncio.create_task(stderr_log())
         saw_init = False
         saw_result = False
+        assistant_usage = {}
+        last_context = [0]
         total = 0
         try:
             proc.stdin.write(prompt.encode("utf-8"))
             await asyncio.wait_for(proc.stdin.drain(), get_limit("idle_timeout")); proc.stdin.close()
             await asyncio.wait_for(proc.stdin.wait_closed(), get_limit("idle_timeout"))
             async def read_events():
-                nonlocal saw_init, saw_result, total
+                nonlocal saw_init, saw_result, total, assistant_usage
                 while True:
                     try: line = await asyncio.wait_for(proc.stdout.readline(), get_limit("idle_timeout"))
                     except asyncio.TimeoutError as exc: raise DriverError("timeout") from exc
@@ -162,8 +164,18 @@ class ClaudeCliDriver:
                     elif event.get("type") == "assistant" and "429" in str(event.get("error", "")):
                         raise DriverError("quota_exceeded")
                     elif event.get("type") == "assistant":
+                        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+                        details = message.get("usage") or event.get("usage") or {}
+                        if details:
+                            last_context[0] = sum(int(details.get(k, 0) or 0) for k in
+                                ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+                            for key, value in (("input_tokens", details.get("input_tokens", 0)),
+                                               ("output_tokens", details.get("output_tokens", 0)),
+                                               ("cache_read_tokens", details.get("cache_read_input_tokens", 0)),
+                                               ("cache_write_tokens", details.get("cache_creation_input_tokens", 0))):
+                                assistant_usage[key] = assistant_usage.get(key, 0) + int(value or 0)
                         blocks = event.get("content")
-                        if blocks is None and isinstance(event.get("message"), dict): blocks = event["message"].get("content")
+                        if blocks is None and message: blocks = message.get("content")
                         if isinstance(blocks, str): blocks = [{"type": "text", "text": blocks}]
                         for block in blocks if isinstance(blocks, list) else []:
                             if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
@@ -171,8 +183,13 @@ class ClaudeCliDriver:
                     elif event.get("type") == "result":
                         if event.get("status") == 429 or event.get("api_error_status") == 429: raise DriverError("quota_exceeded")
                         usage = event.get("usage") or {}
-                        yield {"type": "usage", "usage": {"input_tokens": usage.get("input_tokens", 0),
-                            "output_tokens": usage.get("output_tokens", 0)}}
+                        mapped = assistant_usage or {"input_tokens": int(usage.get("input_tokens", 0) or 0),
+                            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+                            "cache_read_tokens": int(usage.get("cache_read_input_tokens", 0) or 0),
+                            "cache_write_tokens": int(usage.get("cache_creation_input_tokens", 0) or 0)}
+                        mapped = dict(mapped)
+                        if last_context[0]: mapped["context_tokens"] = last_context[0]
+                        yield {"type": "usage", "usage": mapped}
                         saw_result = True
             async with asyncio.timeout(get_limit("provider_timeout")):
                 async for frame in read_events(): yield frame

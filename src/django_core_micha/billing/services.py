@@ -91,6 +91,17 @@ def debit_tokens(owner,amount,*,purpose,reference):
             take=min(left,grant.remaining); grant.remaining-=take; grant.save(update_fields=("remaining",)); left-=take
             if not left: break
         return TokenEntry.objects.create(account=account,kind="debit",amount=-amount,purpose=purpose,reference=reference,app=getattr(settings,"DCM_BILLING_APP",""))
+
+def reverse_debit(owner, *, reference, reason):
+    if not reason: raise ValueError("reason_required")
+    account=_account(owner,False)
+    debit=TokenEntry.objects.filter(account=account,kind="debit",reference=reference).first() if account else None
+    if debit is None: raise ValueError("unknown_debit")
+    reversal_ref=f"reversal:{reference}"
+    with transaction.atomic():
+        account=TokenAccount.objects.select_for_update().get(pk=account.pk)
+        row,created=TokenEntry.objects.get_or_create(account=account,kind="adjustment",reference=reversal_ref,defaults={"amount":abs(int(debit.amount)),"remaining":abs(int(debit.amount)),"purpose":str(reason)[:120],"app":getattr(settings,"DCM_BILLING_APP","")})
+        return row
 def expire_tokens(now=None):
     now=now or timezone.now(); count=0
     with transaction.atomic():
@@ -105,16 +116,15 @@ def tokens_for(rate_name,units):
     if rate_name not in rates: raise KeyError(rate_name)
     return units*rates[rate_name]
 
-def record_ai_call(*,user,provider,model,input_tokens,output_tokens,cache_tokens=0,purpose,reference=""):
+def record_ai_call(*,user,provider,model,input_tokens,output_tokens,cache_tokens=0,cache_read_tokens=0,cache_write_tokens=0,purpose,reference=""):
     try:
-        from django_core_micha.extraction.cost_guard import get_cost_table
-        table=get_cost_table(); rates=table.get(model,{}) if isinstance(table,dict) else {}
-        inp=Decimal(str(rates.get("input",1.5))); out=Decimal(str(rates.get("output",6.0)))
-        # Rates are cents per 1,000 tokens; convert cents to millionths of USD.
-        cost=(Decimal(input_tokens)*inp+Decimal(output_tokens)*out)*Decimal(10)
-        micros=int(cost.quantize(Decimal("1"),rounding=ROUND_HALF_UP))
+        from django_core_micha.ai_prices import price_usage
+        read_tokens = int(cache_read_tokens or 0) + (int(cache_tokens or 0) if not cache_read_tokens and not cache_write_tokens else 0)
+        write_tokens = int(cache_write_tokens or 0)
+        micros = price_usage(model, input_tokens=input_tokens, output_tokens=output_tokens,
+                             cache_read_tokens=read_tokens, cache_write_tokens=write_tokens)
         with transaction.atomic():
-            return AICostRecord.objects.create(app=getattr(settings,"DCM_BILLING_APP",""),user=user,provider=provider,model=model,input_tokens=max(0,int(input_tokens)),output_tokens=max(0,int(output_tokens)),cache_tokens=max(0,int(cache_tokens)),cost_usd_micros=max(0,micros),purpose=purpose,reference=reference)
+            return AICostRecord.objects.create(app=getattr(settings,"DCM_BILLING_APP",""),user=user,provider=provider,model=model,input_tokens=max(0,int(input_tokens)),output_tokens=max(0,int(output_tokens)),cache_tokens=max(0,read_tokens+write_tokens),cost_usd_micros=max(0,micros),purpose=purpose,reference=reference)
     except Exception:
         log.error("Could not record AI cost (%s)", __import__("sys").exc_info()[0].__name__)
         return None

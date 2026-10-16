@@ -9,10 +9,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .availability import availability
-from .catalogue import default_entry, entries, entry_by_id, entry_id, selection_of, validate
+from .catalogue import default_entry, entries, entry_by_id, entry_id, model_level, selection_of, usable_entries, validate
 from .hooks import availability_reason, can_access_scope, is_shared_scope
 from .access import can_view_chat, is_creator
 from .models import AssistantChat
+from .history import summary_payload
 from .pagination import InvalidCursor, decode_cursor, encode_cursor
 from .turns import delete_session, reconcile_interrupted, turn_payload
 
@@ -39,10 +40,42 @@ def _cursor_context(kind,user,**extra): return {"kind":kind,"user":str(user.pk),
 class CatalogueView(APIView):
     permission_classes=[IsAuthenticated]
     def get(self,request):
-        row=default_entry()
-        return Response({"default":selection_of(row) if row else None,"entries":[{"id":entry_id(e),"driver":e["driver"],
-            "model":e["model"],"label":e.get("name",e["model"]),"efforts":e["efforts"],"billing":e["billing"],
-            "default":bool(e.get("default"))} for e in entries()]})
+        rows=usable_entries(request.user)
+        row=default_entry(request.user)
+        chat_id=request.query_params.get("chat")
+        context_tokens=0
+        if chat_id:
+            chat=_chat(request.user,chat_id)
+            last=chat.turns.filter(state="completed").order_by("-sequence").first()
+            context_tokens=last.context_tokens if last else 0
+        from django_core_micha.ai_prices import price_usage
+        converter=_catalogue_hook("COST_TO_TOKENS")
+        medium_costs={entry_id(e):price_usage(e["model"],input_tokens=context_tokens,output_tokens=800) for e in rows}
+        ranked=sorted(medium_costs.values())
+        def relative(cost):
+            if len(ranked)<=1:return 1
+            rank=ranked.index(cost)
+            return min(3,1+(rank*3//len(ranked)))
+        shaped=[]
+        for e in rows:
+            estimates={}
+            for effort,output in (("low",300),("medium",800),("high",2000),("max",5000)):
+                if effort not in e["efforts"]:continue
+                low_cost=price_usage(e["model"],input_tokens=context_tokens,output_tokens=output//2)
+                high_cost=price_usage(e["model"],input_tokens=context_tokens,output_tokens=output*2)
+                if converter:
+                    try: low,high=int(converter(request.user,low_cost)),int(converter(request.user,high_cost));unit="tokens"
+                    except Exception: low,high,unit=relative(medium_costs[entry_id(e)]),relative(medium_costs[entry_id(e)]),"level"
+                else: low,high,unit=relative(medium_costs[entry_id(e)]),relative(medium_costs[entry_id(e)]),"level"
+                estimates[effort]={"min":low,"max":high,"unit":unit}
+            shaped.append({"id":entry_id(e),"driver":e["driver"],"model":e["model"],"label":e.get("name",e["model"]),
+                "provider":{"claude_cli":"claude_code","anthropic_api":"anthropic","openai_api":"openai"}[e["driver"]],
+                "level":model_level(e),"efforts":e["efforts"],"billing":e["billing"],"default":bool(e.get("default")),"estimate":estimates})
+        return Response({"default":selection_of(row) if row else None,"entries":shaped})
+
+def _catalogue_hook(name):
+    from .hooks import _hook
+    return _hook(name)
 
 class AvailabilityView(APIView):
     permission_classes=[IsAuthenticated]
@@ -81,12 +114,12 @@ class ChatListCreateView(APIView):
         if set(body)-{"title","scope","driver","model","effort"}: return _problem("invalid_request")
         scope=body.get("scope","")
         if not isinstance(scope,str) or len(scope)>255 or not can_access_scope(request.user,scope): return _problem("access_lost",403)
-        selection=default_entry()
+        selection=default_entry(request.user)
         driver=body.get("driver",selection.get("driver") if selection else "")
         model=body.get("model",selection.get("model") if selection else "")
         effort=body.get("effort",(selection.get("efforts") or ["medium"])[0] if selection else "medium")
         if driver and model:
-            try: validate(driver,model,effort)
+            try: validate(driver,model,effort,request.user)
             except ValueError: return _problem("invalid_selection")
         title=body.get("title","New chat")
         if not isinstance(title,str) or not title.strip() or len(title)>200: return _problem("invalid_title")
@@ -117,7 +150,7 @@ class ChatDetailView(APIView):
             chat.archived_at=timezone.now() if body["archived"] else None
         if set(body)&{"driver","model","effort"}:
             driver=body.get("driver",chat.selected_driver); model=body.get("model",chat.selected_model); effort=body.get("effort",chat.selected_effort)
-            try: validate(driver,model,effort)
+            try: validate(driver,model,effort,request.user)
             except ValueError: return _problem("invalid_selection")
             chat.selected_driver,chat.selected_model,chat.selected_effort=driver,model,effort
         chat.save(); return Response(payload(chat))
@@ -140,4 +173,7 @@ class TurnsView(APIView):
             except Exception: return _problem("invalid_cursor")
         rows=list(qs.order_by("-sequence")[:limit+1]); more=len(rows)>limit; rows=rows[:limit]; rows.reverse()
         nxt=encode_cursor({"sequence":rows[0].sequence},context) if more and rows else None
-        return Response({"results":[turn_payload(row,chat) for row in rows],"next":nxt,"has_more":more})
+        result={"results":[turn_payload(row,chat) for row in rows],"next":nxt,"has_more":more}
+        if not request.query_params.get("cursor"):
+            result["summary"]=summary_payload(chat)
+        return Response(result)

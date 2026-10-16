@@ -14,9 +14,12 @@
 - `DCM_ASSISTANT_AFTER_TURN(chat, user, turn, text) -> None | str | AfterTurnResult`; may replace the saved answer and return app frames. `AfterTurnResult` has `text`, `frames`, and optional `repair` feedback. A repair asks the core to make a follow-up provider call; after `max_repair_rounds` the hook result is used as fallback (its text, or the last raw answer). each frame has `name` and JSON-serialisable `payload`.
 - `DCM_ASSISTANT_AVAILABILITY(user, scope) -> None | str`; a non-empty reason code makes the scope unavailable.
 - `DCM_ASSISTANT_TURN_VALIDITY(chat, user, turn) -> bool`; checked during a running provider turn.
+- `DCM_ASSISTANT_USAGE_HOOK(chat, user, turn, usage)`; optional, called after a turn finishes when usage was reported. `usage` contains `kind` (`reply`), `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd_micros`, and `context_tokens`. Hook failures are logged by exception class and do not affect the turn.
+- `DCM_ASSISTANT_ENTRY_ALLOWED(user, entry) -> bool`; optional catalogue filter, default allow. Provider availability is also required. `DCM_ASSISTANT_MODEL_LEVELS` maps model ids to `top|best|balanced|fast`; `DCM_ASSISTANT_DEFAULT_LEVEL` defaults to `balanced`.
+- `DCM_ASSISTANT_COST_TO_TOKENS(user, cost_usd_micros) -> int`; optional conversion for picker estimates.
 - `DCM_ASSISTANT_PROMPT_VERSION`: optional integer or string. Changing it rebuilds the next Claude CLI session.
 - `DCM_ASSISTANT_CATALOGUE`: list of `{driver, model, name, efforts, billing, default}` where driver is `claude_cli`, `openai_api`, or `anthropic_api`; effort is from `low|medium|high|max`; billing is `subscription|pay_per_use`; exactly one entry has `default: true`.
-- `DCM_ASSISTANT_LIMITS`: optional mapping overriding `frame_rate_window`, `frame_rate_count`, `max_concurrent_turns`, `max_turns_per_user`, `max_message_length`, `max_prompt_bytes`, `max_output_bytes`, `provider_timeout`, `idle_timeout`, `heartbeat_seconds`, `stale_turn_seconds`, `max_tool_calls`, `access_recheck_seconds` (default 1), `session_rebuild_tokens` (default 200000), `max_client_context_bytes` (default 65536), and `max_repair_rounds` (default 2).
+- `DCM_ASSISTANT_LIMITS`: optional mapping overriding `frame_rate_window`, `frame_rate_count`, `max_concurrent_turns`, `max_turns_per_user`, `max_message_length`, `max_prompt_bytes`, `max_output_bytes`, `provider_timeout`, `idle_timeout`, `heartbeat_seconds`, `stale_turn_seconds`, `max_tool_calls`, `access_recheck_seconds` (default 1), `session_rebuild_tokens` (default 200000), `max_client_context_bytes` (default 65536), `max_repair_rounds` (default 2), `context_limit_tokens` (default 40000), and `summary_keep_turns` (default 6).
 - Deployment credential settings: `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`. Each turn invokes `resolve_credential(user, driver)` once. Per-user credentials are deferred. API calls reserve and settle through extraction's cost guard; reservation denial is `quota_exceeded`.
 
 `DCM_ASSISTANT_STRUCTURED_TURNS=True` suppresses `delta` frames and sends only the final answer.
@@ -29,13 +32,13 @@ All paths below are relative to the mount prefix. Every endpoint requires authen
 
 | Method and path | Contract |
 | --- | --- |
-| `GET /assistant/catalogue/` | `{ "default": {"entry": entry_id, "effort": effort}|null, "entries": [entry] }`. Entry: `{id, driver, model, label, efforts, billing, default}` where `id` is `"<driver>:<model>"` (stable, used as the picker key) and `label` is the catalogue display name. |
+| `GET /assistant/catalogue/?chat=<id>` | `{ "default": {"entry": entry_id, "effort": effort}|null, "entries": [entry] }`. Entries are limited to configured providers and entries allowed for the user. Entry: `{id, driver, model, label, provider, level, efforts, billing, default, estimate}` where `id` is `"<driver>:<model>"`, provider is `anthropic|openai|claude_code`, level is `top|best|balanced|fast`, and estimate maps each supported effort to `{min,max,unit}`. Unit is `tokens` with the cost conversion hook, otherwise `level` (relative 1–3). A chat query uses its latest context size; otherwise context is zero. |
 | `GET /assistant/status/?scope=<scope>` | When the availability hook returns a reason: `{ "status":"unavailable", "reason":<app code>, "providers":{...} }`; otherwise the provider status contract below applies. A scope the user may not access answers 404. |
 | `GET /assistant/status/` | `{ "status": "available"|"not_configured", "providers": { "claude_cli": "available"|"not_configured", "openai_api": ..., "anthropic_api": ... } }`; `status` is `available` when any provider is usable. |
 | `GET /assistant/chats/?cursor=&limit=&archived=false&scope=` | `{ "results": [chat], "next": string|null, "has_more": bool }`; optional scope filters the list and must pass scope permission (otherwise 404). The cursor is bound to scope. |
 | `POST /assistant/chats/` | JSON `{title?, scope?, driver?, model?, effort?}`; returns chat, 201. Omitted selection uses catalogue default and its first allowed effort. |
 | `GET/PATCH/DELETE /assistant/chats/{chat_id}/` | PATCH accepts title, archived boolean, and/or a selection, either `{"selection": {"entry": entry_id, "effort": effort}}` (the surface form) or `driver`/`model`/`effort`; an entry outside the catalogue or an effort it does not allow returns 400 `invalid_selection`. Restore an archived chat with `{"archived":false}`. Other archived writes return 409 `archived`. DELETE returns 204 and removes the CLI session directory. |
-| `GET /assistant/chats/{chat_id}/turns/?cursor=&limit=` | `{ "results": [turn], "next": string|null, "has_more": bool }`, oldest-to-newest within each page. |
+| `GET /assistant/chats/{chat_id}/turns/?cursor=&limit=` | `{ "results": [turn], "next": string|null, "has_more": bool }`, oldest-to-newest within each page; the first page also has `summary` (`{up_to_seq,text,created_at}` or null). |
 
 Shared-scope access follows this rule table (scope permission is required in every row):
 
@@ -44,9 +47,9 @@ Shared-scope access follows this rule table (scope permission is required in eve
 | List, read, send, rename, re-select, archive, restore | Any user allowed in the scope | Creator |
 | Delete | Creator only; other viewers receive 403 `forbidden` | Creator |
 
-Turn payloads in shared scopes include `sender_id`. The sender owns credential and cost attribution. Shared WebSocket frames are group-delivered and each socket rechecks its own scope access before delivery. A `stop` frame cancels only the turn started on that same connection.
+Turn payloads in shared scopes include `sender_id`. The sender owns credential and cost attribution. Usage contains normalized non-cached `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd_micros` (integer micro-USD), and `context_tokens` (prompt tokens from the last provider call). Shared WebSocket frames are group-delivered and each socket rechecks its own scope access before delivery. A `stop` frame cancels only the turn started on that same connection.
 
-Chat JSON fields: `id`, `scope`, `title`, `title_source`, `archived_at`, `driver`, `model`, `effort`, `selection` (`{entry, effort}` or null when the stored driver/model is no longer in the catalogue), `created_at`, `updated_at`. Turn JSON fields: `id`, `seq`, `user_text`, `assistant_text`, `state`, `error_code`, `sources`, `driver`, `model`, `effort`, `usage`, `billing_source`. Timestamps are ISO-8601 UTC strings. Usage has `input_tokens` and `output_tokens` when reported.
+Chat JSON fields: `id`, `scope`, `title`, `title_source`, `archived_at`, `driver`, `model`, `effort`, `selection` (`{entry, effort}` or null when the stored driver/model is no longer in the catalogue), `created_at`, `updated_at`. Turn JSON fields: `id`, `seq`, `user_text`, `assistant_text`, `state`, `error_code`, `sources`, `driver`, `model`, `effort`, `usage`, `billing_source`. Timestamps are ISO-8601 UTC strings. Usage always carries `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd_micros`, and `context_tokens`, with zero values when the provider omits details.
 
 Cursors are opaque Django-signed values with a one-hour lifetime. Their signed body binds the cursor to the endpoint kind, owner, chat (for turn pages), archive filter and page size. Clients must pass the returned cursor unchanged; malformed, expired, tampered or cross-query cursors return HTTP 400 `{ "code":"invalid_cursor", "error":"invalid_cursor" }`.
 
@@ -66,13 +69,14 @@ Client frames:
 Server frames:
 
 ```json
-{"type":"history","chat_id":"uuid","turns":[turn]}
+{"type":"history","chat_id":"uuid","turns":[turn],"summary":{"up_to_seq":3,"text":"...","created_at":"..."}}
 {"type":"delta","text":"partial answer"}
 {"type":"tool","phase":"start","name":"tool_name","label":"Searching"}
 {"type":"tool","phase":"end","name":"tool_name","label":"Searching","sources":[{"label":"Document","reference":"ref"}]}
 {"type":"turn","turn":{"id":"uuid","seq":1,"user_text":"...","assistant_text":"...","state":"completed","error_code":null,"sources":[],"driver":"openai_api","model":"...","effort":"medium","usage":{"input_tokens":1,"output_tokens":1},"billing_source":"deployment"}}
 {"type":"notice","code":"history_rebuilt"}
 {"type":"notice","code":"history_trimmed","left_out":2}
+{"type":"notice","code":"summarised","up_to_seq":3}
 {"type":"app","name":"change_proposals","payload":{}}
 {"type":"error","code":"quota_exceeded"}
 ```

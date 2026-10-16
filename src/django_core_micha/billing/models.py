@@ -44,3 +44,17 @@ class AICostRecord(models.Model):
     provider=models.CharField(max_length=80); model=models.CharField(max_length=120); user=models.ForeignKey(User,null=True,blank=True,on_delete=models.SET_NULL)
     input_tokens=models.PositiveBigIntegerField(default=0); output_tokens=models.PositiveBigIntegerField(default=0); cache_tokens=models.PositiveBigIntegerField(default=0); cost_usd_micros=models.PositiveBigIntegerField()
     purpose=models.CharField(max_length=120); reference=models.CharField(max_length=255,blank=True); app=models.CharField(max_length=80,blank=True,default="",db_index=True); created_at=models.DateTimeField(default=timezone.now)
+
+class Purchase(models.Model):
+    KINDS=[(x,x) for x in ("subscription","team_package","token_package")]
+    STATUSES=[(x,x) for x in ("active","withdrawn")]
+    user=models.ForeignKey(User,on_delete=models.CASCADE,related_name="billing_purchases")
+    kind=models.CharField(max_length=24,choices=KINDS); plan_key=models.CharField(max_length=40)
+    stripe_object_id=models.CharField(max_length=255,unique=True); stripe_payment_intent_id=models.CharField(max_length=255,blank=True)
+    stripe_invoice_id=models.CharField(max_length=255,blank=True); amount_paid_cents=models.PositiveBigIntegerField(); currency=models.CharField(max_length=8)
+    billing_country=models.CharField(max_length=2,blank=True); has_business_tax_id=models.BooleanField(default=False)
+    purchased_at=models.DateTimeField(); term_start=models.DateTimeField(null=True,blank=True); term_end=models.DateTimeField(null=True,blank=True)
+    grant_references=models.JSONField(default=list); tokens_granted=models.PositiveBigIntegerField(default=0)
+    status=models.CharField(max_length=16,choices=STATUSES,default="active"); withdrawn_at=models.DateTimeField(null=True,blank=True)
+    refund_cents=models.PositiveBigIntegerField(null=True,blank=True); stripe_refund_id=models.CharField(max_length=255,blank=True)
+    withdrawal_note=models.TextField(blank=True); withdrawal_email_sent=models.BooleanField(default=False)

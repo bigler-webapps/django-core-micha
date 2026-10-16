@@ -25,7 +25,7 @@ pytestmark = pytest.mark.django_db
 @pytest.fixture(autouse=True)
 def catalogue_settings():
     with override_settings(DCM_ASSISTANT_CATALOGUE=[{"driver":"openai_api","model":"gpt-4o-mini","name":"Mini",
-        "efforts":["low","medium","high","max"],"billing":"subscription","default":True}]):
+        "efforts":["low","medium","high","max"],"billing":"subscription","default":True}],OPENAI_API_KEY="sk-test-provider-configured"):
         yield
 
 @pytest.fixture

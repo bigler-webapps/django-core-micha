@@ -33,6 +33,8 @@ class AssistantTurn(models.Model):
     effort = models.CharField(max_length=12, blank=True)
     billing_source = models.CharField(max_length=24, default="deployment")
     usage = models.JSONField(default=dict, blank=True)
+    cost_usd_micros = models.BigIntegerField(default=0)
+    context_tokens = models.PositiveIntegerField(default=0)
     tool_trace = models.JSONField(default=list, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -41,3 +43,15 @@ class AssistantTurn(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=("chat","sequence"), name="dcm_asst_chat_seq_unique"), models.UniqueConstraint(fields=("chat",), condition=models.Q(state="generating"), name="dcm_asst_one_generating")]
         indexes = [models.Index(fields=("chat", "-sequence"), name="dcm_asst_turn_seq_idx")]
+
+class AssistantSummary(models.Model):
+    chat = models.ForeignKey(AssistantChat, on_delete=models.CASCADE, related_name="summaries")
+    up_to_sequence = models.PositiveIntegerField()
+    text = models.TextField()
+    usage = models.JSONField(default=dict, blank=True)
+    cost_usd_micros = models.BigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("chat", "up_to_sequence"), name="dcm_asst_summary_range_unique")]
+        indexes = [models.Index(fields=("chat", "-up_to_sequence"), name="dcm_asst_summary_latest_idx")]

@@ -10,7 +10,7 @@ from django_core_micha.assistant.views import ChatListCreateView,ChatDetailView,
 pytestmark=pytest.mark.django_db
 @pytest.fixture(autouse=True)
 def settings_shared():
- with override_settings(DCM_ASSISTANT_CATALOGUE=[{"driver":"openai_api","model":"m","efforts":["low","high"],"billing":"subscription","default":True}],DCM_ASSISTANT_SCOPE_PERMISSION=lambda u,s: s!="denied",DCM_ASSISTANT_SHARED_SCOPE=lambda s:s=="shared"): yield
+ with override_settings(DCM_ASSISTANT_CATALOGUE=[{"driver":"openai_api","model":"m","efforts":["low","high"],"billing":"subscription","default":True}],DCM_ASSISTANT_SCOPE_PERMISSION=lambda u,s: s!="denied",DCM_ASSISTANT_SHARED_SCOPE=lambda s:s=="shared",OPENAI_API_KEY="sk-test-provider-configured"): yield
 @pytest.fixture
 def users(): return [get_user_model().objects.create_user(username=f"shared-{i}",password="pw") for i in range(3)]
 def req(view,method,user,*args,data=None,query=None,**kwargs):

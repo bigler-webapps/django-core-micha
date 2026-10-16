@@ -15,6 +15,7 @@ from .hooks import availability_reason, can_access_scope, is_shared_scope, valid
 from .access import can_view_chat
 from .limits import get_limit
 from .models import AssistantChat
+from .history import summary_payload
 from .turns import AccessLost, reconcile_interrupted, run_turn, turn_payload
 
 class CanAccessChatWs(WsPermission):
@@ -36,7 +37,8 @@ class ChatConsumer(BaseSecureConsumer, AsyncJsonWebsocketConsumer):
         self.frames=deque(); self.task=None
         await sync_to_async(reconcile_interrupted)(self.chat)
         rows=await sync_to_async(list)(self.chat.turns.order_by("sequence"))
-        await self.send_json({"type":"history","chat_id":str(self.chat.pk),"turns":[turn_payload(t,self.chat) for t in rows]})
+        await self.send_json({"type":"history","chat_id":str(self.chat.pk),"turns":[turn_payload(t,self.chat) for t in rows],
+            "summary":await sync_to_async(summary_payload)(self.chat)})
         self.group_name = f"dcm_assistant_chat_{self.chat.pk}"
         self.shared_group = bool(self.channel_layer and is_shared_scope(self.chat.scope))
         self._last_group_access = 0.0

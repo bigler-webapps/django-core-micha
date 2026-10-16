@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.5.0] — 2026-10-16
+
+### Added
+
+DCM-CHAT-13 (assistant): usage and cost per reply for every driver (`claude_cli`, `openai_api`, `anthropic_api`) with normalised
+usage (input, output, cache read, cache write); shared price table `django_core_micha.ai_prices` (`AI_MODEL_PRICES_USD_PER_MILLION`,
+long-prompt tiers, incomplete rows fall back to the legacy rates); `AssistantTurn.cost_usd_micros` / `context_tokens`; optional
+`DCM_ASSISTANT_USAGE_HOOK`; automatic summary of long chats above `context_limit_tokens` (`AssistantSummary`, the summary is treated as
+untrusted data in the prompt, its cost is recorded, `summarised` notice, shown in history); model levels and picker data with
+per-user filtering and cost estimates. Cache tokens are now priced in the billing cost record (closes the limit of 3.4.0).
+Migrations `dcm_assistant` 0004, 0005.
+
+DCM-BILL-3 (billing): EU/EEA withdrawal. `Purchase` record per first payment (subscription, team package, token package),
+`eligibility()` (EU/EEA country, no business tax ID, 14 days), proportional `refund_amount()` (larger of time and token share),
+`withdraw()` as one idempotent operation (access ends, remaining tokens zeroed, Stripe refund with idempotency key, confirmation e-mail
+after commit), endpoints `GET withdrawal/`, `GET withdrawal/<id>/preview/`, `POST withdrawal/<id>/`, `reverse_debit()` for token
+credit-back, `charge.refunded` recorded as a no-op, a withdrawn purchase is never reopened by later events. Setting
+`DCM_BILLING_WITHDRAWAL_ENABLED`. Migration `dcm_billing` 0002. Contract: `docs/design/billing.md`.
+
 ## [3.4.0] — 2026-10-16
 
 ### Added

@@ -12,7 +12,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .config import load_billing_config
-from .models import BillingCustomer, StripePrice, Subscription, TeamPackage
+from .models import BillingCustomer, StripePrice, Subscription, TeamPackage, Purchase, TokenEntry
 from .services import credit_purchase, grant_tokens
 
 
@@ -200,6 +200,9 @@ def _upsert_subscription(obj, *, user=None):
         return None
     if metadata.get("app") != getattr(settings, "DCM_BILLING_APP", ""):
         return None  # the subscription itself must carry this app
+    # the row lock waits for a running withdrawal, so a concurrent event never regrants after it
+    if Purchase.objects.select_for_update().filter(stripe_object_id=sid, status="withdrawn").exists():
+        return Subscription.objects.filter(stripe_subscription_id=sid).first()
     plan_key = metadata.get("plan_key") or ""
     status = data.get("status", "incomplete")
     start, end = _period(data)
@@ -248,6 +251,8 @@ def process_stripe_event(event):
     kind = event.get("type", "")
     obj = ((event.get("data") or {}).get("object") or {})
     obj = _dict(obj)
+    if kind == "charge.refunded":
+        return "processed"  # recorded only; our own refund must never change entitlements
     metadata = _event_app_and_metadata(kind, obj)
     if metadata.get("app") != getattr(settings, "DCM_BILLING_APP", ""):
         return "ignored"
@@ -261,7 +266,17 @@ def process_stripe_event(event):
         if plan.kind == "subscription":
             sid = obj.get("subscription")
             if sid:
-                _upsert_subscription(_stripe().Subscription.retrieve(sid), user=user)
+                remote = _dict(_stripe().Subscription.retrieve(sid))
+                sub = _upsert_subscription(remote, user=user)
+                inv = remote.get("latest_invoice") or {}
+                if isinstance(inv, str):
+                    try: inv = _dict(_stripe().Invoice.retrieve(inv))
+                    except Exception: inv = {}
+                if obj.get("payment_status") in ("paid", "no_payment_required"):  # a delayed payment creates it on the success event
+                  _create_purchase(obj, event, user, plan, "subscription", sid,
+                    payment_intent=((inv.get("payment_intent") or {}).get("id") if isinstance(inv.get("payment_intent"),dict) else inv.get("payment_intent")) or obj.get("payment_intent"),
+                    invoice_id=inv.get("id") or "", term_start=_utc(_period(remote)[0]), term_end=_utc(_period(remote)[1]),
+                    grant_refs=[f"stripe:{sid}:{int(_period(remote)[0] or _period(remote)[1] or 0)}"] if _period(remote)[1] else [], tokens=plan.token_allowance)
         elif plan.kind == "team_package":
             if obj.get("payment_status") not in ("paid", "no_payment_required"):
                 return "ignored"  # seats and tokens only after the payment has succeeded
@@ -276,9 +291,13 @@ def process_stripe_event(event):
             if created and allowance:
                 grant_tokens(package, allowance, expires_at=ends,
                     reference=f"stripe:team:{ref}", purpose=f"plan:{plan.key}")
+            _create_purchase(obj,event,user,plan,"team_package",str(ref),payment_intent=obj.get("payment_intent"),term_start=starts,term_end=ends,grant_refs=[f"stripe:team:{ref}"] if allowance else [],tokens=allowance)
         else:
             if obj.get("payment_status") in ("paid", "no_payment_required"):
-                credit_purchase(user, _bought(metadata, "tokens", plan.tokens), reference=f"stripe:checkout:{obj.get('id')}")
+                ref=f"stripe:checkout:{obj.get('id')}"
+                tokens=_bought(metadata, "tokens", plan.tokens)
+                credit_purchase(user, tokens, reference=ref)
+                _create_purchase(obj,event,user,plan,"token_package",str(obj.get("payment_intent") or obj.get("id")),payment_intent=obj.get("payment_intent"),grant_refs=[ref],tokens=tokens)
     elif kind == "invoice.paid":
         sub_id = _invoice_subscription_id(obj)
         if sub_id:
@@ -292,3 +311,19 @@ def process_stripe_event(event):
     else:
         return "ignored"
     return "processed"
+
+def _create_purchase(obj,event,user,plan,kind,object_id,*,payment_intent=None,invoice_id="",term_start=None,term_end=None,grant_refs=None,tokens=0):
+    details=obj.get("customer_details") or {}
+    address=details.get("address") or {}
+    tax_ids=details.get("tax_ids") or []
+    created=_utc(event.get("created")) or _utc(obj.get("created")) or timezone.now()
+    try: amount=max(0,int(obj["amount_total"])) if obj.get("amount_total") is not None else int(plan.amount_cents)
+    except (TypeError,ValueError): amount=int(plan.amount_cents)
+    existing=Purchase.objects.filter(stripe_object_id=str(object_id)).first()
+    if existing and not existing.stripe_payment_intent_id and payment_intent and existing.status=="active":
+        existing.stripe_payment_intent_id=str(payment_intent); existing.save(update_fields=("stripe_payment_intent_id",))
+    return Purchase.objects.get_or_create(stripe_object_id=str(object_id),defaults={
+        "user":user,"kind":kind,"plan_key":plan.key,"stripe_payment_intent_id":str(payment_intent or ""),"stripe_invoice_id":str(invoice_id or ""),
+        "amount_paid_cents":amount,"currency":(obj.get("currency") or load_billing_config().currency).lower(),"billing_country":(address.get("country") or "").upper(),
+        "has_business_tax_id":bool(tax_ids),"purchased_at":created,"term_start":term_start,"term_end":term_end,
+        "grant_references":grant_refs or [],"tokens_granted":max(0,int(tokens or 0))})[0]

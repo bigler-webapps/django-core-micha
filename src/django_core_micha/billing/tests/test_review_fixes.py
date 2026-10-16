@@ -40,10 +40,10 @@ def test_ai_cost_record_keeps_provider_model_usage_cost_and_reference():
     with override_settings(DCM_BILLING_APP="maana"):
         row = record_ai_call(user=user, provider="openai_api", model="gpt-4o-mini", input_tokens=2000, output_tokens=1000,
                              cache_tokens=300, purpose="chat", reference="turn-1")
-    # gpt-4o-mini in the default table: 0.015 + 0.060 cents per 1k tokens -> 2 * 0.015 + 1 * 0.060 = 0.09 cents = 900 micro-USD
+    # gpt-4o-mini (legacy table): $0.15 / $0.60 per million -> 2000 * 0.15 + 1000 * 0.60 = 900 micro-USD, plus 300 cache tokens at the input rate = 45
     assert (row.app, row.provider, row.model, row.input_tokens, row.output_tokens, row.cache_tokens, row.purpose, row.reference) == \
         ("maana", "openai_api", "gpt-4o-mini", 2000, 1000, 300, "chat", "turn-1")
-    assert row.cost_usd_micros == 900
+    assert row.cost_usd_micros == 945
 
 
 def test_a_reused_debit_reference_with_another_amount_is_refused():

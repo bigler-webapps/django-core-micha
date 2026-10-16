@@ -2,6 +2,8 @@
 from django.conf import settings
 from django.core.checks import Error, register
 from django.core.exceptions import ImproperlyConfigured
+from .availability import availability
+from .hooks import _hook
 
 DRIVERS = {"claude_cli", "openai_api", "anthropic_api"}
 EFFORTS = {"low", "medium", "high", "max"}
@@ -10,9 +12,34 @@ def entries():
     rows = getattr(settings, "DCM_ASSISTANT_CATALOGUE", ()) or ()
     return [dict(row) for row in rows]
 
-def default_entry():
-    rows = entries()
-    return next((row for row in rows if row.get("default")), rows[0] if rows else None)
+DEFAULT_LEVELS = {"claude-fable-5-1": "top", "gpt-6-astra": "top", "claude-opus-5-5": "best",
+                  "claude-sonnet-5-5": "balanced", "gpt-6.1-sol": "balanced",
+                  "claude-haiku-5-5": "fast", "gpt-6-luna": "fast"}
+
+def model_level(row):
+    value = row.get("level")
+    if value is None:
+        value = (getattr(settings, "DCM_ASSISTANT_MODEL_LEVELS", {}) or {}).get(row["model"],
+                 DEFAULT_LEVELS.get(row["model"], "balanced"))
+    return value if value in {"top", "best", "balanced", "fast"} else "balanced"
+
+def entry_usable(user, row):
+    if availability().get("providers", {}).get(row["driver"]) != "available":
+        return False
+    try:
+        fn = _hook("ENTRY_ALLOWED")
+        return bool(fn(user, row)) if fn else True
+    except Exception:
+        return False
+
+def usable_entries(user):
+    return [row for row in entries() if entry_usable(user, row)]
+
+def default_entry(user=None):
+    rows = usable_entries(user) if user is not None else entries()
+    level = getattr(settings, "DCM_ASSISTANT_DEFAULT_LEVEL", "balanced")
+    return next((row for row in rows if model_level(row) == level),
+                next((row for row in rows if row.get("default")), rows[0] if rows else None))
 
 def entry_id(row):
     return f"{row['driver']}:{row['model']}"
@@ -24,9 +51,9 @@ def selection_of(row, effort=None):
 def entry_by_id(value):
     return next((row for row in entries() if entry_id(row) == value), None)
 
-def validate(driver, model, effort):
+def validate(driver, model, effort, user=None):
     for row in entries():
-        if row.get("driver") == driver and row.get("model") == model and effort in row.get("efforts", []):
+        if row.get("driver") == driver and row.get("model") == model and effort in row.get("efforts", []) and (user is None or entry_usable(user, row)):
             return row
     raise ValueError("invalid_selection")
 

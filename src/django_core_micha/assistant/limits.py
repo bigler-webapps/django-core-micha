@@ -10,6 +10,7 @@ DEFAULTS = {
     "max_client_context_bytes": 65536, "max_repair_rounds": 2,
     "access_recheck_seconds": 1,
     "session_rebuild_tokens": 200_000,
+    "context_limit_tokens": 40_000, "summary_keep_turns": 6,
 }
 
 def get_limit(name):

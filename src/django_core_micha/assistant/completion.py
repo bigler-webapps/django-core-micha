@@ -18,7 +18,7 @@ class CompletionResult:
     text: str
     usage: dict
 
-async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=None, effort=None):
+async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=None, effort=None, purpose="completion"):
     if not isinstance(prompt, str) or not prompt.strip(): raise DriverError("invalid_output")
     if len(prompt.encode("utf-8")) + len((system or "").encode("utf-8")) > get_limit("max_prompt_bytes"): raise DriverError("prompt_too_long")
     if entry is not None:
@@ -58,8 +58,11 @@ async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=N
                 from asgiref.sync import sync_to_async
                 from django_core_micha.billing.services import record_ai_call
                 await sync_to_async(record_ai_call, thread_sensitive=True)(user=user, provider=driver, model=model, input_tokens=int(usage.get("input_tokens",0) or 0),
-                    output_tokens=int(usage.get("output_tokens",0) or 0), cache_tokens=int(usage.get("cache_tokens",0) or 0),
-                    purpose="completion", reference=str(getattr(entry,"pk","")) or f"completion:{__import__('uuid').uuid4()}")
+                    output_tokens=int(usage.get("output_tokens",0) or 0),
+                    cache_read_tokens=int(usage.get("cache_read_tokens",0) or 0),
+                    cache_write_tokens=int(usage.get("cache_write_tokens",0) or 0),
+                    cache_tokens=int(usage.get("cache_tokens",0) or 0),
+                    purpose=purpose, reference=str(getattr(entry,"pk","")) or f"completion:{__import__('uuid').uuid4()}")
             except Exception:
                 import logging
                 logging.getLogger(__name__).error("Completion billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
