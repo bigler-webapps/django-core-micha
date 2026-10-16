@@ -12,7 +12,7 @@ Expected outcome: every reply stores its tokens and cost; long chats are summari
 
 ### Settled decisions (operator, 2026-10-16)
 
-1. **Usage for every driver:** each reply stores input, output, cache-write and cache-read tokens and the cost in USD (cost table), including the `claude_cli` driver.
+1. **Usage for every driver:** each reply stores input, output, cache-write and cache-read tokens and the cost in USD, including the `claude_cli` driver. The cost table carries per model separate rates for input, output, cache read and cache write, and size-dependent rates where a provider has them (e.g. Haiku 5.5 above 100K prompt tokens). Operator-supplied rates 2026-10-16, USD per million tokens (input / output / cache read / cache write): Fable 5.1 10 / 50 / 0.25 / 12.50; Opus 5.5 4 / 20 / 0.20 / 5; Sonnet 5.5 2 / 10 / 0.10 / 2.50; Haiku 5.5 ≤100K 0.10 / 0.50 / 0.01 / 0.125, >100K 0.50 / 2.50 / 0.05 / 0.625; GPT-6 Astra 10 / 50; GPT-6.1 Sol 2 / 10 (cached input 0.10 per OpenAI's announcement); GPT-6 Luna 0.10 / 0.50.
 2. **Summary:** above a context limit (setting, default 40,000 tokens) the older part of the chat is summarised; the most recent turns stay verbatim. The summary keeps what matters for the work: decisions, agreed codes and definitions, open questions, which material was worked on. It is shown in the chat as „Zusammenfassung bis hier" (expandable), and replaces the older turns in what is sent to the provider.
 3. **Current state from lookups:** the summary does not restate the project state; the app's lookup tools provide it fresh.
 4. **Billing hook:** after each reply the core calls an app hook with the recorded usage, so an app can debit tokens (DCM-BILL-1); without the hook nothing changes.
