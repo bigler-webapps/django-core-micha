@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-core-micha"
-version = "3.5.0"
+version = "3.6.0"
 authors = [
   { name="Micha Bigler", email="micha.bigler2@gmail.com" },
 ]
@@ -43,11 +43,12 @@ extraction = [
 push = ["pywebpush"]
 scripts = ["PyYAML"]
 billing = ["stripe>=16", "PyYAML"]
+receipts = ["pillow-heif>=1.8.0"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
 python_files = ["test_*.py"]
-testpaths = ["tests", "src/django_core_micha/notifications/tests", "src/django_core_micha/onboarding/tests", "src/django_core_micha/messaging/tests", "src/django_core_micha/activity/tests", "src/django_core_micha/assistant/tests", "src/django_core_micha/billing/tests"]
+testpaths = ["tests", "src/django_core_micha/notifications/tests", "src/django_core_micha/onboarding/tests", "src/django_core_micha/messaging/tests", "src/django_core_micha/activity/tests", "src/django_core_micha/assistant/tests", "src/django_core_micha/billing/tests", "src/django_core_micha/receipts/tests"]
 asyncio_mode = "auto"
 
 [project.scripts]

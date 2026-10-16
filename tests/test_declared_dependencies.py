@@ -24,6 +24,7 @@ MODULE_TO_DISTRIBUTION = {
     "filetype": "filetype",
     "pywebpush": "pywebpush",
     "stripe": "stripe",
+    "pillow_heif": "pillow-heif",
     "pypdf": "pypdf",
     "openai": "openai",
     "rest_framework": "djangorestframework",
@@ -36,7 +37,7 @@ def _declared_distribution_names() -> set[str]:
         project = tomllib.load(pyproject_file)["project"]
         dependencies = list(project["dependencies"])
         optional_dependencies = project["optional-dependencies"]
-        for extra in ("ai", "extraction", "push", "scripts", "billing"):
+        for extra in ("ai", "extraction", "push", "scripts", "billing", "receipts"):
             dependencies.extend(optional_dependencies[extra])
 
     return {

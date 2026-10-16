@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.6.0] — 2026-10-16
+
+### Added
+
+DCM-RCPT-1: shared receipt recognition, the opt-in app `django_core_micha.receipts` (label `dcm_receipts`, extra `receipts` = pillow-heif,
+together with the `ai` and `extraction` extras). One call reads a file with one or several receipts (core schema with app extension,
+Swiss-focused multilingual prompt, normalisers, positions on the image, HEIC/PDF/upload preparation, account suggestion restricted to the
+app's list, perceptual duplicate hash). It is refused without the user's standing, revocable and audited consent (`ReceiptConsent`,
+migration `dcm_receipts` 0001, `import_consents` for consumer migrations). The spend cap of the extraction module applies to every
+reading; an optional per-user daily count, the central default model `gpt-6-luna`, REST `consent/` and `read/` with stable error codes
+and a deterministic fake reader for local and test environments complete it. Nothing but the consent is stored.
+Contract: `docs/design/receipts.md`.
+
 ## [3.5.0] — 2026-10-16
 
 ### Added
