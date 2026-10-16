@@ -1,5 +1,15 @@
 # Changelog
 
+## [3.8.0] — 2026-10-17
+
+### Added
+
+DCM-RCPT-2: receipt reading sees the request context, and the fallback currency is per app. An extension can define `validate_context` and
+`prompt_for`: the app-validated context (never the raw one) adds text to the prompt of that reading only, a refused context ends the reading
+with `invalid_request` before the count, the file preparation and any provider call, and an extension with `prompt_for` but no validation is
+refused. New setting `DCM_RECEIPTS_FALLBACK_CURRENCY` (default `CHF`, `none` leaves an unreadable currency empty, system check
+`dcm_receipts.E003`). Apps that set nothing behave as in 3.6.0 to 3.7.0. Contract: `docs/design/receipts.md`.
+
 ## [3.7.0] — 2026-10-17
 
 ### Added
