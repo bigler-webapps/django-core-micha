@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.12.0] — 2026-10-17
+
+### Security
+
+DCM-CHAT-14 (closes S434 of the 2026-10-17 audit): aborted assistant turns are charged, not released. In the paid API drivers
+(`anthropic_api`, `openai_api`) a cost reservation is released only when the provider call did not start or the provider definitively rejected it
+as a client error (HTTP 400-499 except 408, 409, 429). Every other abort after the call started (a `stop` frame, task cancellation, generator
+close, timeout, connection loss, 5xx, 408/409/429) is charged at the reserved estimate to the daily cap (`settle_reservation`) and, when
+`django_core_micha.billing` is installed, written once as an `AICostRecord` with purpose `chat_aborted` (shielded from the cancellation in
+flight; a failing write never replaces the original error). A turn that stops early every time can no longer dodge the daily cap. The
+reservation now uses the real output ceiling: new `max_tokens` keyword of `AnthropicDriver.stream` (default `DEFAULT_MAX_OUTPUT_TOKENS` = 8192, the
+value that was already sent); the OpenAI request stays uncapped and reserves the same ceiling. New helpers in `assistant/drivers/base.py`:
+`estimate_tokens`, `release_unstarted`, `charge_aborted`. Normal completion and the caps themselves are unchanged. **Behaviour change for
+consumers:** users are charged (conservatively, the reserved amount) for turns they stop or that fail after the provider call started.
+
 ## [3.11.0] — 2026-10-17
 
 ### Security

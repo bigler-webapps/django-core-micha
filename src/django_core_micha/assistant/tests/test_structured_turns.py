@@ -57,7 +57,7 @@ def test_api_repair_round_reserves_cost_each_call_and_sends_feedback(user,chat,m
     yield NS(type="response.completed",response=NS(usage=NS(input_tokens=2,output_tokens=1),output=[]))
    return events()
  class Client: responses=Responses()
- monkeypatch.setattr(openai_api,"_reserve",lambda user_id,model,size: reservations.append(user_id) or object())
+ monkeypatch.setattr(openai_api,"_reserve",lambda user_id,model,size,*extra: reservations.append(user_id) or object())
  monkeypatch.setattr(openai_api,"settle_reservation",lambda **kw:None); monkeypatch.setattr(openai_api,"release_reservation",lambda **kw:None)
  from django_core_micha.assistant.drivers.openai_api import OpenAIDriver
  monkeypatch.setattr(turns,"resolve_credential",lambda u,d:("key","deployment")); monkeypatch.setattr(turns,"build_system_prompt",lambda c:"system"); monkeypatch.setattr(turns,"tools_for_chat",lambda c:[]); monkeypatch.setattr(turns,"_make_driver",lambda *a:OpenAIDriver(Client()))

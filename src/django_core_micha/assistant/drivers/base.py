@@ -10,6 +10,7 @@ from asgiref.sync import sync_to_async
 
 log = logging.getLogger(__name__)
 _API_KEY_RE = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
 
 def log_provider_error(driver, model, exc):
@@ -62,14 +63,56 @@ def map_effort(driver, effort):
     return effort
 
 
+def estimate_tokens(prompt_bytes, output_tokens=2048):
+    """The token estimate a reservation prices (also what an aborted call is charged)."""
+    return max(1, (prompt_bytes + 1) // 2), int(output_tokens)
+
+
 def _reserve(user_id, model, prompt_bytes, output_tokens=2048):
     from django_core_micha.extraction.cost_guard import AICostLimitExceeded, estimate_cost_cents, reserve_user_budget
-    input_tokens = max(1, (prompt_bytes + 1) // 2)
+    input_tokens, output_tokens = estimate_tokens(prompt_bytes, output_tokens)
     try:
         return reserve_user_budget(user_id=user_id,
             cents=estimate_cost_cents(model=model, input_tokens=input_tokens, output_tokens=output_tokens))
     except AICostLimitExceeded as exc:
         raise DriverError("quota_exceeded") from exc
+
+
+def release_unstarted(reservation):
+    """Release a reservation for a provider call that was never started."""
+    from django_core_micha.extraction.cost_guard import release_reservation
+    release_reservation(reservation=reservation)
+
+
+def _definitively_unbilled(exc):
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and 400 <= status < 500 and status not in {408, 409, 429}
+
+
+async def charge_aborted(reservation, *, user, provider, model, input_tokens_estimate,
+                         output_tokens_estimate, reference, exc):
+    """Settle ambiguous provider work at its reserved estimate and record it once."""
+    from django_core_micha.extraction.cost_guard import settle_reservation
+    try:
+        settle_reservation(reservation=reservation, response=type("R", (), {"usage": Usage(
+            int(input_tokens_estimate), int(output_tokens_estimate))})(), model=model)
+    except Exception as settle_exc:
+        # The provider failure being handled must stay the one that escapes.
+        log.warning("Could not settle aborted AI call (%s)", type(settle_exc).__name__)
+    try:
+        from django.apps import apps
+        if not apps.is_installed("django_core_micha.billing"):
+            return
+        from django_core_micha.billing.services import record_ai_call
+        from asgiref.sync import sync_to_async
+        await asyncio.shield(sync_to_async(record_ai_call, thread_sensitive=True)(
+            user=user, provider=provider, model=model,
+            input_tokens=int(input_tokens_estimate), output_tokens=int(output_tokens_estimate),
+            purpose="chat_aborted", reference=reference,
+        ))
+    except BaseException as record_exc:
+        # Keep the provider exception (including cancellation) as the one that escapes.
+        log.warning("Could not record aborted AI call (%s)", type(record_exc).__name__)
 
 
 def _settle(reservation, model, usage):

@@ -1,6 +1,8 @@
 """Anthropic Messages driver with native tool use and per-call cost admission."""
 import json
-from .base import DriverError, arguments_json, call_with_budget, invoke_tool, map_effort, tool_specs, log_provider_error
+from .base import (DEFAULT_MAX_OUTPUT_TOKENS, DriverError, arguments_json, call_with_budget,
+                   invoke_tool, map_effort, tool_specs, log_provider_error,
+                   release_unstarted, charge_aborted, estimate_tokens, _definitively_unbilled)
 
 
 class AnthropicDriver:
@@ -8,7 +10,8 @@ class AnthropicDriver:
         self.client = client
 
     async def stream(self, *, model, messages, system="", tools=(), user=None, chat=None,
-                     effort="medium", cancel_event=None, max_tool_calls=12, **kwargs):
+                     effort="medium", cancel_event=None, max_tool_calls=12,
+                     max_tokens=DEFAULT_MAX_OUTPUT_TOKENS, **kwargs):
         if self.client is None:
             raise DriverError("not_configured")
         rows = list(messages)
@@ -22,22 +25,31 @@ class AnthropicDriver:
                     raise DriverError("cancelled")
                 async def create():
                     return self.client.messages.stream(model=model, system=system, messages=rows,
-                        max_tokens=8192, tools=specs or None,
+                        max_tokens=max_tokens, tools=specs or None,
                         output_config={"effort": map_effort("anthropic_api", effort)})
                 reservation = None
-                from django_core_micha.extraction.cost_guard import release_reservation, settle_reservation
+                from django_core_micha.extraction.cost_guard import settle_reservation
                 from .base import _reserve
-                reservation = _reserve(getattr(user, "pk", None), model,
-                                       len(json.dumps(rows, ensure_ascii=False).encode()) + len(system.encode()))
+                prompt_bytes = len(json.dumps(rows, ensure_ascii=False).encode()) + len(system.encode())
+                reservation = _reserve(getattr(user, "pk", None), model, prompt_bytes, max_tokens)
+                input_estimate, output_estimate = estimate_tokens(prompt_bytes, max_tokens)
+                started = False
                 try:
+                    started = True
                     stream_context = await create()
                     async with stream_context as stream:
                         async for text in stream.text_stream:
                             yield {"type": "delta", "text": text}
                         msg = await stream.get_final_message()
                     settle_reservation(reservation=reservation, response=msg, model=model)
-                except BaseException:
-                    release_reservation(reservation=reservation)
+                except BaseException as exc:
+                    if not started or _definitively_unbilled(exc):
+                        release_unstarted(reservation)
+                    else:
+                        await charge_aborted(reservation, user=user, provider="anthropic_api",
+                            model=model, input_tokens_estimate=input_estimate,
+                            output_tokens_estimate=output_estimate,
+                            reference=str(getattr(chat, "pk", "") or ""), exc=exc)
                     raise
                 usage = getattr(msg, "usage", None)
                 def value(obj, key):

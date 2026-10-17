@@ -99,6 +99,10 @@ def test_ai_feature_without_extra_names_required_extra(monkeypatch):
 
     blocker = BlockAI()
     monkeypatch.setattr(sys, "meta_path", [blocker, *sys.meta_path])
+    # An earlier test may have imported openai already: a None entry makes the import fail regardless.
+    for name in [key for key in sys.modules if key == "openai" or key.startswith("openai.")]:
+        monkeypatch.setitem(sys.modules, name, None)
+    monkeypatch.setitem(sys.modules, "openai", None)
     with pytest.raises(DriverError, match=r"django-core-micha\[ai\]") as error:
         turns._make_driver("openai_api", "test-credential")
     assert error.value.code == "not_configured"

@@ -1,6 +1,8 @@
 """OpenAI Responses API driver with native function calls."""
 import json
-from .base import DriverError, arguments_json, invoke_tool, map_effort, tool_specs, _reserve, log_provider_error
+from .base import (DEFAULT_MAX_OUTPUT_TOKENS, DriverError, arguments_json, invoke_tool,
+                   map_effort, tool_specs, _reserve, log_provider_error,
+                   release_unstarted, charge_aborted, estimate_tokens, _definitively_unbilled)
 from django_core_micha.extraction.cost_guard import release_reservation, settle_reservation
 
 
@@ -23,11 +25,15 @@ class OpenAIDriver:
             while True:
                 if cancel_event and cancel_event.is_set():
                     raise DriverError("cancelled")
-                reservation = _reserve(getattr(user, "pk", None), model,
-                    len(json.dumps(input_rows, ensure_ascii=False).encode()))
+                prompt_bytes = len(json.dumps(input_rows, ensure_ascii=False).encode())
+                # Responses remains uncapped; reserve using the standard ceiling.
+                reservation = _reserve(getattr(user, "pk", None), model, prompt_bytes, DEFAULT_MAX_OUTPUT_TOKENS)
+                input_estimate, output_estimate = estimate_tokens(prompt_bytes, DEFAULT_MAX_OUTPUT_TOKENS)
                 function_calls = {}
                 final_usage = None
+                started = False
                 try:
+                    started = True
                     stream = await self.client.responses.create(model=model, input=input_rows, stream=True,
                         tools=specs or None, reasoning={"effort": map_effort("openai_api", effort)})
                     async for event in stream:
@@ -54,8 +60,14 @@ class OpenAIDriver:
                     settle_reservation(reservation=reservation, response=type("R", (), {"usage": type("U", (), {
                         "input_tokens": getattr(final_usage, "input_tokens", 0),
                         "output_tokens": getattr(final_usage, "output_tokens", 0)})()})(), model=model)
-                except BaseException:
-                    release_reservation(reservation=reservation)
+                except BaseException as exc:
+                    if not started or _definitively_unbilled(exc):
+                        release_unstarted(reservation)
+                    else:
+                        await charge_aborted(reservation, user=user, provider="openai_api",
+                            model=model, input_tokens_estimate=input_estimate,
+                            output_tokens_estimate=output_estimate,
+                            reference=str(getattr(chat, "pk", "") or ""), exc=exc)
                     raise
                 if final_usage:
                     def value(obj, key, default=0):

@@ -65,6 +65,6 @@ def test_completion_uses_api_cost_guard_for_calling_user(user,monkeypatch):
     yield NS(type="response.completed",response=NS(usage=NS(input_tokens=1,output_tokens=1),output=[]))
    return events()
  monkeypatch.setattr(completion,"resolve_credential",lambda *a:("key","deployment")); monkeypatch.setattr(completion,"_make_driver",lambda *a:OpenAIDriver(NS(responses=Responses())))
- monkeypatch.setattr(openai_api,"_reserve",lambda uid,model,size:reserved.append((uid,model)) or object()); monkeypatch.setattr(openai_api,"settle_reservation",lambda **kw:None); monkeypatch.setattr(openai_api,"release_reservation",lambda **kw:None)
+ monkeypatch.setattr(openai_api,"_reserve",lambda uid,model,size,*extra:reserved.append((uid,model)) or object()); monkeypatch.setattr(openai_api,"settle_reservation",lambda **kw:None); monkeypatch.setattr(openai_api,"release_reservation",lambda **kw:None)
  result=async_to_sync(completion.acomplete)(user,prompt="hello",driver="openai_api",model="m")
  assert result.text=="ok" and reserved==[(user.pk,"m")]
