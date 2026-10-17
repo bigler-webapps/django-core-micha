@@ -32,6 +32,7 @@ from django_core_micha.auth.roles import RolePolicy
 from django_core_micha.auth import services  # <--- Central Logic Import
 from django_core_micha.auth.methods import get_auth_methods
 from django_core_micha.auth.permissions import (
+    can_act_on_user,
     can_manage_signup_qr,
     can_view_auth_policy,
     can_view_users_admin,
@@ -340,6 +341,12 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         # and turned a 404 (foreign/nonexistent id) into a 400.
         instance = self.get_object()
         is_self_edit = instance.pk == request.user.pk
+        if (
+            not is_self_edit
+            and can_view_users_admin(request.user, request=request)
+            and not can_act_on_user(request.user, instance)
+        ):
+            raise PermissionDenied("Permission denied.")
         if is_self_edit and not can_view_users_admin(request.user, request=request):
             self._enforce_safe_profile_fields(request)
             # A non-admin PUT would otherwise require every serializer field
@@ -359,6 +366,12 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         # and apply the refusal only to the explicitly resolved self row.
         instance = self.get_object()
         is_self_edit = instance.pk == request.user.pk
+        if (
+            not is_self_edit
+            and can_view_users_admin(request.user, request=request)
+            and not can_act_on_user(request.user, instance)
+        ):
+            raise PermissionDenied("Permission denied.")
         if is_self_edit and not can_view_users_admin(request.user, request=request):
             raise PermissionDenied(
                 "Cannot delete your own account through this endpoint."

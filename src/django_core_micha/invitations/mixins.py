@@ -12,6 +12,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
 from django_core_micha.auth.permissions import (
+    can_act_on_user,
     has_invite_admin_rights,
     IsInviteAdminOrSuperuser,
 )
@@ -190,5 +191,15 @@ class InviteActionsMixin:
         Nur für Invite-Admins / Superuser.
         """
         user = self.get_object()
+        if not can_act_on_user(request.user, user):
+            return Response(
+                {"code": "Auth.RANK_INSUFFICIENT"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if user.last_login:
+            return Response(
+                {"code": "Auth.USE_PASSWORD_RESET"},
+                status=status.HTTP_409_CONFLICT,
+            )
         url = self._build_frontend_url(request, user, is_new_user=True)
         return Response({"invite_link": url}, status=status.HTTP_200_OK)

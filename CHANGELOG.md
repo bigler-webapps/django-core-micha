@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.9.0] — 2026-10-17
+
+### Security
+
+DCM-AUTH-5 (closes S266 and S276 of the 2026-10-17 audit): rank check for invite links, user edits and deletes. New helper
+`auth.permissions.can_act_on_user(actor, target)`: a superuser may act on anyone, nobody else on a superuser, otherwise the actor's role level
+must be strictly greater than the target's (equal is refused). `BaseUserViewSet.update`/`partial_update`/`destroy` (for a target that is not the
+requester) and `InviteActionsMixin.invite_link` apply it to users/invite admins: they are refused with 403 (`Auth.RANK_INSUFFICIENT` on the invite
+link) and nothing changes. Invite links are only issued for accounts that never logged in (`last_login` empty), for everyone including
+superusers; for any other account the answer is 409 `Auth.USE_PASSWORD_RESET` (the owner uses the self-service reset). **Behaviour change for
+consumers:** invite admins lose the ability to edit, deactivate, delete or get an invite link for accounts of equal or higher rank; apps whose
+invite admins are the top role can no longer manage peers of that level (only superusers can). Actors who are not users admins and reach other
+rows through a consumer's widened `get_queryset()` (jg-ferien org admins, DCM-AUTH-3) are not affected: their power stays governed by the
+consumer's own object permissions. Self-edit rules, role changes (`RolePolicy`) and queryset scoping are unchanged.
+
 ## [3.8.0] — 2026-10-17
 
 ### Added

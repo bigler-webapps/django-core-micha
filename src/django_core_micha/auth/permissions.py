@@ -19,6 +19,17 @@ from django_core_micha.auth.roles import (
     ROLE_LEVEL_0,
 )
 
+
+def can_act_on_user(actor, target) -> bool:
+    """Return whether ``actor`` may administer ``target`` by role rank."""
+    if not actor or not getattr(actor, "is_authenticated", False):
+        return False
+    if getattr(actor, "is_superuser", False):
+        return True
+    if not target or getattr(target, "is_superuser", False):
+        return False
+    return get_role_level_for_user(actor) > get_role_level_for_user(target)
+
 def _admin_policy_satisfied(user, request=None) -> bool:
     if request is None:
         return True
