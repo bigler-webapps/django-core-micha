@@ -64,9 +64,11 @@ def _role_settings(settings, monkeypatch):
         "user": {"level": 1, "label": "User"},
         "manager": {"level": 2, "label": "Manager"},
         "senior": {"level": 3, "label": "Senior"},
+        "principal": {"level": 4, "label": "Principal"},
     }
     settings.DEFAULT_ROLE_CODE = "user"
     settings.INVITE_MIN_ROLE_LEVEL = 2
+    settings.AUTH_POLICY_WRITE_MIN_ROLE_LEVEL = 3
     settings.SECURITY_LEVELS = {"basic": 0, "strong": 1}
     settings.SECURITY_DEFAULT_LEVEL = "basic"
     role_codes = {}
@@ -288,27 +290,163 @@ def test_can_act_on_user_rank_rules(users):
     root_target = users("root-target", "user", superuser=True)
 
     assert can_act_on_user(root, senior) is True
+    assert can_act_on_user(root, root_target) is True
     assert can_act_on_user(manager, root_target) is False
     assert can_act_on_user(senior, manager) is True
+    assert can_act_on_user(senior, senior) is True
     assert can_act_on_user(manager, manager) is False
     assert can_act_on_user(ordinary, manager) is False
     assert can_act_on_user(senior, ordinary) is True
+    assert can_act_on_user(senior, None) is False
     assert can_act_on_user(None, ordinary) is False
 
 
 @pytest.mark.django_db
 def test_non_superuser_cannot_get_an_invite_link_for_themselves(users):
-    manager = users("self-link-manager", "manager")
+    admin = users("self-link-admin", "senior")
+    response = _call_invite(admin, admin)
+    assert response.status_code == 200
+    assert "invite_link" in response.data
+
+    logged_in_admin = users(
+        "self-link-logged-in-admin", "senior", last_login=timezone.now()
+    )
+    response = _call_invite(logged_in_admin, logged_in_admin)
+    assert response.status_code == 409
+    assert response.data == {"code": "Auth.USE_PASSWORD_RESET"}
+
+    manager = users("self-link-manager", "manager", last_login=timezone.now())
     response = _call_invite(manager, manager)
-    assert response.status_code == 403 and response.data == {"code": "Auth.RANK_INSUFFICIENT"}
+    assert response.status_code == 403
+    assert response.data == {"code": "Auth.RANK_INSUFFICIENT"}
 
 
 @pytest.mark.django_db
 def test_the_rank_guard_is_what_decides_between_equal_and_lower_targets(users):
     senior = users("rank-senior", "senior")
     lower = users("rank-lower", "manager")
-    equal = users("rank-equal", "senior")
+    equal = users("rank-equal", "manager")
     assert _call_crud("patch", senior, lower, {"first_name": "Ok"}).status_code == 200
-    assert _call_crud("patch", senior, equal, {"first_name": "No"}).status_code == 403
+    assert _call_crud("patch", senior, equal, {"first_name": "Allowed"}).status_code == 200
     equal.refresh_from_db()
-    assert equal.first_name != "No"
+    assert equal.first_name == "Allowed"
+
+
+@pytest.mark.django_db
+def test_admin_tier_can_manage_equal_rank_and_invite_only_never_logged_in(users):
+    actor = users("admin-peer-actor", "senior")
+    patch_target = users("admin-peer-patch", "senior")
+    response = _call_crud("patch", actor, patch_target, {"first_name": "Changed"})
+    assert response.status_code == 200
+    patch_target.refresh_from_db()
+    assert patch_target.first_name == "Changed"
+
+    deactivate_target = users("admin-peer-deactivate", "senior")
+    response = _call_crud("patch", actor, deactivate_target, {"is_active": False})
+    assert response.status_code == 200
+    deactivate_target.refresh_from_db()
+    assert deactivate_target.is_active is False
+
+    delete_target = users("admin-peer-delete", "senior")
+    response = _call_crud("delete", actor, delete_target)
+    assert response.status_code == 204
+    assert not get_user_model().objects.filter(pk=delete_target.pk).exists()
+
+    invite_target = users("admin-peer-invite", "senior")
+    response = _call_invite(actor, invite_target)
+    assert response.status_code == 200
+    assert "invite_link" in response.data
+
+    logged_in_target = users(
+        "admin-peer-logged-in", "senior", last_login=timezone.now()
+    )
+    before = _state(logged_in_target)
+    response = _call_invite(actor, logged_in_target)
+    assert response.status_code == 409
+    assert response.data == {"code": "Auth.USE_PASSWORD_RESET"}
+    assert _state(logged_in_target) == before
+
+
+@pytest.mark.django_db
+def test_level_two_invite_admin_cannot_manage_equal_rank_but_can_manage_lower(users):
+    actor = users("invite-admin", "manager")
+    for method, data in [
+        ("patch", {"is_active": False}),
+        ("patch", {"first_name": "Changed"}),
+        ("delete", None),
+    ]:
+        target = users(f"invite-peer-{method}-{data}", "manager")
+        before = _state(target)
+        response = _call_crud(method, actor, target, data)
+        assert response.status_code == 403
+        assert _state(target) == before
+        assert get_user_model().objects.filter(pk=target.pk).exists()
+
+    equal_invite = users("invite-peer-link", "manager")
+    response = _call_invite(actor, equal_invite)
+    assert response.status_code == 403
+    assert response.data == {"code": "Auth.RANK_INSUFFICIENT"}
+    assert get_user_model().objects.filter(pk=equal_invite.pk).exists()
+
+    lower = users("invite-lower", "user")
+    response = _call_crud("patch", actor, lower, {"first_name": "Allowed"})
+    assert response.status_code == 200
+    lower.refresh_from_db()
+    assert lower.first_name == "Allowed"
+
+
+@pytest.mark.django_db
+def test_equal_rank_requires_the_configured_admin_tier(settings, users):
+    settings.AUTH_POLICY_WRITE_MIN_ROLE_LEVEL = 4
+    actor = users("below-admin-tier", "senior")
+    target = users("below-admin-tier-peer", "senior")
+    before = _state(target)
+
+    assert can_act_on_user(actor, target) is False
+    for method, data in [
+        ("patch", {"is_active": False}),
+        ("patch", {"first_name": "Changed"}),
+        ("delete", None),
+    ]:
+        response = _call_crud(method, actor, target, data)
+        assert response.status_code == 403
+        assert _state(target) == before
+        assert get_user_model().objects.filter(pk=target.pk).exists()
+
+    response = _call_invite(actor, target)
+    assert response.status_code == 403
+    assert response.data == {"code": "Auth.RANK_INSUFFICIENT"}
+    assert _state(target) == before
+
+
+@pytest.mark.django_db
+def test_admin_tier_cannot_act_on_higher_rank_or_superuser(users):
+    actor = users("admin-actor", "senior")
+    for target in [
+        users("admin-higher", "principal"),
+        users("admin-superuser-target", "user", superuser=True),
+    ]:
+        before = _state(target)
+        assert can_act_on_user(actor, target) is False
+        for method, data in [
+            ("patch", {"is_active": False}),
+            ("patch", {"first_name": "Changed"}),
+            ("delete", None),
+        ]:
+            response = _call_crud(method, actor, target, data)
+            assert response.status_code == 403
+            assert _state(target) == before
+            assert get_user_model().objects.filter(pk=target.pk).exists()
+        response = _call_invite(actor, target)
+        assert response.status_code == 403
+        assert response.data == {"code": "Auth.RANK_INSUFFICIENT"}
+        assert _state(target) == before
+
+
+@pytest.mark.django_db
+def test_superuser_rank_allows_self_but_logged_in_invite_still_requires_reset(users):
+    root = users("root-self", "user", superuser=True, last_login=timezone.now())
+    assert can_act_on_user(root, root) is True
+    response = _call_invite(root, root)
+    assert response.status_code == 409
+    assert response.data == {"code": "Auth.USE_PASSWORD_RESET"}

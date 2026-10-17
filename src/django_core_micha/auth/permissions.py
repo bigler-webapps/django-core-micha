@@ -21,14 +21,22 @@ from django_core_micha.auth.roles import (
 
 
 def can_act_on_user(actor, target) -> bool:
-    """Return whether ``actor`` may administer ``target`` by role rank."""
+    """Return whether ``actor`` may administer ``target`` by role rank.
+
+    Superusers may act on anyone. Other actors cannot act on superusers and
+    must outrank the target, except that the auth-admin tier may act on peers.
+    """
     if not actor or not getattr(actor, "is_authenticated", False):
         return False
     if getattr(actor, "is_superuser", False):
         return True
     if not target or getattr(target, "is_superuser", False):
         return False
-    return get_role_level_for_user(actor) > get_role_level_for_user(target)
+    actor_level = get_role_level_for_user(actor)
+    target_level = get_role_level_for_user(target)
+    if actor_level > target_level:
+        return True
+    return actor_level == target_level and base_has_full_auth_admin_rights(actor)
 
 def _admin_policy_satisfied(user, request=None) -> bool:
     if request is None:
