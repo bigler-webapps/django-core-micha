@@ -6,7 +6,9 @@ from django_core_micha.auth.roles import (
     ROLE_LEVEL_2,
     ROLE_LEVEL_3,
     get_role_code_for_user,
+    get_default_role_code,
     get_role_definitions,
+    get_role_level_for_code,
     get_role_level_for_user,
 )
 
@@ -42,15 +44,33 @@ def _has_role_from_setting(user, setting_name: str) -> bool:
 
 
 def _default_auth_policy_write_level() -> int:
+    definitions = get_role_definitions() or {}
     levels = []
-    for info in (get_role_definitions() or {}).values():
+    for info in definitions.values():
         try:
             levels.append(int((info or {}).get("level", ROLE_LEVEL_0)))
         except (TypeError, ValueError, AttributeError):
             continue
-    if not levels:
-        return ROLE_LEVEL_3
-    return max(levels)
+    default_code = get_default_role_code()
+    if default_code in definitions:
+        try:
+            default_level = get_role_level_for_code(default_code)
+        except (TypeError, ValueError, AttributeError):
+            default_level = max(levels, default=ROLE_LEVEL_0)
+    elif len(set(levels)) > 1:
+        # A genuine hierarchy with an unknown default code: a role-less user resolves to level 0
+        # (get_role_level_for_user), so every defined level counts as above it.
+        default_level = ROLE_LEVEL_0
+    else:
+        # A flat setup with an unknown default code: assume the highest defined level, so the
+        # misconfiguration can never make one role level look like a hierarchy.
+        default_level = max(levels, default=ROLE_LEVEL_0)
+    # S249: a real hierarchy keeps its highest level as the threshold. A flat setup (nothing above the
+    # level a role-less user has) must not make every default-role user a full auth admin: the
+    # threshold then lies above that level and at least at ROLE_LEVEL_3.
+    if any(level > default_level for level in levels):
+        return max(levels)
+    return max(ROLE_LEVEL_3, default_level + 1)
 
 
 def has_full_auth_admin_rights(user) -> bool:
