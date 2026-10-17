@@ -24,6 +24,13 @@ def _plans():
             if v is not None: row[k]=v
         result.append(row)
     return result
+
+def _grant_origin(entry):
+    if entry.kind == "purchase": return "package"
+    if entry.purpose.startswith("plan:"): return "plan"
+    if entry.purpose == "trial": return "trial"
+    return "credit"
+
 @require_GET
 def me(request):
     if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
@@ -38,16 +45,25 @@ def me(request):
     grants=[]
     if account:
         entries=account.entries.filter(kind__in=("grant","purchase"),remaining__gt=0).filter(models_q_expiry(now)).order_by(F("expires_at").asc(nulls_last=True),"created_at","pk")
-        grants=[{"source":"plan" if e.kind=="grant" else "package","amount":e.amount,"remaining":e.remaining,"expires_at":e.expires_at.isoformat() if e.expires_at else None} for e in entries]
+        grants=[{"source":"plan" if e.kind=="grant" else "package","origin":_grant_origin(e),"amount":e.amount,"remaining":e.remaining,"expires_at":e.expires_at.isoformat() if e.expires_at else None} for e in entries]
     from .models import TeamPackage, TeamSeat
     owned=TeamPackage.objects.filter(owner=request.user,starts_at__lte=now,ends_at__gt=now).order_by("ends_at","pk").first()
-    held=TeamSeat.objects.filter(user=request.user,active=True,package__starts_at__lte=now,package__ends_at__gt=now).select_related("package").order_by("package__ends_at","pk").first()
+    held=TeamSeat.objects.filter(user=request.user,active=True,package__starts_at__lte=now,package__ends_at__gt=now).select_related("package__owner").order_by("package__ends_at","pk").first()
+    pool_package=owned or (held.package if held else None)
+    pool=None
+    if pool_package:
+        pool_rows=list(TokenEntry.objects.filter(account__team_package=pool_package,kind__in=("grant","purchase")).filter(models_q_expiry(now)).values_list("amount","remaining"))
+        if pool_rows:
+            pool={"plan_key":pool_package.plan_key,"plan_name":plans.get(pool_package.plan_key,""),"amount":sum(amount for amount,_ in pool_rows),"remaining":sum(max(0,remaining or 0) for _,remaining in pool_rows),"expires_at":pool_package.ends_at.isoformat()}
     team=None
     if owned:
         holders=list(TeamSeat.objects.filter(package=owned,active=True).select_related("user").order_by("user__email","user_id"))
         team={"plan_key":owned.plan_key,"plan_name":plans.get(owned.plan_key,""),"ends_at":owned.ends_at.isoformat(),"seats_total":owned.seats,"seats_used":len(holders),"seat_holders":[{"user_id":x.user_id,"name":x.user.get_full_name() or "","email":x.user.email} for x in holders]}
-    result={"access":{"status":s.status,"source":s.source,"ends_at":s.ends_at.isoformat() if s.ends_at else None},"tokens":{"balance":token_balance(request.user),"grants":grants},"plans":_plans(),"subscription":subscription,"team":team}
-    if held: result["seat"]={"plan_key":held.package.plan_key,"plan_name":plans.get(held.package.plan_key,""),"ends_at":held.package.ends_at.isoformat()}
+    result={"access":{"status":s.status,"source":s.source,"ends_at":s.ends_at.isoformat() if s.ends_at else None},"tokens":{"balance":token_balance(request.user),"grants":grants,"pool":pool},"plans":_plans(),"subscription":subscription,"team":team}
+    if held:
+        owner=held.package.owner
+        payer_name=owner.get_full_name().strip() or owner.email or owner.username  # never the database id
+        result["seat"]={"plan_key":held.package.plan_key,"plan_name":plans.get(held.package.plan_key,""),"ends_at":held.package.ends_at.isoformat(),"payer_name":payer_name}
     response=JsonResponse(result); response["Cache-Control"]="no-store"  # it now carries the seat holders' names and emails
     return response
 def _target(data):

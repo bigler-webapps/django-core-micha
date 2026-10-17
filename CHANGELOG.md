@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.13.0] — 2026-10-17
+
+### Added
+
+DCM-BILL-6: the account view `me/` carries token origins, the team pool and the seat payer, additively (no existing key changes). `tokens.grants[].origin`
+is `plan` (a subscription or team allowance, purpose `plan:<key>`), `package` (a purchased package), `trial` (purpose `trial`) or `credit` (every other
+grant); `source` is unchanged. `tokens.pool` (the key is always present) is `null` or `{plan_key, plan_name, amount, remaining, expires_at}` for the payer
+of an ACTIVE team package and for a seat holder of one (the payer's own package wins when a person is both): the sum of the package account's grant and
+purchase entries that have not expired, `remaining` may be 0, `expires_at` is the package end; it is never part of `tokens.grants` or `tokens.balance`,
+and after the package ended it is `null`. `seat.payer_name` (seat holders only) is the package owner's full name, else the e-mail, else the username,
+never the database id. Contract: `docs/design/billing.md`.
+
+### Security
+
+DCM-AUTH-7 follow-up (post-hoc independent review of the admin gate): the admin MFA gate also covers an admin mounted at another URL prefix (for example
+`path("backend/admin/", admin.site.urls)`) or a custom `AdminSite`: besides the default `/admin/` prefix every URL that resolves to an application
+namespace `admin` is gated; an unexpected resolver error fails closed, an absent URL conf means nothing admin is reachable. Place
+`AdminMfaRequiredMiddleware` after any middleware that selects `request.urlconf`. This closes a bypass that existed before 3.11.0 as well.
+
 ## [3.12.0] — 2026-10-17
 
 ### Security
