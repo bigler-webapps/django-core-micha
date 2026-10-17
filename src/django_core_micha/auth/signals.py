@@ -23,6 +23,7 @@ from allauth.socialaccount.signals import (
 )
 
 from ._audit_helpers import _client_ip, _credential_hash, _session_key_digest, _ua_family
+from .social import provider_vouched_email
 
 logger = logging.getLogger(__name__)
 
@@ -282,10 +283,16 @@ def force_auto_connect_on_email_match(sender, request, sociallogin, **kwargs):
     This prevents pre-account takeover attacks where an attacker creates an unverified
     account with a victim's email.
     """
-    if sociallogin.is_existing or not sociallogin.email_addresses:
+    provider = sociallogin.account.provider
+    if sociallogin.is_existing:
+        logger.warning("Skipped auto-connect for provider=%s reason=already_linked", provider)
         return
 
-    social_email = sociallogin.email_addresses[0].email
+    social_email = provider_vouched_email(sociallogin)
+    if not social_email:
+        logger.warning("Skipped auto-connect for provider=%s reason=no_provider_verified_email", provider)
+        return
+
     User = get_user_model()
 
     try:
@@ -299,12 +306,11 @@ def force_auto_connect_on_email_match(sender, request, sociallogin, **kwargs):
 
         if is_local_verified:
             sociallogin.connect(request, user)
-            logger.info(f"Auto-connected social account for verified user {social_email}")
+            logger.info("Auto-connected social account for provider=%s reason=verified_email_match", provider)
         else:
             logger.warning(
-                f"Skipped auto-connect for {social_email}: Local account exists but email is not verified. "
-                "Possible pre-account takeover attempt or stale unverified account."
+                "Skipped auto-connect for provider=%s reason=local_email_unverified", provider
             )
 
     except User.DoesNotExist:
-        pass
+        logger.warning("Skipped auto-connect for provider=%s reason=no_local_user_match", provider)

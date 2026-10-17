@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.10.0] — 2026-10-17
+
+### Security
+
+DCM-AUTH-6 (closes S264 of the 2026-10-17 audit): social login links to an existing local account automatically only for provider-verified
+addresses. The `pre_social_login` receiver `force_auto_connect_on_email_match` and `InvitationOnlySocialAdapter.is_open_for_signup` now use one
+helper, `auth.social.provider_vouched_email`, which returns the first address the identity provider itself marked verified; a login connects
+only if that address matches a local user whose address is verified too. A login with an address the provider did not verify (allauth's
+Microsoft provider never does, and no tenant is pinned) neither links to an existing account nor opens signup for it: allauth ends in its normal
+"signup closed" refusal, no second account is created. Google keeps auto-linking, already linked accounts log in unchanged. The skip log names
+the provider and a reason code, not the e-mail address. **Behaviour change for consumers:** users who relied on Microsoft auto-linking at their
+first social login must log in with their password (or an already linked provider) first.
+
 ## [3.9.0] — 2026-10-17
 
 ### Security

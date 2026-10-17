@@ -6,16 +6,18 @@ from allauth.account.adapter import DefaultAccountAdapter
 from allauth.mfa.adapter import DefaultMFAAdapter
 from django.conf import settings
 from django_core_micha.auth.security import get_security_level, set_security_level
+from django_core_micha.auth.social import provider_vouched_email
 import logging
 
 logger = logging.getLogger(__name__)
 
 class InvitationOnlySocialAdapter(DefaultSocialAccountAdapter):
     def is_open_for_signup(self, request, sociallogin):
-        User = get_user_model()
-        email = sociallogin.user.email
+        email = provider_vouched_email(sociallogin)
         if not email:
             return False
+
+        User = get_user_model()
         user_qs = User.objects.filter(email__iexact=email)
         if not user_qs.exists():
             return False
