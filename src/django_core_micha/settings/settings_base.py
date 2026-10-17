@@ -126,14 +126,17 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
-    # S19: Enforce MFA enrollment for Django admin in non-local envs.
-    # Opt-out via `ADMIN_MFA_REQUIRED = False` in the project's settings.
+    # Opt in with `ADMIN_MFA_REQUIRED = True` to require enrolled and
+    # session-used MFA for admin superusers and staff. Each app decides;
+    # the allauth-routed admin login is always on.
     # Placed AFTER AccountMiddleware so allauth-session state is available.
     "django_core_micha.auth.admin_mfa_middleware.AdminMfaRequiredMiddleware",
 ]
 
-# S19: Set to False to disable admin-MFA enforcement (not recommended in prod).
-ADMIN_MFA_REQUIRED = True
+# Opt in to requiring enrolled TOTP/WebAuthn and an MFA-authenticated admin
+# session for superusers and staff. Default False: each app decides. The
+# allauth-routed admin login is always on.
+ADMIN_MFA_REQUIRED = False
 
 # S198: Retention window for AuditEvent rows (days). Override per-app via ENV.
 AUDITLOG_RETENTION_DAYS = int(os.getenv("AUDITLOG_RETENTION_DAYS", "730"))

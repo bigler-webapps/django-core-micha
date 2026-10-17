@@ -1,12 +1,13 @@
-"""Require an enrolled MFA factor and an MFA-authenticated session for admin.
+"""Optionally require enrolled MFA and an MFA-authenticated session for admin.
 
 The Django admin is a well-known target for credential stuffing and session
 hijacking. In non-local environments, authenticated superusers and staff must
 both have a real allauth authenticator enrolled and must have completed its
 MFA step in the current session. Recovery codes alone do not count.
 
-The check is skipped when ``ADMIN_MFA_REQUIRED=False``, for non-admin paths,
-in local environments (``IS_LOCAL=True``), and for anonymous requests.
+The gate is opt-in: it runs when ``ADMIN_MFA_REQUIRED=True``. It is skipped
+when the setting is absent or false, for non-admin paths, in local environments
+(``IS_LOCAL=True``), and for anonymous requests.
 Non-staff users who are not superusers are left to Django admin's own access
 gate.
 
@@ -14,7 +15,8 @@ Operators must log in through the normal allauth login with a second factor
 before entering the admin. On a fresh deployment, use the normal login to
 authenticate, enroll a real factor through the account MFA page, then log in
 again with that factor before visiting ``/admin/``. This middleware does not
-provide an admin password-login bootstrap path.
+provide an admin password-login bootstrap path. The allauth-routed admin login
+in ``auth/admin_login.py`` remains enabled regardless of this setting.
 
 **Note on staging:** MFA enforcement applies in staging as in production;
 ``IS_LOCAL`` is only true for ``ENV_TYPE=local``.
@@ -77,7 +79,7 @@ class AdminMfaRequiredMiddleware:
 
     @staticmethod
     def _needs_mfa_check(request) -> bool:
-        if not getattr(settings, "ADMIN_MFA_REQUIRED", True):
+        if not getattr(settings, "ADMIN_MFA_REQUIRED", False):
             return False
         if getattr(settings, "IS_LOCAL", False):
             return False

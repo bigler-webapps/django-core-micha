@@ -121,6 +121,42 @@ def test_enrolled_mfa_session_is_allowed(monkeypatch, staff_role):
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize("path", ["/admin/", "/backend/admin/"])
+@pytest.mark.parametrize("staff_role", [False, True], ids=["superuser", "staff"])
+def test_missing_admin_mfa_setting_allows_admin_without_authenticator(
+    monkeypatch, settings, path, staff_role
+):
+    del settings.ADMIN_MFA_REQUIRED
+    monkeypatch.setattr(
+        AdminMfaRequiredMiddleware,
+        "_has_mfa",
+        staticmethod(lambda user: (_ for _ in ()).throw(AssertionError("MFA checked"))),
+    )
+    request = RequestFactory().get(path)
+    request.user = SimpleNamespace(
+        is_authenticated=True, is_superuser=not staff_role, is_staff=staff_role
+    )
+    with override_settings(
+        ROOT_URLCONF="tests.urls_backend_admin" if path.startswith("/backend/") else __name__,
+        IS_LOCAL=False,
+    ):
+        response = AdminMfaRequiredMiddleware(lambda _request: HttpResponse("ok"))(request)
+    assert response.status_code == 200
+
+
+def test_missing_admin_mfa_setting_allows_password_only_session(monkeypatch, settings):
+    del settings.ADMIN_MFA_REQUIRED
+    monkeypatch.setattr(
+        AdminMfaRequiredMiddleware,
+        "_has_mfa",
+        staticmethod(lambda user: (_ for _ in ()).throw(AssertionError("MFA checked"))),
+    )
+    request = _middleware_request(superuser=True, records=[{"method": "password"}])
+    with override_settings(IS_LOCAL=False):
+        response = AdminMfaRequiredMiddleware(lambda _request: HttpResponse("ok"))(request)
+    assert response.status_code == 200
+
+
 @override_settings(ADMIN_MFA_REQUIRED=True, IS_LOCAL=False)
 def test_mfa_session_without_enrolled_factor_is_refused(monkeypatch):
     _install_authenticators(monkeypatch, enrolled=False)
@@ -234,7 +270,7 @@ def test_staff_with_an_mfa_session_but_no_enrolled_factor_is_refused(monkeypatch
     assert response.status_code == 403 and module.session_used_mfa(request) is True
 
 
-def test_ready_wires_the_default_admin_site_when_admin_and_allauth_are_installed(monkeypatch):
+def test_ready_wires_the_default_admin_site_when_admin_and_allauth_are_installed(monkeypatch, settings):
     from django.apps import apps
     from django.contrib import admin
     from django.contrib.admin.sites import AdminSite
@@ -244,6 +280,10 @@ def test_ready_wires_the_default_admin_site_when_admin_and_allauth_are_installed
     monkeypatch.setattr(admin, "site", fake_site)
     real = apps.is_installed
     monkeypatch.setattr(apps, "is_installed", lambda name: True if name in ("django.contrib.admin", "allauth.account") else real(name))
+    settings.ADMIN_MFA_REQUIRED = False
+    assert secure_default_admin_site() is True
+    assert fake_site.login is not original_login and getattr(fake_site.login, "_dcm_secure_admin_login", False) is True
+    del settings.ADMIN_MFA_REQUIRED
     assert secure_default_admin_site() is True
     assert fake_site.login is not original_login and getattr(fake_site.login, "_dcm_secure_admin_login", False) is True
     monkeypatch.setattr(apps, "is_installed", lambda name: False if name == "django.contrib.admin" else real(name))

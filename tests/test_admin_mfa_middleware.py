@@ -284,6 +284,42 @@ class TestCallGate:
         assert response.status_code == 200
         self.downstream.assert_called_once_with(request)
 
+    @pytest.mark.parametrize("path", ["/admin/", "/backend/admin/"])
+    @pytest.mark.parametrize("staff_role", [False, True], ids=["superuser", "staff"])
+    def test_missing_setting_passes_admin_requests(self, settings, path, staff_role):
+        del settings.ADMIN_MFA_REQUIRED
+        request = self.rf.get(path)
+        request.user = _make_user(superuser=not staff_role, staff=staff_role)
+        if path.startswith("/backend/"):
+            with override_settings(ROOT_URLCONF="tests.urls_backend_admin", IS_LOCAL=False):
+                response = self.mw(request)
+        else:
+            with override_settings(IS_LOCAL=False):
+                response = self.mw(request)
+        assert response.status_code == 200
+        self.downstream.assert_called_once_with(request)
+
+    def test_shipped_admin_mfa_default_is_false(self, monkeypatch):
+        # settings_base rejects its fallback development secret outside local
+        # mode, so import it under the module's supported local environment.
+        monkeypatch.setenv("ENV_TYPE", "local")
+        from django_core_micha.settings import settings_base
+
+        assert settings_base.ADMIN_MFA_REQUIRED is False
+
+    @pytest.mark.parametrize("required", [False, True])
+    @pytest.mark.parametrize(
+        "user", [_make_user(authenticated=False), _make_user(superuser=False, staff=False)],
+        ids=["anonymous", "non-staff"],
+    )
+    def test_anonymous_and_non_staff_pass_in_both_modes(self, required, user):
+        request = self.rf.get("/admin/")
+        request.user = user
+        with override_settings(ADMIN_MFA_REQUIRED=required, IS_LOCAL=False):
+            response = self.mw(request)
+        assert response.status_code == 200
+        self.downstream.assert_called_once_with(request)
+
     @override_settings(ADMIN_MFA_REQUIRED=True, IS_LOCAL=True)
     def test_local_env_passes_through(self, monkeypatch):
         _install_fake_allauth(monkeypatch, authenticators=[])
