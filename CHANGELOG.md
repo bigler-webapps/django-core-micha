@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.14.0] — 2026-10-17
+
+### Security
+
+Three authorization and authentication adjustments from the 2026-10-17 audit, shipped together (DCM-AUTH-8, -9, -10).
+
+**DCM-AUTH-8 (closes S249): auth-policy write threshold without a role hierarchy.** The computed default of `AUTH_POLICY_WRITE_MIN_ROLE_LEVEL` now lies above the
+level a user without an explicit role has (the level of `DEFAULT_ROLE_CODE`). When the role definitions offer no level above it (no `ROLE_DEFINITIONS`, a single level,
+all levels equal) the default is `max(ROLE_LEVEL_3, default level + 1)`; a real hierarchy keeps its highest level; an unknown default role code is treated as level 0
+for a genuine hierarchy and as the highest defined level for a flat setup (a misconfiguration never makes a flat setup look like a hierarchy); an explicit setting
+still wins in both directions. **Consumer effect:** in an app without a role hierarchy only superusers (and an explicit setting) hold full auth-admin rights, hence
+invite-admin, users-admin and the auth-policy write; the stopgap `AUTH_POLICY_WRITE_MIN_ROLE_LEVEL = 3` in Gustav, Cinevia and Photogallery becomes redundant.
+
+**DCM-AUTH-9 (adjusts DCM-AUTH-5, S266, S276): the admin tier may act on equal rank.** `can_act_on_user(actor, target)`: a superuser acts on anyone, nobody else on a superuser;
+otherwise the actor acts when its level is greater, or equal and the actor holds full auth-admin rights (the admin tier, base `has_full_auth_admin_rights`, after
+DCM-AUTH-8). Invite admins below the tier (teachers, team, supervisors) keep the strict rule from 3.9.0. Invite links stay limited to accounts that never logged in.
+**Consumer effect:** admin to admin is allowed again; teacher to teacher stays refused; nobody touches a higher rank.
+
+**DCM-AUTH-10 (adjusts DCM-AUTH-7, S267, S19): the admin MFA gate is opt-in per app.** `ADMIN_MFA_REQUIRED` now defaults to `False` (`settings_base` and the middleware's
+fallback for a missing setting). With `ADMIN_MFA_REQUIRED = True` the full 3.11.0/3.13.0 gate applies unchanged (enrolled TOTP/WebAuthn, an MFA-authenticated session,
+superusers and staff, prefixed and custom admin sites, `IS_LOCAL` bypass). The allauth-routed admin login (`auth/admin_login.py`) stays on for every app. **Consumer
+effect:** an app that wants admin MFA must set `ADMIN_MFA_REQUIRED = True`; without it neither the session requirement nor the older S19 enrolment requirement applies.
+
 ## [3.13.0] — 2026-10-17
 
 ### Added
