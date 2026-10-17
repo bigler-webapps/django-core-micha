@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.11.0] — 2026-10-17
+
+### Security
+
+DCM-AUTH-7 (closes S267 of the 2026-10-17 audit): the Django admin needs an MFA login. `AdminMfaRequiredMiddleware` now admits superusers AND
+staff users to `/admin/` only when the user has an enrolled authenticator (TOTP or WebAuthn, recovery codes alone do not count) AND the current
+session recorded an MFA authentication (`auth.admin_mfa_middleware.session_used_mfa`, read from allauth's authentication records; only `totp`
+and `webauthn` count, unknown types fail closed). The gate follows the script prefix (`request.path_info`). The default `admin.site` login is
+routed through allauth (`auth.admin_login.secure_default_admin_site`, wired in `CoreAuthConfig.ready()` when `django.contrib.admin` and
+`allauth.account` are installed; `secure_admin_site(site)` for custom admin sites): an anonymous visit to the admin login is redirected to
+`LOGIN_URL`, Django's own password form and its unthrottled `authenticate()` call no longer serve the admin. **Behaviour change for consumers:**
+a session without an MFA login is refused at `/admin/` and the person must log in again through the normal allauth login with the second factor
+(staff users included); tests that enter the admin with `force_login` must add an MFA record to the session or set `ADMIN_MFA_REQUIRED=False`.
+`IS_LOCAL` and `ADMIN_MFA_REQUIRED=False` still bypass the gate.
+
 ## [3.10.0] — 2026-10-17
 
 ### Security

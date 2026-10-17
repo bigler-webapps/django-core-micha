@@ -38,11 +38,14 @@ def _ok_response(_request):
     return HttpResponse("ok")
 
 
-def _make_user(*, authenticated: bool = True, superuser: bool = True, pk: int = 1):
+def _make_user(
+    *, authenticated: bool = True, superuser: bool = True, staff: bool = False, pk: int = 1
+):
     """Return a duck-typed user with only the attributes the middleware reads."""
     return SimpleNamespace(
         is_authenticated=authenticated,
         is_superuser=superuser,
+        is_staff=staff,
         pk=pk,
     )
 
@@ -95,12 +98,23 @@ def _install_fake_allauth(monkeypatch, authenticators):
     monkeypatch.setitem(sys.modules, "allauth", fake_allauth)
     monkeypatch.setitem(sys.modules, "allauth.mfa", fake_mfa)
     monkeypatch.setitem(sys.modules, "allauth.mfa.models", fake_models)
+    fake_account = ModuleType("allauth.account")
+    fake_authentication = ModuleType("allauth.account.authentication")
+    fake_authentication.get_authentication_records = lambda request: request.session.get(
+        "account_authentication_methods", []
+    )
+    monkeypatch.setitem(sys.modules, "allauth.account", fake_account)
+    monkeypatch.setitem(sys.modules, "allauth.account.authentication", fake_authentication)
     return _Authenticator
 
 
 def _auth(type_: str):
     """Construct a fake Authenticator row with only the `.type` attribute."""
     return SimpleNamespace(type=type_)
+
+
+def _record_mfa(request, type_="totp"):
+    request.session = {"account_authentication_methods": [{"method": "mfa", "type": type_}]}
 
 
 # --------------------------------------------------------------------------- #
@@ -250,6 +264,7 @@ class TestCallGate:
         _install_fake_allauth(monkeypatch, authenticators=[_auth("totp")])
         request = self.rf.get("/admin/")
         request.user = _make_user()
+        _record_mfa(request)
 
         response = self.mw(request)
 
@@ -295,7 +310,7 @@ class TestCallGate:
         self.downstream.assert_called_once_with(request)
 
     @override_settings(ADMIN_MFA_REQUIRED=True, IS_LOCAL=False)
-    def test_non_superuser_passes_through(self, monkeypatch):
+    def test_non_staff_non_superuser_passes_through(self, monkeypatch):
         """Django admin already rejects non-superusers — the gate must not
         layer on a confusing 403 before that check runs.
         """

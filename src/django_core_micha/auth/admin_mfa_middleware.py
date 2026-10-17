@@ -1,35 +1,25 @@
-"""S19 — Require MFA enrollment for Django admin access in non-local envs.
+"""Require an enrolled MFA factor and an MFA-authenticated session for admin.
 
-The Django admin URL (``/admin/``) is a well-known target for credential-stuffing
-and session-hijacking attacks. Superuser passwords compromised elsewhere give
-an attacker full data-access via admin without any additional barrier.
+The Django admin is a well-known target for credential stuffing and session
+hijacking. In non-local environments, authenticated superusers and staff must
+both have a real allauth authenticator enrolled and must have completed its
+MFA step in the current session. Recovery codes alone do not count.
 
-This middleware enforces that any authenticated superuser hitting
-``/admin/*`` MUST have at least one **real** ``allauth.mfa.models.Authenticator``
-row (TOTP or WebAuthn) — Recovery-codes alone don't count, since they're a
-fallback factor, not a real second factor. Otherwise the request is rejected
-with 403.
+The check is skipped when ``ADMIN_MFA_REQUIRED=False``, for non-admin paths,
+in local environments (``IS_LOCAL=True``), and for anonymous requests.
+Non-staff users who are not superusers are left to Django admin's own access
+gate.
 
-The check is skipped in:
+Operators must log in through the normal allauth login with a second factor
+before entering the admin. On a fresh deployment, use the normal login to
+authenticate, enroll a real factor through the account MFA page, then log in
+again with that factor before visiting ``/admin/``. This middleware does not
+provide an admin password-login bootstrap path.
 
-- local environments (``IS_LOCAL=True``)
-- unauthenticated requests (Django admin's login flow handles those)
-- non-superuser requests (Django admin gates those itself)
-- when ``ADMIN_MFA_REQUIRED=False`` (explicit opt-out)
+**Note on staging:** MFA enforcement applies in staging as in production;
+``IS_LOCAL`` is only true for ``ENV_TYPE=local``.
 
-**Note on staging:** the middleware enforces MFA in staging just as in
-production (``IS_LOCAL`` is only ``True`` for ``ENV_TYPE=local``). Operators
-provisioning a new tenant must enroll MFA in `/api/accounts/mfa/...` before
-attempting admin login.
-
-**Bootstrap flow** (first superuser on fresh deployment):
-1. `/admin/login/` — passes (unauthenticated middleware skips)
-2. After login, navigating into `/admin/` 403
-3. While still authenticated, visit `/api/accounts/mfa/totp/activate/` to
-   enroll TOTP (or the corresponding allauth-mfa URL)
-4. Retry `/admin/` — passes
-
-Audit-Trail: `webapp-management/SECURITY_FINDINGS.md` S19.
+Audit-Trail: webapp-management/SECURITY_FINDINGS.md S267.
 """
 from __future__ import annotations
 
@@ -37,50 +27,79 @@ from django.conf import settings
 from django.http import HttpResponseForbidden
 
 
+def session_used_mfa(request) -> bool:
+    """Return whether this session records a non-recovery MFA login.
+
+    allauth stores authentication records in the session. Treat unexpected
+    session data, malformed records, and import/runtime failures as no MFA.
+    """
+    try:
+        from allauth.account.authentication import get_authentication_records
+
+        records = get_authentication_records(request)
+        if not isinstance(records, (list, tuple)):
+            return False
+        return any(
+            isinstance(record, dict)
+            and record.get("method") == "mfa"
+            and record.get("type") in ("totp", "webauthn")  # an allowlist: unknown or missing types fail closed
+            for record in records
+        )
+    except Exception:
+        return False
+
+
 class AdminMfaRequiredMiddleware:
-    """Enforce MFA enrollment for Django admin access in non-local envs."""
+    """Enforce enrolled and session-used MFA for admin access."""
 
     def __init__(self, get_response):
         self.get_response = get_response
 
     def __call__(self, request):
-        if self._needs_mfa_check(request) and not self._has_mfa(request.user):
-            return HttpResponseForbidden(
-                "Admin access requires a real MFA factor (TOTP or WebAuthn) "
-                "enrolled on your account. Enroll an authenticator in your "
-                "account settings, then retry. Recovery codes alone do not "
-                "satisfy this requirement."
-            )
+        if self._needs_mfa_check(request):
+            try:
+                enrolled = self._has_mfa(request.user)
+            except Exception:
+                # If allauth or its authenticator store is unavailable, fail
+                # closed instead of letting an uncertain admin request pass.
+                enrolled = False
+            if not enrolled:
+                return HttpResponseForbidden(
+                    "Admin access requires an enrolled real MFA factor "
+                    "(TOTP or WebAuthn). Enroll one in your account settings."
+                )
+            if not session_used_mfa(request):
+                return HttpResponseForbidden(
+                    "This session was not authenticated with MFA. Log in again "
+                    "through the normal login and complete your second factor."
+                )
         return self.get_response(request)
 
     @staticmethod
     def _needs_mfa_check(request) -> bool:
-        # Opt-out switch (default: enforce).
         if not getattr(settings, "ADMIN_MFA_REQUIRED", True):
             return False
-        # Only Django admin URLs.
-        if not request.path.startswith("/admin/"):
+        # path_info is relative to the script prefix (SCRIPT_NAME=/portal makes request.path
+        # "/portal/admin/"), which is what the URL conf routes on.
+        if not request.path_info.startswith("/admin/"):
             return False
-        # Local dev bypass — devs typically don't have MFA enrolled.
         if getattr(settings, "IS_LOCAL", False):
             return False
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
             return False
-        # Non-superusers can't reach admin anyway; Django gates that.
-        if not getattr(user, "is_superuser", False):
+        if not (
+            getattr(user, "is_superuser", False)
+            or getattr(user, "is_staff", False)
+        ):
             return False
         return True
 
     @staticmethod
     def _has_mfa(user) -> bool:
-        # Late import: avoid circular-import at module load time and only pay
-        # the Authenticator-import cost when the middleware actually fires.
+        # Keep allauth optional for projects that do not install MFA.
         from allauth.mfa.models import Authenticator
-        # Recovery-codes alone are a fallback, NOT a real second factor.
-        # Exclude them so a superuser with only recovery-codes-state (e.g. after
-        # disabling TOTP without cleanup) doesn't bypass the gate. Mirrors
-        # allauth's own `can_generate_recovery_codes` exclusion pattern.
+
         return (
             Authenticator.objects.filter(user=user)
             .exclude(type=Authenticator.Type.RECOVERY_CODES)

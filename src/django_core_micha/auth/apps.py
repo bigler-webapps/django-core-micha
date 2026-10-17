@@ -8,6 +8,9 @@ class CoreAuthConfig(AppConfig):
     def ready(self):
         import django_core_micha.auth.signals
         from django.apps import apps as django_apps
+        from django_core_micha.auth.admin_login import secure_default_admin_site
+
+        secure_default_admin_site()
         if django_apps.is_installed("allauth.mfa"):
             from django_core_micha.auth.signals import connect_mfa_signals
             connect_mfa_signals()
