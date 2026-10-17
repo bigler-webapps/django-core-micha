@@ -79,10 +79,6 @@ class AdminMfaRequiredMiddleware:
     def _needs_mfa_check(request) -> bool:
         if not getattr(settings, "ADMIN_MFA_REQUIRED", True):
             return False
-        # path_info is relative to the script prefix (SCRIPT_NAME=/portal makes request.path
-        # "/portal/admin/"), which is what the URL conf routes on.
-        if not request.path_info.startswith("/admin/"):
-            return False
         if getattr(settings, "IS_LOCAL", False):
             return False
         user = getattr(request, "user", None)
@@ -93,7 +89,34 @@ class AdminMfaRequiredMiddleware:
             or getattr(user, "is_staff", False)
         ):
             return False
-        return True
+        # Only superusers and staff reach the (comparatively expensive) URL resolution.
+        return AdminMfaRequiredMiddleware._is_admin_request(request)
+
+    @staticmethod
+    def _is_admin_request(request) -> bool:
+        """True when the request is routed to a Django admin site.
+
+        ``path_info`` is relative to the script prefix (SCRIPT_NAME=/portal makes
+        ``request.path`` "/portal/admin/"), which is what the URL conf routes on. The
+        default ``/admin/`` prefix is always gated; in addition the URL is resolved, so an
+        admin mounted at another prefix (``path("backend/admin/", admin.site.urls)``) or a
+        custom ``AdminSite`` is gated too: every admin site's URLs carry the application
+        namespace ``admin``. An unexpected resolver error fails closed (gated); an absent URL conf or
+        route means nothing admin is reachable. Place this middleware AFTER any middleware that
+        selects ``request.urlconf`` (a later swap of the URL conf cannot be seen from here).
+        """
+        if request.path_info.startswith("/admin/"):
+            return True
+        try:
+            from django.core.exceptions import ImproperlyConfigured
+            from django.urls import Resolver404, resolve
+
+            match = resolve(request.path_info, urlconf=getattr(request, "urlconf", None))
+        except (Resolver404, ImproperlyConfigured, AttributeError):
+            return False  # no route, or no URL conf at all (nothing, hence no admin, can be routed)
+        except Exception:
+            return True
+        return "admin" in (match.app_names or [])
 
     @staticmethod
     def _has_mfa(user) -> bool:

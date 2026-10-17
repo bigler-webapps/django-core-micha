@@ -269,3 +269,40 @@ def test_app_config_ready_calls_the_default_admin_wiring(monkeypatch):
     config = apps.get_app_config("django_core_micha_auth")
     config.ready()
     assert calls == ["wired"]
+
+
+@override_settings(ROOT_URLCONF="tests.urls_backend_admin", IS_LOCAL=False, ADMIN_MFA_REQUIRED=True)
+def test_an_admin_mounted_at_another_prefix_is_gated_too():
+    user = SimpleNamespace(is_authenticated=True, is_superuser=False, is_staff=True, pk=3)
+    for path in ("/backend/admin/", "/backend/admin/auth/user/", "/admin/anything/"):
+        request = RequestFactory().get(path)
+        request.user = user
+        assert AdminMfaRequiredMiddleware._needs_mfa_check(request) is True, path
+    api = RequestFactory().get("/api/")
+    api.user = user
+    assert AdminMfaRequiredMiddleware._needs_mfa_check(api) is False
+    unknown = RequestFactory().get("/no/such/route/")
+    unknown.user = user
+    assert AdminMfaRequiredMiddleware._needs_mfa_check(unknown) is False
+
+
+@override_settings(ROOT_URLCONF="tests.urls_backend_admin", IS_LOCAL=False, ADMIN_MFA_REQUIRED=True)
+def test_a_password_only_session_is_refused_on_the_prefixed_admin(monkeypatch):
+    monkeypatch.setattr(AdminMfaRequiredMiddleware, "_has_mfa", staticmethod(lambda user: True))
+    request = RequestFactory().get("/backend/admin/")
+    request.user = SimpleNamespace(is_authenticated=True, is_superuser=True, is_staff=True, pk=4)
+    request.session = {"account_authentication_methods": [{"method": "password"}]}
+    response = AdminMfaRequiredMiddleware(lambda r: HttpResponse("ok"))(request)
+    assert response.status_code == 403
+
+
+@override_settings(ROOT_URLCONF="tests.urls_backend_admin", IS_LOCAL=False, ADMIN_MFA_REQUIRED=True)
+def test_a_resolver_crash_fails_closed_for_staff_but_not_for_anonymous(monkeypatch):
+    import django.urls as urls
+    monkeypatch.setattr(urls, "resolve", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    staff = RequestFactory().get("/somewhere/")
+    staff.user = SimpleNamespace(is_authenticated=True, is_superuser=False, is_staff=True, pk=5)
+    assert AdminMfaRequiredMiddleware._needs_mfa_check(staff) is True
+    anonymous = RequestFactory().get("/somewhere/")
+    anonymous.user = SimpleNamespace(is_authenticated=False, is_superuser=False, is_staff=False, pk=None)
+    assert AdminMfaRequiredMiddleware._needs_mfa_check(anonymous) is False
