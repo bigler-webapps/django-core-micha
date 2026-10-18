@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.15.0] — 2026-10-18
+
+### Security
+
+DCM-AUTH-11 (closes S246): the generic `POST /api/users/` on `BaseUserViewSet` creates an account only for superusers and users admins. A new overridable method
+`BaseUserViewSet.can_create_user(request)` decides (default: `can_view_users_admin(user, request=request)`, request-aware, so the admin auth policy and its session
+factor apply); a consumer may widen or narrow it. The check runs before the payload is read: every other authenticated user gets 403 and no row is written, for a valid,
+empty or malformed body alike. A permitted create without username and e-mail (also a non-object JSON body) answers 400 with field errors and writes nothing, instead of the
+former unhandled 500 on the unique username. Consumer guards that exist today (innoservice's `perform_create`, bigler-consult's `get_permissions`) keep working; a
+consumer whose create actors are not users admins in dcm's sense (for example holders of a capability below `INVITE_MIN_ROLE_LEVEL`) must override `can_create_user`.
+
+### Removed
+
+DCM-AUTH-11 (closes the remainder of S251): `auth.permissions.RequireStrongSecurity` and `auth.security.require_security_level` are removed. Both did nothing unless
+`SECURITY_ENFORCE_STRONG_AUTH` was set and had no call site in dcm or in any of the 19 consuming apps (measured 2026-10-18). `SECURITY_ENFORCE_STRONG_AUTH` stays (it
+still decides the default factor count in `auth/policy.py`); the admin auth policy (`admin_required_auth_factor_count`) is unaffected and effective.
+
 ## [3.14.0] — 2026-10-17
 
 ### Security

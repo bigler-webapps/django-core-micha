@@ -205,6 +205,31 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
     def get_auth_policy(self):
         return get_or_create_auth_policy()
 
+    def can_create_user(self, request) -> bool:
+        """Consumer hook for the generic user create endpoint.
+
+        By default, only users admins may create accounts. Consumers can
+        override this method to widen or narrow that authority.
+        """
+        return can_view_users_admin(request.user, request=request)
+
+    def create(self, request, *args, **kwargs):
+        # Keep this check before reading or validating the payload so denied
+        # callers receive the same refusal for every submitted body.
+        if not self.can_create_user(request):
+            raise PermissionDenied("Permission denied.")
+
+        data = request.data if hasattr(request.data, "get") else {}  # a JSON list or scalar body is just an empty payload
+        username = data.get("username", "")
+        email = data.get("email", "")
+        username = username.strip() if isinstance(username, str) else ""
+        email = email.strip() if isinstance(email, str) else ""
+        if not username and not email:
+            message = "Provide a username or an e-mail address."
+            raise ValidationError({"username": [message], "email": [message]})
+
+        return super().create(request, *args, **kwargs)
+
     def _ensure_auth_policy_view(self, request):
         user = getattr(request, "user", None)
         if not can_view_auth_policy(user, request=request):

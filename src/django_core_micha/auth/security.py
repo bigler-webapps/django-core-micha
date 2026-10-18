@@ -2,8 +2,6 @@
 import logging
 from django.conf import settings
 from allauth.mfa.models import Authenticator
-from functools import wraps
-from rest_framework.exceptions import PermissionDenied, NotAuthenticated
 from django_core_micha.auth.access import is_subject_to_admin_auth_policy
 from django_core_micha.auth.recovery import RecoveryRequest
 from django_core_micha.auth.policy import get_policy_state, AUTH_FACTOR_TWO
@@ -74,44 +72,6 @@ def is_user_security_sufficient(user, request=None, policy=None) -> bool:
         get_required_security_level_for_user(user, policy=policy),
     )
 
-
-def require_security_level(required: str):
-    def decorator(view_func):
-        @wraps(view_func)
-        def _wrapped(*args, **kwargs):
-            # DRF-Methoden: self, request, ...
-            if len(args) >= 2 and hasattr(args[0], "request"):
-                self = args[0]
-                request = args[1]
-                remaining = args[2:]
-            else:
-                self = None
-                request = args[0]
-                remaining = args[1:]
-
-            current = get_security_level(request)
-            sufficient = is_level_sufficient(current, required)
-            enforce = getattr(settings, "SECURITY_ENFORCE_STRONG_AUTH", False)
-
-            if not sufficient and enforce:
-                if not request.user or not request.user.is_authenticated:
-                    raise NotAuthenticated("Authentication required")
-                raise PermissionDenied("Strong authentication required")
-
-            if not sufficient and not enforce:
-                logger.info(
-                    "Security level too low for view %s: current=%s required=%s",
-                    getattr(view_func, "__name__", str(view_func)),
-                    current,
-                    required,
-                )
-
-            if self is None:
-                return view_func(request, *remaining, **kwargs)
-            return view_func(self, request, *remaining, **kwargs)
-
-        return _wrapped
-    return decorator
 
 def get_user_security_state(user, request=None) -> dict:
     """

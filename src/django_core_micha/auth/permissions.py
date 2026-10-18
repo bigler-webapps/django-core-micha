@@ -1,4 +1,3 @@
-from django.conf import settings
 from rest_framework import permissions
 from rest_framework.permissions import BasePermission
 from django_core_micha.auth.access import (
@@ -9,11 +8,7 @@ from django_core_micha.auth.access import (
     has_invite_admin_rights as base_has_invite_admin_rights,
     is_subject_to_admin_auth_policy,
 )
-from django_core_micha.auth.security import (
-    get_security_level,
-    is_level_sufficient,
-    is_user_security_sufficient,
-)
+from django_core_micha.auth.security import is_user_security_sufficient
 from django_core_micha.auth.roles import (
     get_role_level_for_user,
     ROLE_LEVEL_0,
@@ -194,22 +189,3 @@ class IsSupportAgent(BasePermission):
         return bool(getattr(profile, "is_support_agent", False))
 
 
-class RequireStrongSecurity(BasePermission):
-    """
-    Authority on Security Levels.
-    """
-    required_level = "strong"
-
-    def has_permission(self, request, view):
-        # 1. Check current level
-        current = get_security_level(request)
-        
-        # 2. Check sufficiency
-        is_sufficient = is_level_sufficient(current, self.required_level)
-        
-        # 3. Check enforcement setting
-        if getattr(settings, "SECURITY_ENFORCE_STRONG_AUTH", False):
-            return is_sufficient
-            
-        # If enforcement is off, we allow access (but maybe logged elsewhere)
-        return True
