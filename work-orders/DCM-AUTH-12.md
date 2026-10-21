@@ -325,7 +325,12 @@ route from the Claude Orchestrator: `codex exec -C <target dir> --skip-git-repo-
 < work-orders/DCM-AUTH-12.md`, stdin closed by the file, output to the scratchpad.
 `.claude/codex-status.md` had no line for 2026-10-21, so Codex is used by default.
 
-Launch evidence: (filled after dispatch).
+Launch evidence: one CLI dispatch 2026-10-21 from the workspace root with `-C` set to the
+target directory; banner read back: `model: gpt-6-luna`, `provider: openai`, `reasoning effort:
+high`, workdir `C:\Users\Micha Bigler\Documents\webapps\django-core-micha`, session
+`01a15f69-3bce-7ee0-bd62-75ade6f16158`; exit 0 with `RESULT: DONE`. No commit, staging or
+register edit by the implementer; the foreign `sync_secrets` edits were untouched. Review
+findings and the missing required tests were handled by the Orchestrator.
 
 ### Review routing
 
@@ -342,7 +347,7 @@ frontend in the diff). The Orchestrator runs its own security pass in parallel.
 `tests/test_auditlog.py`. Full suite is
 not run locally (publish CI runs `pytest -q` before publishing).
 
-Status: planned; Gate #1 approved by the operator on 2026-10-21 in the Maana
+Status: done (e4e54f2, 3.16.0); Gate #1 approved by the operator on 2026-10-21 in the Maana
 Expertenchat (session local_cbfc9d51-5217-42a4-99ba-27a315c854ce), for all three WOs
 of the chain, delivery order unchanged. Implementation and the minor release of this
 WO are authorized; consumer pins and production remain outside it.
