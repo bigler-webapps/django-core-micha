@@ -140,8 +140,10 @@ Inspection starting points (not an implementation prescription):
 
 STOP — this part is not an instruction to an application implementer.
 
-Status: planned; Gate #1 has not been granted. The request to create these WOs
-authorizes specification work, not implementation or release.
+Status: planned; Gate #1 approved by the operator on 2026-10-21 in the Maana
+Expertenchat (session local_cbfc9d51-5217-42a4-99ba-27a315c854ce), for all three WOs
+of the chain, delivery order unchanged. Implementation and the minor release of this
+WO are authorized; consumer pins and production remain outside it.
 
 After approval, follow `orchestrate-codex` and the current configured roles. Define
 the API contract before mapping/dispatch; finish required independent Tier-3 review,
