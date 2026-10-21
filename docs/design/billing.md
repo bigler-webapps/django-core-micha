@@ -4,7 +4,7 @@
 
 ## Configuration
 
-Settings are read with `getattr(settings, name, default)`. Configure `DCM_BILLING_APP` to the application key, `DCM_BILLING_FILE` to its UTF-8 `billing.yaml` (default: `BASE_DIR / "billing.yaml"`), `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `DCM_BILLING_SUCCESS_URL`, `DCM_BILLING_CANCEL_URL`, and `DCM_BILLING_PORTAL_RETURN_URL`. The cost report accepts a bearer token whose lowercase SHA-256 digest is in `DCM_BILLING_REPORT_TOKEN_SHA256`. Secret values must not be logged or returned.
+Settings are read with `getattr(settings, name, default)`. Configure `DCM_BILLING_APP` to the application key, `DCM_BILLING_FILE` to its UTF-8 `billing.yaml` (default: `BASE_DIR / "billing.yaml"`), `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `DCM_BILLING_SUCCESS_URL`, `DCM_BILLING_CANCEL_URL`, and `DCM_BILLING_PORTAL_RETURN_URL`; optionally `DCM_BILLING_CHECKOUT_CONTEXTS` for contextual checkout (DCM-AUTH-12, below). The cost report accepts a bearer token whose lowercase SHA-256 digest is in `DCM_BILLING_REPORT_TOKEN_SHA256`. Secret values must not be logged or returned.
 
 Each application owns one YAML file with exactly `app`, `currency`, `plans`, and `token_rates`. `app` must match `DCM_BILLING_APP`; v1 supports `usd`. Plan keys match `[a-z0-9_]{1,40}` and are unique. Subscription plans require `interval: month|year`; team packages require positive `term_months` and `seats`; token packages require positive `tokens`. All plans require a name, positive `amount_cents`, and Stripe `tax_code`. Subscription and team plans may set a positive `token_allowance` (omitted means zero). Token rates map names to positive integer tokens per unit. `billing_check` and the Django system check use the same loader and validation.
 
@@ -48,6 +48,8 @@ Run `billing_sync_plans [--dry-run]`. Each plan has a Stripe Product with metada
 
 `POST <prefix>/checkout/` requires a session-authenticated user and JSON `{"plan_key":"personal_monthly"}`; it returns `{"url":"https://..."}`. Subscription plans use Checkout `mode=subscription`; team and token packages use `mode=payment`. The session and, for subscriptions, subscription metadata include `app`, `plan_key`, and `user_id`. Checkout explicitly enables Stripe Managed Payments, requires billing address collection, and enables Stripe automatic tax. Stripe's tax code is attached to the Product. Checkout uses the configured success and cancel URLs. The `managed_payments.enabled` parameter is present in the installed Stripe 16 `SessionCreateParams` definition.
 
+A request with a `context` key is a contextual checkout instead (next section); a request without it, or with `context: null`, is handled exactly as described here, including its response shape and destinations.
+
 `POST <prefix>/portal/` requires a session-authenticated user and returns `{"url":"https://..."}`. It returns 404 `{"detail":"no_customer"}` when the user has no Stripe customer. Cancellation, payment methods, and receipts are handled in Stripe's portal using `DCM_BILLING_PORTAL_RETURN_URL`.
 
 ## Webhook and reconciliation
@@ -64,7 +66,77 @@ Run `billing_sync_plans [--dry-run]`. Each plan has a Stripe Product with metada
 | `invoice.paid` | Retrieve and upsert the subscription; grant the new period allowance once per period. |
 | `invoice.payment_failed` | Mark the known subscription past due; access remains during its current period. |
 
+| `checkout.session.async_payment_succeeded` | Same effect as a paid `checkout.session.completed`. |
+| `checkout.session.async_payment_failed` / `checkout.session.expired` | Only a contextual checkout attempt changes status (next section); otherwise ignored. |
+
 Every event is checked against `metadata.app`; invoice processing also looks at invoice line metadata or retrieves its subscription when necessary. `billing_reconcile [--since ISO_TIMESTAMP]` (default seven days ago) lists subscriptions and recent events, filters by app metadata client-side, and applies the same idempotent handlers. Reconciliation failures report an exception class, not provider data.
+
+## Contextual checkout and attempt resolution (DCM-AUTH-12)
+
+A contextual checkout lets an application send a person to Stripe Checkout from a specific flow (for example a first-use setup) and find that flow again when the person returns, without trusting the return itself. It is opt-in per request: nothing changes for a request without `context`.
+
+**Configuration.** `DCM_BILLING_CHECKOUT_CONTEXTS` maps context keys (`[a-z0-9_]{1,40}`) to exactly `{"success_url": ..., "cancel_url": ...}`; both are absolute `http` or `https` URLs with a host and must not already carry a `checkout_attempt` query parameter. Absent or empty means no context is accepted. A malformed value is the system check error `dcm_billing.E002`, and at runtime no context is accepted. Destinations come only from this setting; the browser never supplies a return URL.
+
+```python
+DCM_BILLING_CHECKOUT_CONTEXTS = {
+    "setup": {"success_url": "https://maana.example/setup/plan/done", "cancel_url": "https://maana.example/setup/plan"},
+    "account": {"success_url": "https://maana.example/account/billing/done", "cancel_url": "https://maana.example/account/billing"},
+}
+```
+
+**Migration.** `dcm_billing.0003_checkoutattempt` adds one table (`CheckoutAttempt`) and changes no existing billing table or row.
+
+**Starting a checkout.** `POST <prefix>/checkout/` (session-authenticated, CSRF-protected) with
+
+```json
+{"plan_key": "personal_monthly", "context": "setup", "idempotency_key": "6f1c0e9a-3b6d-4f7e-9d7a-2a5b8c1d0e4f"}
+```
+
+`idempotency_key` is generated by the client for one deliberate checkout (a click on "pay"), matches `[A-Za-z0-9_-]{16,64}`, and is reused unchanged when the same request is retried after a network interruption. A new key is a new, explicit attempt. The server creates an attempt bound to the signed-in person, `DCM_BILLING_APP`, the plan and the context, with an opaque server-generated `reference` (`[A-Za-z0-9_-]`, 16 to 64 characters, unguessable). It creates one Stripe Checkout Session for it with the context's destinations, each carrying the added query parameter `checkout_attempt=<reference>` (existing query parameters are kept), `client_reference_id` = reference, and metadata `checkout_attempt` and `checkout_context` next to the existing `app`, `plan_key` and `user_id`. Everything else (mode, Managed Payments, tax, address collection, plan metadata) is the same as for a checkout without context. The Stripe request uses the idempotency key `dcm-checkout:<app>:<reference>` and the price stored on the attempt, so a retry can never produce a second session.
+
+Response 200:
+
+```json
+{
+  "url": "https://checkout.stripe.com/c/pay/cs_test_...",
+  "attempt": {
+    "reference": "Qm9sZC1yZWYtZXhhbXBsZS0xMjM0NTY",
+    "context": "setup",
+    "plan_key": "personal_monthly",
+    "status": "open",
+    "created_at": "2026-10-21T09:15:02.120000+00:00",
+    "expires_at": "2026-10-22T09:15:03+00:00"
+  }
+}
+```
+
+Replaying the same `idempotency_key` with the same plan and context returns the same attempt and the same `url` without a second Stripe session; if an earlier call failed before the session was stored, the replay repeats the identical Stripe request. Errors write no attempt unless stated:
+
+| Status | Body | When |
+| --- | --- | --- |
+| 401 | `{"detail": "authentication_required"}` | not signed in |
+| 400 | `{"detail": "unknown_context"}` | `context` is not a configured key (also when none is configured) |
+| 400 | `{"detail": "invalid_idempotency_key"}` | key missing or malformed |
+| 400 | `{"detail": "unknown_plan"}` | plan not declared or not synced to Stripe |
+| 409 | `{"detail": "idempotency_key_reused"}` | the key belongs to an attempt with another plan or context |
+| 409 | `{"detail": "attempt_not_open", "attempt": {...}}` | the key's attempt is no longer open (paid, processing, failed or expired); start a new attempt with a new key |
+| 502 | `{"detail": "checkout_unavailable"}` | Stripe failed; the attempt is kept without a session and a replay with the same key retries the identical Stripe request |
+
+**Resolving a return.** `GET <prefix>/checkout/attempts/<reference>/` (session-authenticated, `no-store`) answers 200 with the same `{"url", "attempt"}` shape. It answers 404 `{"detail": "attempt_not_found"}` for an unknown or malformed reference, for another person's attempt and for another app's attempt alike, and 401 when not signed in. `url` is the Stripe Checkout URL while the attempt is `open` and its session has not expired, so the person can resume the same payment after a cancellation; otherwise `null`. The application reads `context` to return to the originating flow; the `checkout_attempt` parameter, the destination used and any other query parameter are never evidence of payment.
+
+**Status.** Only verified Stripe events processed by the webhook or `billing_reconcile` change it, inside the same transaction as the existing grant logic; the browser return, the success destination or an added query parameter never do.
+
+| `status` | Meaning | Changed by |
+| --- | --- | --- |
+| `open` | No verified completion yet. After a success return the webhook may still be in flight: keep resolving. After a cancellation nothing was paid; `url` resumes the same session. | creation |
+| `processing` | Checkout completed, payment not yet settled (delayed payment method). No entitlement yet. | `checkout.session.completed` with `payment_status: unpaid` |
+| `paid` | Payment verified; the plan's existing grant (subscription, team package or token credit) was applied in the same transaction. | `checkout.session.completed` with `paid` or `no_payment_required`, `checkout.session.async_payment_succeeded` |
+| `failed` | The delayed payment failed. Retry with a new key. | `checkout.session.async_payment_failed` |
+| `expired` | The Checkout Session expired unpaid. Retry with a new key. Also reported for an `open` attempt whose session `expires_at` has passed. | `checkout.session.expired` |
+
+Transitions only move forward: `open` to any other status, `processing` to `paid` or `failed`; `paid`, `failed` and `expired` are final, so a late or repeated event never moves an attempt back. Duplicate events, delayed events and reconciliation keep the existing idempotent grant behaviour: one grant per payment, whichever path runs first. An event finds its attempt by the session id; if the session id was not stored yet, by `metadata.checkout_attempt` together with matching `app` and `user_id`, which then stores it. Entitlement itself is still read from `GET <prefix>/me/` (`access`, `tokens`); an attempt never grants access on its own. The webhook endpoint of an application that uses contextual checkout must subscribe `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed` and `checkout.session.expired`.
+
+**Limits.** A new attempt does not close an older open one: two open attempts are two payable sessions until Stripe expires them, as with two checkouts without context today. A checkout without `context` creates no attempt and its retries are not idempotent.
 
 ## Access, seats, and tokens
 
