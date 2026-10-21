@@ -12,7 +12,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .config import load_billing_config
-from .models import BillingCustomer, StripePrice, Subscription, TeamPackage, Purchase, TokenEntry
+from .models import BillingCustomer, StripePrice, Subscription, TeamPackage, Purchase, TokenEntry, CheckoutAttempt
 from .services import credit_purchase, grant_tokens
 
 
@@ -114,12 +114,12 @@ def get_customer(user):
     return row
 
 
-def checkout_session_params(*, plan, price, user, customer_id):
+def checkout_session_params(*, plan, price, user, customer_id, success_url=None, cancel_url=None, attempt_reference=None, context=None):
     """Build only parameters supported by Stripe Checkout SessionCreateParams in Stripe 16."""
     mode = "subscription" if plan.kind == "subscription" else "payment"
     params = {"mode": mode, "customer": customer_id, "line_items": [{"price": price.stripe_price_id, "quantity": 1}],
-        "success_url": getattr(settings, "DCM_BILLING_SUCCESS_URL", ""),
-        "cancel_url": getattr(settings, "DCM_BILLING_CANCEL_URL", ""),
+        "success_url": success_url if success_url is not None else getattr(settings, "DCM_BILLING_SUCCESS_URL", ""),
+        "cancel_url": cancel_url if cancel_url is not None else getattr(settings, "DCM_BILLING_CANCEL_URL", ""),
         "metadata": {"app": getattr(settings, "DCM_BILLING_APP", ""), "plan_key": plan.key, "user_id": str(user.pk)},
         "billing_address_collection": "required", "automatic_tax": {"enabled": True},
         "managed_payments": {"enabled": True}}
@@ -127,6 +127,10 @@ def checkout_session_params(*, plan, price, user, customer_id):
         value = getattr(plan, key, None)
         if value:
             params["metadata"][key] = str(value)
+    if attempt_reference is not None:
+        params["client_reference_id"] = attempt_reference
+        params["metadata"]["checkout_attempt"] = attempt_reference
+        params["metadata"]["checkout_context"] = context
     if mode == "subscription":
         params["subscription_data"] = {"metadata": {"app": getattr(settings, "DCM_BILLING_APP", ""),
             "plan_key": plan.key, "user_id": str(user.pk)}}
@@ -332,6 +336,8 @@ def process_stripe_event(event):
     metadata = _event_app_and_metadata(kind, obj)
     if metadata.get("app") != getattr(settings, "DCM_BILLING_APP", ""):
         return "ignored"
+    if kind in ("checkout.session.async_payment_failed", "checkout.session.expired"):
+        return "processed" if _update_checkout_attempt(kind, obj, metadata) else "ignored"
     if kind in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
         _upsert_subscription(obj)
     elif kind in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
@@ -339,6 +345,8 @@ def process_stripe_event(event):
         user = _user_from_metadata(metadata)
         if not plan or not user:
             return "ignored"
+        # in the caller's transaction: a grant below that raises rolls the attempt status back with it
+        _update_checkout_attempt(kind, obj, metadata)
         if plan.kind == "subscription":
             sid = obj.get("subscription")
             if sid:
@@ -387,6 +395,39 @@ def process_stripe_event(event):
     else:
         return "ignored"
     return "processed"
+
+def _update_checkout_attempt(kind, obj, metadata):
+    transitions={"checkout.session.completed": "open",
+                 "checkout.session.async_payment_succeeded": "paid",
+                 "checkout.session.async_payment_failed": "failed",
+                 "checkout.session.expired": "expired"}
+    if kind not in transitions: return False
+    session_id=obj.get("id") or ""
+    qs=CheckoutAttempt.objects.select_for_update()
+    attempt=qs.filter(stripe_session_id=session_id).first() if session_id else None
+    if attempt is None:
+        reference=(metadata or {}).get("checkout_attempt")
+        user_id=(metadata or {}).get("user_id")
+        if not reference or not user_id: return False
+        # only an attempt whose session was never stored: a bound attempt belongs to its own session
+        attempt=qs.filter(reference=reference,app=getattr(settings,"DCM_BILLING_APP",""),user_id=user_id,stripe_session_id="").first()
+        if attempt is None: return False
+    metadata=metadata or {}
+    if (str(metadata.get("user_id") or "")!=str(attempt.user_id) or metadata.get("plan_key")!=attempt.plan_key
+            or metadata.get("checkout_context") not in (None,attempt.context)):
+        return False  # a session for another person, plan or context never moves this attempt
+    target=transitions[kind]
+    if kind=="checkout.session.completed":
+        target="paid" if obj.get("payment_status") in ("paid","no_payment_required") else ("processing" if obj.get("payment_status")=="unpaid" else "open")
+    allowed={"open": {"processing","paid","failed","expired"}, "processing":{"paid","failed"}}
+    transitioned=target in allowed.get(attempt.status,set())
+    if transitioned:
+        attempt.status=target
+    bound=bool(session_id and not attempt.stripe_session_id)
+    if bound: attempt.stripe_session_id=session_id
+    if transitioned or bound:
+        attempt.save(update_fields=("status","stripe_session_id","updated_at"))
+    return transitioned
 
 def _create_purchase(obj,event,user,plan,kind,object_id,*,payment_intent=None,invoice_id="",term_start=None,term_end=None,grant_refs=None,tokens=0):
     details=obj.get("customer_details") or {}

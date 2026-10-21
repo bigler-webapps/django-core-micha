@@ -1,5 +1,7 @@
 import hashlib, hmac, re
+import secrets
 from datetime import datetime, timezone as dt_timezone
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -9,7 +11,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 from .config import load_billing_config
-from .models import TeamPackage, TeamSeat, AICostRecord, TokenEntry, Purchase
+from .models import TeamPackage, TeamSeat, AICostRecord, TokenEntry, Purchase, CheckoutAttempt
 from .services import access_state, token_balance, models_q_expiry
 from .models import BillingCustomer, StripeEvent
 from .stripe_service import checkout_session_params, get_customer, process_stripe_event
@@ -114,19 +116,90 @@ def checkout(request):
     if not request.user.is_authenticated:
         return JsonResponse({"detail":"authentication_required"},status=401)
     import json
+    try: data=json.loads(request.body or b"{}")
+    except (ValueError,UnicodeDecodeError): data=None
+    if isinstance(data,dict) and data.get("context") is not None:
+        return _contextual_checkout(request,data)
     try:
-        data=json.loads(request.body or b"{}")
+        if data is None: data=json.loads(request.body or b"{}")
         key=data.get("plan_key") if isinstance(data,dict) else None
         plan=next(p for p in load_billing_config().plans if p.key==key)
         from .stripe_service import _latest_price, _stripe
         price=_latest_price(plan.key)
         customer=get_customer(request.user)
         session=_stripe().checkout.Session.create(**checkout_session_params(plan=plan,price=price,user=request.user,customer_id=customer.stripe_customer_id))
-    except (StopIteration,LookupError):
-        return JsonResponse({"detail":"unknown_plan"},status=400)
-    except Exception:
-        return JsonResponse({"detail":"checkout_unavailable"},status=502)
-    return JsonResponse({"url":session.url})
+    except (StopIteration,LookupError): return JsonResponse({"detail":"unknown_plan"},status=400)
+    except Exception: return JsonResponse({"detail":"checkout_unavailable"},status=502)
+    return JsonResponse(_checkout_body(session.url))
+
+def _attempt_data(attempt):
+    status="expired" if attempt.status=="open" and attempt.expires_at and attempt.expires_at<=timezone.now() else attempt.status
+    return {"reference":attempt.reference,"context":attempt.context,"plan_key":attempt.plan_key,"status":status,
+            "created_at":attempt.created_at.isoformat(),"expires_at":attempt.expires_at.isoformat() if attempt.expires_at else None}
+
+def _checkout_body(url, attempt=None):
+    if attempt is None: return {"url":url}
+    state=_attempt_data(attempt)
+    resumable=state["status"]=="open" and bool(attempt.stripe_session_id)
+    return {"url":attempt.stripe_checkout_url if resumable else None,"attempt":state}
+
+def _append_attempt(url, reference):
+    parts=urlsplit(url)
+    query=parse_qsl(parts.query,keep_blank_values=True)+[("checkout_attempt",reference)]
+    return urlunsplit((parts.scheme,parts.netloc,parts.path,urlencode(query),parts.fragment))
+
+def _contextual_checkout(request,data):
+    from django.db import IntegrityError
+    from .config import load_checkout_contexts
+    from .stripe_service import _latest_price, _stripe
+    contexts,_=load_checkout_contexts(); context=data.get("context")
+    if not isinstance(context,str) or context not in contexts: return JsonResponse({"detail":"unknown_context"},status=400)
+    idem=data.get("idempotency_key")
+    if not isinstance(idem,str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}",idem,flags=re.ASCII): return JsonResponse({"detail":"invalid_idempotency_key"},status=400)
+    key=data.get("plan_key")
+    plan=next((p for p in load_billing_config().plans if p.key==key),None)
+    if plan is None: return JsonResponse({"detail":"unknown_plan"},status=400)
+    app=getattr(settings,"DCM_BILLING_APP","")
+    attempt=CheckoutAttempt.objects.filter(user=request.user,app=app,idempotency_key=idem).first()
+    if attempt is not None:
+        if attempt.plan_key!=plan.key or attempt.context!=context: return JsonResponse({"detail":"idempotency_key_reused"},status=409)
+    else:
+        # a replay repeats the stored price; only a new attempt resolves the current one
+        try: price=_latest_price(plan.key)
+        except LookupError: return JsonResponse({"detail":"unknown_plan"},status=400)
+        try:
+            with transaction.atomic():
+                attempt=CheckoutAttempt.objects.create(reference=secrets.token_urlsafe(24),user=request.user,app=app,plan_key=plan.key,
+                    context=context,idempotency_key=idem,stripe_price_id=price.stripe_price_id)
+        except IntegrityError:
+            attempt=CheckoutAttempt.objects.get(user=request.user,app=app,idempotency_key=idem)
+            if attempt.plan_key!=plan.key or attempt.context!=context: return JsonResponse({"detail":"idempotency_key_reused"},status=409)
+    with transaction.atomic():
+        attempt=CheckoutAttempt.objects.select_for_update().get(pk=attempt.pk)
+        state=_attempt_data(attempt)
+        if state["status"]!="open": return JsonResponse({"detail":"attempt_not_open","attempt":state},status=409)
+        if attempt.stripe_session_id: return JsonResponse(_checkout_body(None,attempt))
+        try:
+            destinations=contexts[context]
+            customer=get_customer(request.user)
+            params=checkout_session_params(plan=plan,price=type("StoredPrice",(),{"stripe_price_id":attempt.stripe_price_id})(),user=request.user,
+                customer_id=customer.stripe_customer_id,success_url=_append_attempt(destinations["success_url"],attempt.reference),
+                cancel_url=_append_attempt(destinations["cancel_url"],attempt.reference),attempt_reference=attempt.reference,context=context)
+            session=_stripe().checkout.Session.create(**params,idempotency_key=f"dcm-checkout:{app}:{attempt.reference}")
+        except Exception: return JsonResponse({"detail":"checkout_unavailable"},status=502)
+        attempt.stripe_session_id=session.id; attempt.stripe_checkout_url=session.url
+        expiry=getattr(session,"expires_at",None)
+        attempt.expires_at=datetime.fromtimestamp(expiry,tz=dt_timezone.utc) if expiry else None
+        attempt.save(update_fields=("stripe_session_id","stripe_checkout_url","expires_at","updated_at"))
+        return JsonResponse(_checkout_body(session.url,attempt))
+
+@require_GET
+def checkout_attempt(request,reference):
+    response_headers={"Cache-Control":"no-store"}
+    if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401,headers=response_headers)
+    attempt=CheckoutAttempt.objects.filter(reference=reference,user=request.user,app=getattr(settings,"DCM_BILLING_APP","")).first()
+    if attempt is None: return JsonResponse({"detail":"attempt_not_found"},status=404,headers=response_headers)
+    return JsonResponse(_checkout_body(None,attempt),headers=response_headers)
 
 @csrf_protect
 @require_http_methods(["POST"])

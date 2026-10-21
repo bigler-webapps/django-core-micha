@@ -58,3 +58,16 @@ class Purchase(models.Model):
     status=models.CharField(max_length=16,choices=STATUSES,default="active"); withdrawn_at=models.DateTimeField(null=True,blank=True)
     refund_cents=models.PositiveBigIntegerField(null=True,blank=True); stripe_refund_id=models.CharField(max_length=255,blank=True)
     withdrawal_note=models.TextField(blank=True); withdrawal_email_sent=models.BooleanField(default=False)
+
+class CheckoutAttempt(models.Model):
+    STATUSES=[(x,x) for x in ("open","processing","paid","failed","expired")]
+    reference=models.CharField(max_length=64,unique=True)
+    user=models.ForeignKey(User,on_delete=models.CASCADE,related_name="billing_checkout_attempts")
+    app=models.CharField(max_length=80); plan_key=models.CharField(max_length=40); context=models.CharField(max_length=40)
+    idempotency_key=models.CharField(max_length=64); status=models.CharField(max_length=16,choices=STATUSES,default="open")
+    stripe_price_id=models.CharField(max_length=255); stripe_session_id=models.CharField(max_length=255,blank=True)
+    stripe_checkout_url=models.TextField(blank=True); expires_at=models.DateTimeField(null=True)
+    created_at=models.DateTimeField(default=timezone.now); updated_at=models.DateTimeField(auto_now=True)
+    class Meta:
+        constraints=[models.UniqueConstraint(fields=("user","app","idempotency_key"),name="dcm_bill_attempt_key_unique"),
+                     models.UniqueConstraint(fields=("stripe_session_id",),condition=~Q(stripe_session_id=""),name="dcm_bill_attempt_session_unique")]

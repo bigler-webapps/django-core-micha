@@ -11,6 +11,7 @@ INSTALLED_APPS = [
     "django_core_micha.assistant",
     "django_core_micha.billing",
     "django_core_micha.receipts",
+    "django_core_micha.terms",
     "django_core_micha.activity",
     "django_core_micha.onboarding",
     "allauth",

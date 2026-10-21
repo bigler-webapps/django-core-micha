@@ -69,7 +69,7 @@ Errors write nothing. They are checked in this order:
 | 400 | `{"detail": "unexpected_fields", "fields": ["accepted_at"]}` | any key other than `version` and `accept` (sorted list), for example a submitted timestamp, user, app or URL |
 | 400 | `{"detail": "acceptance_required"}` | `accept` missing or not the JSON value `true` |
 | 400 | `{"detail": "version_required"}` | `version` missing, not a string or empty |
-| 409 | `{"detail": "version_mismatch", "document": {...}, "accepted": false, "accepted_at": null}` | `version` differs from the configured version (stale page); the body carries the current document and acceptance state so the client can show the current terms and ask again |
+| 409 | `{"detail": "version_mismatch", "document": {...}, "accepted": ..., "accepted_at": ...}` | `version` differs from the configured version (stale page); `document`, `accepted` and `accepted_at` are exactly what `GET` returns now (the current version and the person's acceptance of it), so the client can show the current terms and ask again, or continue if they were already accepted |
 
 A CSRF failure answers 403 with the host application's CSRF failure response.
 

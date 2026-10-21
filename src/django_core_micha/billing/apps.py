@@ -10,5 +10,9 @@ class BillingConfig(AppConfig):
         def billing_config_check(app_configs, **kwargs):
             from .config import load_billing_config
             try: load_billing_config()
-            except Exception as exc: return [Error(str(exc), id="dcm_billing.E001")]
-            return []
+            except Exception as exc: errors=[Error(str(exc), id="dcm_billing.E001")]
+            else: errors=[]
+            from .config import load_checkout_contexts
+            _, context_errors=load_checkout_contexts()
+            errors.extend(Error(message,id="dcm_billing.E002") for message in context_errors)
+            return errors

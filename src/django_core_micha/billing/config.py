@@ -4,6 +4,7 @@ from django.utils.module_loading import import_string
 from dataclasses import dataclass
 from pathlib import Path
 import re
+from urllib.parse import urlsplit, parse_qsl
 
 @dataclass(frozen=True)
 class Plan:
@@ -60,3 +61,26 @@ def load_billing_config():
 def _hook(setting):
     value = getattr(settings,setting,None)
     return import_string(value) if isinstance(value,str) else value
+
+def load_checkout_contexts():
+    """Return validated contextual destinations and configuration errors."""
+    raw=getattr(settings,"DCM_BILLING_CHECKOUT_CONTEXTS",None)
+    if raw is None or raw == {}: return {}, []
+    errors=[]; result={}
+    if not isinstance(raw,dict): return {}, ["DCM_BILLING_CHECKOUT_CONTEXTS must be a mapping."]
+    for key,value in raw.items():
+        prefix=f"Context {key} "
+        if not isinstance(key,str) or not re.fullmatch(r"[a-z0-9_]{1,40}",key,flags=re.ASCII):
+            errors.append("Context keys must match [a-z0-9_]{1,40}."); continue
+        if not isinstance(value,dict) or set(value)!={"success_url","cancel_url"}:
+            errors.append(f"{prefix}must contain exactly success_url and cancel_url."); continue
+        valid_entry=True
+        for field in ("success_url","cancel_url"):
+            url=value[field]
+            try:
+                parsed=urlsplit(url) if isinstance(url,str) else None
+                valid=bool(parsed and parsed.scheme in ("http","https") and parsed.hostname and not any(k=="checkout_attempt" for k,_ in parse_qsl(parsed.query,keep_blank_values=True)))
+            except ValueError: valid=False
+            if not valid: errors.append(f"{prefix}{field} must be an absolute HTTP(S) URL without checkout_attempt."); valid_entry=False
+        if valid_entry: result[key]=value.copy()
+    return (result if not errors else {}), errors

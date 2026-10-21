@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.16.0] — 2026-10-21
+
+### Added
+
+DCM-AUTH-12: two opt-in backend capabilities for resumable setup flows. Nothing changes for an application that does not adopt them.
+
+**Terms-of-use acceptance (`django_core_micha.terms`, new opt-in app, label `dcm_terms`).** Records that a signed-in person explicitly accepted one
+version of the application's terms: app, version, document URL and server time, one row per person, app and version, never inferred from the
+privacy statement, the cookie preference, a social login, a checkout or an admin edit. Configuration `DCM_TERMS_DOCUMENT = {"app", "version",
+"url"}` (system checks `dcm_terms.W001` absent, `dcm_terms.E001` malformed). Session API `GET|POST <prefix>/` (CSRF-protected, strict body
+`{"version", "accept": true}`, 201 new / 200 repeated with the original timestamp, 409 `version_mismatch` with the current document). Server-side
+check `has_accepted_current_terms(user)` (fail closed) and the DRF permission `HasAcceptedCurrentTerms` (403 `terms_acceptance_required`);
+installing the app adds no global gate. **Adoption:** add the app, set `DCM_TERMS_DOCUMENT`, run `migrate dcm_terms` (`0001_initial`, one new
+table, no profile migration), mount `django_core_micha.terms.urls`, gate the app's own operations. Contract: `docs/design/terms.md`.
+
+**Contextual checkout (billing).** `POST <prefix>/checkout/` accepts an optional `context` (a key of the new `DCM_BILLING_CHECKOUT_CONTEXTS`,
+server-side destinations only, system check `dcm_billing.E002`) with a client `idempotency_key`; it creates an ownership-bound checkout attempt with
+an opaque reference, binds one Stripe Checkout Session to it (Stripe idempotency key per attempt, replays never create a second session) and
+answers `{"url", "attempt"}`. `GET <prefix>/checkout/attempts/<reference>/` resolves an attempt for its owner only. Attempt status (`open`,
+`processing`, `paid`, `failed`, `expired`) changes only through verified Stripe events, forward only, in the same transaction as the existing
+grant; the return URL is never evidence of payment. Newly handled events: `checkout.session.async_payment_failed` and `checkout.session.expired`.
+A request without `context` keeps exactly the previous parameters and response. **Adoption:** run `migrate dcm_billing`
+(`0003_checkoutattempt`, one new table; required on upgrade for every billing app, because the webhook looks attempts up), configure the
+contexts, subscribe the webhook to the four `checkout.session.*` events. Contract: `docs/design/billing.md`, section "Contextual checkout and
+attempt resolution (DCM-AUTH-12)".
+
 ## [3.15.0] — 2026-10-18
 
 ### Security
