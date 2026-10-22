@@ -50,25 +50,167 @@ After this order:
 
 ## Part B — Implementation map — addressed to the implementer
 
-**Not dispatch-ready.** The Orchestrator fills the verified context package before dispatch.
+**Target working directory:** `C:/Users/Micha Bigler/Documents/webapps/django-core-micha` (git root,
+`main`). Use absolute paths. The checkout is shared: `src/django_core_micha/scripts/sync_secrets.py`
+and `tests/test_sync_secrets.py` carry another session's uncommitted edits — do not open, format or
+revert them.
 
-**Target working directory:** `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`.
+### Verified facts (Orchestrator, 2026-10-22)
 
-### Named orientation files
+- `assistant/completion.py:21-77` is the whole one-shot path: prompt/size checks, catalogue
+  selection, `resolve_credential`, `_make_driver` (`assistant/turns.py:216`), one `provider.stream(...)`
+  inside `asyncio.timeout(provider_timeout)`, text deltas capped at `max_output_bytes`, `usage` merged,
+  one `record_ai_call` with the usage, CLI session directory removed in `finally`.
+- **Cost guard is inside the API drivers**, per SDK call: `openai_api.py:28-71` and
+  `anthropic_api.py:128-151` reserve (`base._reserve`, denial → `DriverError("quota_exceeded")`),
+  settle on success and release/charge on failure. A repair round that calls `provider.stream(...)`
+  again is therefore reserved and settled like the first call — do not add a second guard in the core.
+  `claude_cli` (subscription) has no cost guard today and gets none.
+- `max_repair_rounds` exists in `assistant/limits.py:10` (default 2); it is used by structured chat
+  turns (`turns.py:366-389`), which this WO does not touch.
+- Native structured output as `extraction` uses it: OpenAI Responses
+  `text={"format": {"type": "json_schema", "name": ..., "strict": True, "schema": schema}}`
+  (`extraction/drivers/openai_driver.py:84-95`); Anthropic
+  `output_config={"format": {"type": "json_schema", "schema": schema}}`
+  (`extraction/drivers/anthropic_driver.py:95-101`). The assistant's Anthropic driver already sends
+  `output_config={"effort": ...}` (`assistant/drivers/anthropic_api.py:27-29`) — merge, do not replace.
+- **Claude CLI (2.1.296 installed here; no deployment pins a version)** has `--json-schema <schema>`.
+  Measured with stream-json: the CLI answers through an internal tool, so the `system/init` event's
+  `tools` list contains `"StructuredOutput"` in addition to the MCP tools; the assistant event carries a
+  `tool_use` block named `StructuredOutput` (no text block); the `result` event carries
+  `structured_output` (the parsed object) and `result` (its JSON text). The driver's init check
+  (`claude_cli.py:147-157`) compares the tool list exactly and would raise `security_violation` —
+  the expected set must include `"StructuredOutput"` exactly when a schema is passed, never otherwise.
+- `extraction.schema_contract.validate_schema` (`extraction/schema_contract.py:10-38`) only rejects
+  type arrays and objects without `additionalProperties: false`; dcm has no JSON-Schema validator
+  dependency (`jsonschema` is not declared) — do not add one.
 
-- `src/django_core_micha/assistant/completion.py`
-- `src/django_core_micha/assistant/drivers/openai_api.py`, `anthropic_api.py`, `claude_cli.py`, `base.py`
-- `src/django_core_micha/extraction/schema_contract.py`, `extraction/drivers/openai_driver.py`, `extraction/drivers/anthropic_driver.py` (existing native structured-output usage)
-- `src/django_core_micha/assistant/limits.py`
-- `docs/design/assistant-chat.md`
+### Decisions (Orchestrator mapping of Part A; implement exactly)
+
+1. **Signature and result.** `acomplete`/`complete` gain `response_schema=None`.
+   `CompletionResult` gets a third field `data` defaulting to `None`, so `CompletionResult(text, usage)`
+   still constructs and the no-schema result is unchanged.
+2. **Schema gate, before credential resolution or any driver call.** A schema must pass
+   `validate_schema` AND the completion subset: root `type: "object"`; only the keywords `type`,
+   `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `anyOf`, `description`,
+   `title`; `type` one of `object, array, string, number, integer, boolean, null`; every object has
+   `properties` and its `required` lists exactly all its property names (OpenAI strict mode requires
+   that; optional values are expressed with `anyOf` + `null`). Anything else raises
+   `DriverError("invalid_schema")` (new code) and no provider call happens. The subset is what the
+   core validator below can enforce on all three paths — never a silent loosening.
+3. **Core validator** in a new module `src/django_core_micha/assistant/structured.py`:
+   `check_schema(schema)` (decision 2) and `validation_error(value, schema)` → `None` or a short
+   message with a JSON path (≤ 300 chars, no schema dump). Booleans are not numbers; `integer` means a
+   Python `int` that is not `bool`.
+4. **Getting the object.** A driver may yield `{"type": "structured", "data": <object>}`; the core
+   prefers that over the text. Otherwise the core parses the joined text: strip whitespace and at most
+   one surrounding Markdown code fence (```` ``` ```` or ```` ```json ````), then `json.loads`; the
+   result must be a JSON object. Then `validation_error`.
+5. **Repair loop in the core.** On a parse or validation failure, up to `max_repair_rounds` further
+   calls; each repair call sends the original prompt, the previous answer (the text, or the structured
+   object as JSON) and a note: `Your previous answer did not match the required JSON schema: <error>.
+   Answer again with only the JSON object.` API drivers receive it as `messages` (user, assistant,
+   user); the CLI receives a fresh one-shot `prompt` payload whose `message` contains the same three
+   parts (no `--resume`). Still invalid after the last round → `DriverError("invalid_output")`. Each call
+   keeps today's per-call `provider_timeout` and `max_output_bytes`.
+6. **Usage.** Sum `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`,
+   `cache_tokens` over all calls; other keys (e.g. the CLI's `context_tokens`) keep the last call's
+   value. `record_ai_call` runs once with the summed usage, as today.
+7. **Drivers.** `stream(..., response_schema=None, ...)`:
+   - `openai_api`: when given, `responses.create(..., text={"format": {"type": "json_schema",
+     "name": "completion", "strict": True, "schema": schema}})`; omitted otherwise (the chat request
+     stays byte-identical).
+   - `anthropic_api`: when given, `output_config={"effort": ..., "format": {"type": "json_schema",
+     "schema": schema}}`; otherwise unchanged.
+   - `claude_cli`: when given and the CLI supports it (`--json-schema` appears in `claude --help`,
+     checked once per binary path and cached, 10 s timeout, a failed check counts as unsupported), add
+     `--json-schema <compact JSON>`, expect `"StructuredOutput"` in the init tool list, and yield
+     `{"type": "structured", "data": ...}` from the result event's `structured_output` when it is a
+     dict. When unsupported, append the schema to the prompt message with the instruction to answer
+     with only a JSON object matching it, and let the core parse the text. Without a schema nothing in
+     the CLI path changes.
+
+### Files
+
+- `src/django_core_micha/assistant/completion.py`, new `src/django_core_micha/assistant/structured.py`,
+  `src/django_core_micha/assistant/drivers/openai_api.py`, `anthropic_api.py`, `claude_cli.py`.
+- Tests: extend `src/django_core_micha/assistant/tests/test_completion.py` (existing fakes and
+  fixtures at its top) or add `test_completion_structured.py` beside it.
+- Do NOT edit `docs/`, `CHANGELOG.md`, the version, `WORK_ORDERS.md` or `webapp-management`
+  (Orchestrator's).
+
+### Required tests (Part A) — how to pin them
+
+1. No schema: an existing-style fake driver returns exactly `CompletionResult("ok", usage, None)` and
+   the drivers' SDK calls carry no `text`/`format`/`--json-schema`.
+2. Per driver with a schema: OpenAI and Anthropic with their SDK clients faked at the client boundary
+   but returning the SDK's own event/message types (see `test_completion_uses_api_cost_guard_for_calling_user`
+   in `test_completion.py` and `tests/test_extraction.py` for how the repo builds them; follow
+   [feedback: fakes must be real SDK objects] — construct `openai.types.responses` /
+   `anthropic.types` objects, not dicts) — assert the request carries the native format and the
+   result has `data`. CLI: a fake process factory emitting the measured event sequence (init with
+   `StructuredOutput`, assistant `tool_use`, result with `structured_output`) returns `data`; argv
+   contains `--json-schema`; with capability detection forced off, the prompt carries the schema and
+   a text answer is parsed.
+3. Repair: invalid then valid answer → second answer's `data`, usage summed over both calls, the
+   second call's input carries the validation error; three invalid answers with
+   `max_repair_rounds=2` → `invalid_output` after exactly three calls.
+4. Invalid schemas (type array, missing `additionalProperties: false`, `$ref`, `pattern`, optional
+   property not in `required`, non-object root) → `invalid_schema`, and the fake driver factory /
+   credential resolver were never called.
+5. Cost guard: with the real OpenAI driver and `_reserve` patched to record, an invalid-then-valid
+   run reserves and settles twice; a reservation denied on the repair call raises `quota_exceeded`.
+6. CLI init check: with a schema, an init tool list WITHOUT `StructuredOutput` or with an extra tool is
+   `security_violation`; without a schema, `StructuredOutput` in the list is `security_violation`.
+
+Run only the tests you wrote, from the target working directory:
+`python -m pytest src/django_core_micha/assistant/tests -q -p no:cacheprovider -k "completion"`
+
+### Invariants and pitfalls
+
+- Chat turns, structured turns, the WebSocket protocol, `extraction` and the no-schema request bodies
+  stay unchanged.
+- The validation error text is generated by the core validator from the schema path; it never contains
+  credentials or the full schema.
+- Files are UTF-8: open them with explicit `encoding="utf-8"`.
 
 ### Preamble
 
-> Part A is the complete scope. Do not edit WORK_ORDERS.md; do not install dependencies, change lockfiles or tidy foreign changes. Do not git add/commit/push, self-review or treat your own run as the gate. Stop and report an out-of-scope cause. The Orchestrator supplies the progress contract and runtime-specific preamble.
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`, and the
+> app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI
+> unless the spec says so; do not update `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` — the register
+> row and the review verdicts are the orchestrator's alone.** **Your tools are for editing source
+> and test files and for running the tests you wrote — nothing else.** Do NOT install dependencies,
+> touch a lockfile, run a package manager, or tidy up stray files; if something in the repo state
+> blocks you, stop and report it as `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT
+> `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests
+> the `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute
+> and pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any review).
+> The orchestrator re-runs the authoritative set + does the independent review after you finish —
+> those are the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
+
+Work from this package; do not explore broadly from scratch; open only the named files to verify.
 
 ## Part C — Orchestrator-only
 
-**STOP — this section is for the Orchestrator, not a dispatched implementer.**
+> **If you are the implementer reading this work order as your own specification: STOP at this line.
+> Everything below describes what the Orchestrator does AFTER you finish. You do none of it — no
+> reviewers, no verification run, no register edit, no commit.** You ARE the implementation
+> instance described below; do NOT launch or dispatch another implementer.
+
+- Execution: `codex/gpt-6-luna` CLI, reasoning high, WO on stdin, `-C` the target directory. Launch
+  evidence: (filled after dispatch).
+- Review: all four lenses plus `sec_review` in one batch, read-only, diff inline.
+- Verification: the assistant tests, `extraction` tests, `tests/test_declared_dependencies.py`;
+  the Orchestrator writes `docs/design/assistant-chat.md`, `CHANGELOG.md`, the minor bump and the
+  `webapp-management/SHARED_CAPABILITIES.md` row (that repo, `main`, own commit).
 
 - Tier 3 (a change inside shared-core): all reviewers, full context.
 - Release: tag and publish per dcm's publish-from-main topology; consumers bump via their own WOs (hram: HRAM-DEP-8 / HRAM-AI-1).
