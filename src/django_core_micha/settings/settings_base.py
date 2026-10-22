@@ -294,6 +294,8 @@ if IS_LOCAL:
     WHITENOISE_AUTOREFRESH = True
     WHITENOISE_USE_FINDERS = True
 else:
+    from django_core_micha.settings._static_files import immutable_file_test
+
     STORAGES = {
         "staticfiles": {
             "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
@@ -302,6 +304,7 @@ else:
             "BACKEND": "django.core.files.storage.FileSystemStorage",
         },
     }
+    WHITENOISE_IMMUTABLE_FILE_TEST = immutable_file_test
 
 # STATIC_ROOT / STATICFILES_DIRS / MEDIA_ROOT hängen von BASE_DIR ab
 # und werden im Projekt gesetzt.

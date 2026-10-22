@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.16.1] — 2026-10-22
+
+### Changed
+
+DCM-PERF-3: content-hashed Vite build outputs are served as immutable. Outside local development `settings_base` sets
+`WHITENOISE_IMMUTABLE_FILE_TEST` to `django_core_micha.settings._static_files.immutable_file_test`: WhiteNoise's own
+Django-manifest test is kept unchanged, and a file directly in `STATIC_ROOT` named `<name>-<8-character Rollup hash>.<ext>`
+(for example `index-jQGc1USQ.js`, `dm-sans-latin-400-normal-CW0RaeGs.woff2`) now gets WhiteNoise's
+`max-age=315360000, public, immutable` instead of `max-age=60`. The hash must contain an upper- and a lowercase letter and
+must not read as capitalised words, so un-hashed names (`index.html`, `select2-dropdown.css`, `OpenSans-SemiBold.ttf`,
+`pdf-template-boho-abstract.png`) and files in subdirectories keep the short lifetime; about one genuine hash in twenty
+also keeps it (the safe direction). The local branch is unchanged. **Adoption:** a pin bump; an app that sets its own
+`WHITENOISE_IMMUTABLE_FILE_TEST` keeps it. Expected layout: Vite `outDir: build`, `assetsDir: static`,
+`STATIC_ROOT = <build>/static` (all apps today).
+
 ## [3.16.0] — 2026-10-21
 
 ### Added
