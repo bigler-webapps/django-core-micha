@@ -206,7 +206,9 @@ Work from this package; do not explore broadly from scratch; open only the named
 > instance described below; do NOT launch or dispatch another implementer.
 
 - Execution: `codex/gpt-6-luna` CLI, reasoning high, WO on stdin, `-C` the target directory. Launch
-  evidence: (filled after dispatch).
+  evidence: one dispatch 2026-10-22, banner read back (`model: gpt-6-luna`, reasoning high, workdir
+  the target directory), exit 0 with `RESULT: DONE`; no commit, staging or register edit by the
+  implementer, foreign `sync_secrets` edits untouched.
 - Review: all four lenses plus `sec_review` in one batch, read-only, diff inline.
 - Verification: the assistant tests, `extraction` tests, `tests/test_declared_dependencies.py`;
   the Orchestrator writes `docs/design/assistant-chat.md`, `CHANGELOG.md`, the minor bump and the
