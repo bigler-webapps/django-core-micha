@@ -195,7 +195,10 @@ Work from this package; do not explore broadly from scratch; open only the named
 
 Configured `implementation`: `codex/gpt-6-luna`, CLI route from the Claude Orchestrator
 (`codex exec -C <target dir> --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m
-gpt-6-luna -c model_reasoning_effort=high -`, WO on stdin). Launch evidence: (filled after dispatch).
+gpt-6-luna -c model_reasoning_effort=high -`, WO on stdin). Launch evidence: one dispatch
+2026-10-22, banner read back (`model: gpt-6-luna`, `reasoning effort: high`, workdir the target
+directory, session `01a161f6-6c6c-7a93-aa1c-ec62f65706dd`), exit 0 with `RESULT: DONE`; no commit,
+staging or register edit by the implementer, foreign `sync_secrets` edits untouched.
 
 ### Review routing
 
