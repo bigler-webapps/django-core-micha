@@ -220,7 +220,10 @@ Work from this package; do not explore broadly from scratch; open only the named
 Configured `implementation`: `codex/gpt-6-luna`, CLI route from the Claude Orchestrator
 (`codex exec -C <target dir> --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m
 gpt-6-luna -c model_reasoning_effort=high -`, WO on stdin). Dispatched only after DCM-PERF-3 has
-landed (operator order: PERF-3, then PERF-4). Launch evidence: (filled after dispatch).
+landed (operator order: PERF-3, then PERF-4). Launch evidence: one dispatch 2026-10-22 after
+PERF-3 landed, banner read back (`model: gpt-6-luna`, `reasoning effort: high`, workdir the target
+directory), exit 0 with `RESULT: DONE`; no commit, staging or register edit by the implementer,
+foreign `sync_secrets` edits untouched.
 
 ### Review routing
 
