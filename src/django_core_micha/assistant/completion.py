@@ -1,6 +1,7 @@
 """Non-persistent, single provider completions for app services."""
 import asyncio
 import json
+import re
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -12,15 +13,18 @@ from .credentials import resolve_credential
 from .drivers.base import DriverError
 from .limits import get_limit
 from .turns import _make_driver
+from .structured import check_schema, validation_error
 
 @dataclass(frozen=True)
 class CompletionResult:
     text: str
     usage: dict
+    data: object = None
 
-async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=None, effort=None, purpose="completion"):
+async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=None, effort=None, purpose="completion", response_schema=None):
     if not isinstance(prompt, str) or not prompt.strip(): raise DriverError("invalid_output")
     if len(prompt.encode("utf-8")) + len((system or "").encode("utf-8")) > get_limit("max_prompt_bytes"): raise DriverError("prompt_too_long")
+    if response_schema is not None and not check_schema(response_schema): raise DriverError("invalid_schema")
     if entry is not None:
         row = entry_by_id(entry)
         if row is None: raise DriverError("invalid_selection")
@@ -39,19 +43,66 @@ async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=N
         from .drivers.claude_cli import _session_dirs
         cleanup = _session_dirs(client.pk)[0]
     chunks, usage = [], {}
+    structured_data = None
     try:
         provider = _make_driver(driver, credential)
-        payload = json.dumps({"system":system,"message":prompt},ensure_ascii=False)
-        async with asyncio.timeout(get_limit("provider_timeout")):
-            async for event in provider.stream(model=model, prompt=payload, messages=[{"role":"user","content":prompt}],
-                    system=system, tools=[], user=user, chat=client, credential=credential, effort=effort,
-                    cancel_event=None, session_id=None, max_tool_calls=get_limit("max_tool_calls")):
-                if event.get("type")=="delta":
-                    chunks.append(event.get("text", ""))
-                    if sum(len(part.encode("utf-8")) for part in chunks)>get_limit("max_output_bytes"):
-                        raise DriverError("invalid_output")
-                elif event.get("type")=="usage": usage.update(event.get("usage", {}) or {})
-        result = CompletionResult("".join(chunks), usage)
+        rounds = get_limit("max_repair_rounds") if response_schema is not None else 0
+        current_messages = [{"role": "user", "content": prompt}]
+        current_prompt = prompt
+        for attempt in range(rounds + 1):
+            chunks, call_usage, structured_data = [], {}, None
+            payload = json.dumps({"system":system,"message":current_prompt},ensure_ascii=False)
+            async with asyncio.timeout(get_limit("provider_timeout")):
+                async for event in provider.stream(model=model, prompt=payload, messages=current_messages,
+                        system=system, tools=[], user=user, chat=client, credential=credential, effort=effort,
+                        cancel_event=None, session_id=None, max_tool_calls=get_limit("max_tool_calls"),
+                        response_schema=response_schema):
+                    if event.get("type")=="delta":
+                        chunks.append(event.get("text", ""))
+                        if sum(len(part.encode("utf-8")) for part in chunks)>get_limit("max_output_bytes"):
+                            raise DriverError("invalid_output")
+                    elif event.get("type")=="usage":
+                        call_usage.update(event.get("usage", {}) or {})
+                    elif event.get("type")=="structured":
+                        structured_data = event.get("data")
+                        # a structured frame is output too: the same cap as text deltas
+                        if len(json.dumps(structured_data, ensure_ascii=False).encode("utf-8"))>get_limit("max_output_bytes"):
+                            raise DriverError("invalid_output")
+            for key, value in call_usage.items():
+                if key in {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cache_tokens"}:
+                    usage[key] = int(usage.get(key, 0) or 0) + int(value or 0)
+                else:
+                    usage[key] = value
+            text = "".join(chunks)
+            if response_schema is None:
+                break
+            data = structured_data
+            error = None
+            if data is None:
+                candidate = text.strip()
+                match = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?```", candidate, flags=re.DOTALL | re.IGNORECASE)
+                if match:
+                    candidate = match.group(1).strip()
+                try:
+                    # NaN/Infinity are not JSON; Python's parser would accept them
+                    data = json.loads(candidate, parse_constant=lambda name: (_ for _ in ()).throw(ValueError(name)))
+                except (TypeError, ValueError):
+                    error = "$: answer is not valid JSON"
+            if error is None and not isinstance(data, dict):
+                error = "$: answer must be a JSON object"
+            if error is None:
+                error = validation_error(data, response_schema)
+            if error is None:
+                break
+            if attempt >= rounds:
+                raise DriverError("invalid_output")
+            previous = text if text else json.dumps(data, ensure_ascii=False)
+            repair = f"Your previous answer did not match the required JSON schema: {error}. Answer again with only the JSON object."
+            if driver == "claude_cli":
+                current_prompt = f"{prompt}\n\n{previous}\n\n{repair}"
+            else:
+                current_messages = [{"role": "user", "content": prompt}, {"role": "assistant", "content": previous}, {"role": "user", "content": repair}]
+        result = CompletionResult(text, usage, structured_data if response_schema is None else data)
         from django.apps import apps
         if usage and apps.is_installed("django_core_micha.billing"):
             try:

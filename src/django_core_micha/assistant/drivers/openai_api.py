@@ -11,7 +11,7 @@ class OpenAIDriver:
         self.client = client
 
     async def stream(self, *, model, messages, system="", tools=(), user=None, chat=None,
-                     effort="medium", cancel_event=None, max_tool_calls=12, **kwargs):
+                     effort="medium", cancel_event=None, max_tool_calls=12, response_schema=None, **kwargs):
         if self.client is None:
             raise DriverError("not_configured")
         tool_map = {t.name: t for t in tools}
@@ -34,8 +34,12 @@ class OpenAIDriver:
                 started = False
                 try:
                     started = True
-                    stream = await self.client.responses.create(model=model, input=input_rows, stream=True,
-                        tools=specs or None, reasoning={"effort": map_effort("openai_api", effort)})
+                    request = {"model": model, "input": input_rows, "stream": True,
+                        "tools": specs or None, "reasoning": {"effort": map_effort("openai_api", effort)}}
+                    if response_schema is not None:
+                        request["text"] = {"format": {"type": "json_schema", "name": "completion",
+                            "strict": True, "schema": response_schema}}
+                    stream = await self.client.responses.create(**request)
                     async for event in stream:
                         kind = getattr(event, "type", "")
                         if kind == "response.output_text.delta":

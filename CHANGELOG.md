@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.18.0] — 2026-10-22
+
+### Added
+
+DCM-CHAT-15: structured one-shot completion. `assistant.completion.complete()`/`acomplete()` accept `response_schema`; the result
+gains `data` (default `None`, so results without a schema are unchanged). The schema must pass `extraction`'s
+`validate_schema` and the completion subset (object root; `type`, `properties`, `required`, `additionalProperties`, `items`,
+`enum`, `const`, `anyOf`, `description`, `title`; every object lists all properties in `required`), otherwise
+`DriverError("invalid_schema")` before any provider call. `openai_api` and `anthropic_api` use native structured output,
+`claude_cli` uses `--json-schema` when the installed CLI offers it and the prompt otherwise; the core validates every answer and
+makes up to `max_repair_rounds` repair calls before `invalid_output`. Each call goes through the driver's cost guard; usage is
+summed over all calls and recorded once. Contract: `docs/design/assistant-chat.md`. **Adoption:** a pin bump; move schema-typed
+one-shot calls from `extraction` to `complete(..., response_schema=...)` where the assistant catalogue fits.
+
 ## [3.17.0] — 2026-10-22
 
 3.16.1 was never published (its CI gate stopped on the declared-dependency test, fixed here); this release carries

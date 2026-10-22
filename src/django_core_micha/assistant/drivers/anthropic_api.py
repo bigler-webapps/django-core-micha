@@ -11,7 +11,7 @@ class AnthropicDriver:
 
     async def stream(self, *, model, messages, system="", tools=(), user=None, chat=None,
                      effort="medium", cancel_event=None, max_tool_calls=12,
-                     max_tokens=DEFAULT_MAX_OUTPUT_TOKENS, **kwargs):
+                     max_tokens=DEFAULT_MAX_OUTPUT_TOKENS, response_schema=None, **kwargs):
         if self.client is None:
             raise DriverError("not_configured")
         rows = list(messages)
@@ -24,9 +24,12 @@ class AnthropicDriver:
                 if cancel_event and cancel_event.is_set():
                     raise DriverError("cancelled")
                 async def create():
+                    output_config = {"effort": map_effort("anthropic_api", effort)}
+                    if response_schema is not None:
+                        output_config["format"] = {"type": "json_schema", "schema": response_schema}
                     return self.client.messages.stream(model=model, system=system, messages=rows,
                         max_tokens=max_tokens, tools=specs or None,
-                        output_config={"effort": map_effort("anthropic_api", effort)})
+                        output_config=output_config)
                 reservation = None
                 from django_core_micha.extraction.cost_guard import settle_reservation
                 from .base import _reserve

@@ -8,6 +8,7 @@ import shutil
 import signal
 import tempfile
 import uuid
+from functools import lru_cache
 from pathlib import Path
 
 from django.conf import settings
@@ -16,6 +17,16 @@ from ..limits import get_limit
 
 log = logging.getLogger(__name__)
 BRIDGE = Path(__file__).resolve().parents[1] / "cli_bridge.py"
+
+
+@lru_cache(maxsize=16)
+def _supports_json_schema(binary):
+    try:
+        result = __import__("subprocess").run([binary, "--help"], capture_output=True,
+            timeout=10, check=False, text=True)
+        return result.returncode == 0 and "--json-schema" in (result.stdout or "")
+    except Exception:
+        return False
 
 
 def safe_environment(credential, config_dir=None):
@@ -63,7 +74,7 @@ class ClaudeCliDriver:
         self.kill_tree = kill_tree or kill_process_tree
 
     async def stream(self, *, prompt, model="", tools=(), credential="", effort="medium", chat=None, cancel_event=None,
-                     session_id=None, **kwargs):
+                     session_id=None, response_schema=None, **kwargs):
         binary = shutil.which("claude")
         if not binary or not credential:
             raise DriverError("not_configured")
@@ -112,6 +123,10 @@ class ClaudeCliDriver:
                 "env": {"DCM_ASSISTANT_BRIDGE_CONFIG": str(bridge_config)}}} if names else {}}, separators=(",", ":")),
             "--allowedTools", ",".join(f"mcp__dcm_tools__{n}" for n in names), "--effort", map_effort("claude_cli", effort),
             "--settings", '{"disableAllHooks":true,"disableBundledSkills":true,"autoMemoryEnabled":false}']
+        # cached per binary; the one-time `--help` probe runs off the event loop
+        schema_supported = response_schema is not None and await asyncio.to_thread(_supports_json_schema, binary)
+        if schema_supported:
+            argv.extend(["--json-schema", json.dumps(response_schema, ensure_ascii=False, separators=(",", ":"))])
         resume = session_id and any((config / "projects").glob(f"*/{session_id}.jsonl"))
         active_id = session_id or str(uuid.uuid4())
         argv.extend(["--resume", active_id] if resume else ["--session-id", active_id])
@@ -129,6 +144,15 @@ class ClaudeCliDriver:
         last_context = [0]
         total = 0
         try:
+            if response_schema is not None and not schema_supported:
+                try:
+                    payload = json.loads(prompt)
+                    message = str(payload.get("message", ""))
+                    payload["message"] = (message + "\n\nAnswer with only a JSON object matching this schema:\n" +
+                        json.dumps(response_schema, ensure_ascii=False, separators=(",", ":")))
+                    prompt = json.dumps(payload, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    prompt += "\n\nAnswer with only a JSON object matching this schema:\n" + json.dumps(response_schema, ensure_ascii=False)
             proc.stdin.write(prompt.encode("utf-8"))
             await asyncio.wait_for(proc.stdin.drain(), get_limit("idle_timeout")); proc.stdin.close()
             await asyncio.wait_for(proc.stdin.wait_closed(), get_limit("idle_timeout"))
@@ -148,6 +172,7 @@ class ClaudeCliDriver:
                         listed = event.get("tools")
                         servers = event.get("mcp_servers")
                         expected = {f"mcp__dcm_tools__{n}" for n in names}
+                        if schema_supported: expected.add("StructuredOutput")
                         actual = sorted(listed) if isinstance(listed, list) else None
                         expected = sorted(expected)
                         valid_servers = (servers == [] if not names else isinstance(servers, list) and len(servers) == 1 and
@@ -190,6 +215,8 @@ class ClaudeCliDriver:
                         mapped = dict(mapped)
                         if last_context[0]: mapped["context_tokens"] = last_context[0]
                         yield {"type": "usage", "usage": mapped}
+                        if isinstance(event.get("structured_output"), dict):
+                            yield {"type": "structured", "data": event["structured_output"]}
                         saw_result = True
             async with asyncio.timeout(get_limit("provider_timeout")):
                 async for frame in read_events(): yield frame

@@ -24,7 +24,19 @@
 
 `DCM_ASSISTANT_STRUCTURED_TURNS=True` suppresses `delta` frames and sends only the final answer.
 
-`django_core_micha.assistant.completion.acomplete(user, *, prompt, system="", entry=None, driver=None, model=None, effort=None)` and its synchronous `complete` wrapper make one bounded, non-persistent completion through the catalogue, credential resolver, timeout, and cost guard.
+`django_core_micha.assistant.completion.acomplete(user, *, prompt, system="", entry=None, driver=None, model=None, effort=None, purpose="completion", response_schema=None)` and its synchronous `complete` wrapper make one bounded, non-persistent completion through the catalogue, credential resolver, timeout, and cost guard. The result is `CompletionResult(text, usage, data)`; without `response_schema`, `data` is `None` and everything else is unchanged.
+
+**Structured completion (DCM-CHAT-15).** With `response_schema`, `data` is a JSON object that has been parsed and validated against the schema. A schema must pass `extraction.schema_contract.validate_schema` and the completion subset, otherwise `DriverError("invalid_schema")` is raised before any provider call:
+- the root is `type: "object"`;
+- only the keywords `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `anyOf`, `description` and `title` are used;
+- every object has `additionalProperties: false`, and its `required` lists all of its properties (an optional value is an `anyOf` with `{"type": "null"}`).
+
+How each driver produces the answer:
+- `openai_api` sends the schema as Responses `text.format` (`json_schema`, strict).
+- `anthropic_api` sends it as `output_config.format`.
+- `claude_cli` passes `--json-schema` when the installed CLI offers it, and otherwise puts the schema in the prompt.
+
+The core validates every answer itself. If an answer is not valid JSON or fails validation, the core makes up to `max_repair_rounds` repair calls (default 2), each carrying the validation error; after that it raises `DriverError("invalid_output")`. Every call keeps its own provider timeout and output cap and goes through the driver's cost guard, so a denied reservation is `quota_exceeded`. `usage` is summed over all calls and recorded once.
 
 ## REST
 
