@@ -17,6 +17,7 @@ from django_core_micha.auth.views import (
     recovery_session_token_view,
 )
 from django_core_micha.health.views import healthz_view
+from django_core_micha.bootstrap import bootstrap_view
 
 router = DefaultRouter()
 router.register(
@@ -26,6 +27,7 @@ router.register(
 )
 
 urlpatterns = [
+    path("bootstrap/", bootstrap_view, name="dcm-bootstrap"),
     # Health probe (public, no auth) — used by Uptime Kuma and the
     # staging-health PR gate. Checks DB + cache.
     path("healthz", healthz_view, name="healthz"),

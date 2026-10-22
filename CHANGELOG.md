@@ -1,6 +1,22 @@
 # Changelog
 
-## [3.16.1] — 2026-10-22
+## [3.17.0] — 2026-10-22
+
+3.16.1 was never published (its CI gate stopped on the declared-dependency test, fixed here); this release carries
+DCM-PERF-3 together with DCM-PERF-4.
+
+### Added
+
+DCM-PERF-4: `GET /api/bootstrap/` (in `django_core_micha.api_urls`, URL name `dcm-bootstrap`) returns `user`,
+`auth_methods`, `notifications` (`feed`, `unread_count`) and `extensions` in one response and sets the CSRF cookie. Each
+part comes from the app's own existing endpoint, resolved by URL name (`user-current`, `auth-methods`,
+`canonical-notification-feed`, `canonical-notification-unread-count`) and called with the caller's session, so it is
+exactly what that endpoint returns, including an app's own override, with that endpoint's own permission and throttle
+checks. Anonymous callers (also an inactive account or a login waiting for its second factor) get only `auth_methods`.
+A failing part fails the response with its status (`bootstrap_part_failed`, `Retry-After` passed on); a missing route
+gives 501 `bootstrap_unavailable`; responses are `no-store`. Apps register start data with
+`django_core_micha.bootstrap.register_bootstrap_provider(name, provider)`; a failing provider yields `null` under its
+key. Nothing changes for an app that does not call the endpoint. Contract: `docs/design/bootstrap.md`.
 
 ### Changed
 
