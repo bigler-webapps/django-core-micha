@@ -28,6 +28,7 @@ MODULE_TO_DISTRIBUTION = {
     "pypdf": "pypdf",
     "openai": "openai",
     "rest_framework": "djangorestframework",
+    "whitenoise": "whitenoise",
     "yaml": "PyYAML",
 }
 
