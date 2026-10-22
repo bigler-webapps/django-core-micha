@@ -85,14 +85,155 @@ whole level per page load.
 
 # B. Implementation map — filled by the Orchestrator — ADDRESSED TO THE IMPLEMENTER
 
-Placeholder. Not yet mapped: context package, target directory and preamble are missing, so this
-WO must not be dispatched in its current state.
+## Target working directory (absolute)
+
+`C:\Users\Micha Bigler\Documents\webapps\django-core-micha` (git root, branch `main`). Use absolute
+paths. The checkout is shared: `src/django_core_micha/scripts/sync_secrets.py` and
+`tests/test_sync_secrets.py` carry another session's uncommitted edits — do not open, format or
+revert them, and preserve any other file you did not create.
+
+## The contract is fixed — implement it exactly
+
+`docs/design/bootstrap.md` (whole file) is the public contract: keys, how each part is produced,
+anonymous vs. authenticated shape, error statuses and bodies, headers, the provider registry.
+Do not edit `docs/`, `CHANGELOG.md`, the version or `WORK_ORDERS.md`. If the contract is
+contradictory or cannot be implemented as written, stop with `RESULT: BLOCKED <the contradiction>`.
+
+## Context package
+
+**Why parts are resolved by URL name (the parity seam).** `users/current` is not a dcm view: every
+app subclasses `BaseUserViewSet` (`src/django_core_micha/auth/views.py:189`, action `current` at
+`:336-347`) with its own serializer and registers it as `router.register(r"", UserViewSet,
+basename="user")` under `api/users/` — all 18 consumers, measured 2026-10-22 — so the URL name
+`user-current` reaches the app's own view. Apps may also replace a dcm endpoint under the same name:
+spesix mounts `invitation_only_auth_methods_view` as `name="auth-methods"` before dcm's
+`api_urls`. Resolving `reverse(<name>)` and then `resolve(<path>)` and calling that view is the
+only way every part stays identical to its endpoint. Do not call `get_auth_methods()`, serializers
+or querysets directly.
+
+**The parts today**
+
+- `auth-methods`: `auth_methods_view` (`auth/views.py:159-166`), plain Django view, public, no
+  throttle.
+- `canonical-notification-feed`: `CanonicalInboxView` (`notifications/views.py:160-209`), DRF
+  `ListAPIView`, page size 20; its pagination links are built from the request URL, so the internal
+  request must carry the feed's own path (contract: links point at the feed).
+- `canonical-notification-unread-count`: `CanonicalUnreadCountView` (`notifications/views.py:212-227`),
+  body `{"count": n}`.
+- Routes: `src/django_core_micha/api_urls.py:28-79` (`auth-methods` at `:43`,
+  `notifications/` include at `:75`; names in `notifications/urls.py`).
+- DRF defaults (`settings/settings_base.py`, `REST_FRAMEWORK`): `SessionAuthentication`,
+  `IsAuthenticated`, `AnonRateThrottle` 100/day and `UserRateThrottle` 10000/day. DRF checks
+  permissions before throttles, so an anonymous `users/current` is refused (403) without spending
+  anon quota — the reason the bootstrap must not be a DRF view with its own throttles and must not
+  call DRF parts for anonymous requests.
+
+**Files to create or change**
+
+- New `src/django_core_micha/bootstrap.py`: the provider registry
+  (`register_bootstrap_provider`, `unregister_bootstrap_provider` — the latter a test-cleanup
+  helper — pattern: `src/django_core_micha/activity/policy.py:28-48`) and `bootstrap_view`, a plain
+  Django view decorated for GET only, `ensure_csrf_cookie`, `Cache-Control: no-store` and
+  `Vary: Cookie`. Internal requests: a copy of the incoming `HttpRequest` changed to `GET`, the
+  part's path (`path`, `path_info`, `META["PATH_INFO"]`), an empty query string/`GET`, sharing
+  session, user, cookies and headers; the original request must not be mutated. Read a DRF
+  `Response`'s `.data`/`status_code`; for a plain `JsonResponse` decode its content. Logging on a
+  provider failure: logger name and message with the provider name and exception class only.
+- `src/django_core_micha/api_urls.py`: `path("bootstrap/", bootstrap_view, name="dcm-bootstrap")`.
+- New `tests/test_bootstrap.py` and a test URLconf (for example `tests/urls_bootstrap.py`) that
+  mounts `path("api/", include("django_core_micha.api_urls"))` and a users router with a
+  `BaseUserViewSet` subclass registered with `basename="user"` (minimal serializer pattern:
+  `tests/test_self_edit_delete_restriction.py:1-40`; `tests/settings.py` has no profile model).
+  `tests/settings.py` has a minimal `MIDDLEWARE` (only `AccountMiddleware`) and no
+  `REST_FRAMEWORK`: use `override_settings` per test module for `ROOT_URLCONF`, the session, CSRF,
+  authentication and allauth middleware, and the DRF defaults the contract relies on
+  (authentication, permission and throttle classes/rates as in `settings_base`), with the
+  locmem cache cleared between tests so throttle state does not leak.
+
+## Required tests (Part A) — how to make them pin the behaviour
+
+- Parity: for the same logged-in Django test `Client`, `user`, `auth_methods`,
+  `notifications.feed` and `notifications.unread_count` equal the JSON of the four separate
+  endpoints (create a few canonical notifications for the user first, so the feed is not empty).
+- Anonymous: exact anonymous shape, `auth_methods` equal to `/api/auth-methods/`, the CSRF cookie
+  set on the response, and no provider called.
+- Inactive account (logged in, then `is_active=False`) and a login waiting for its second factor
+  (allauth's pending login state in the session, no logged-in user): `user` equals what
+  `users/current` gives (401/403 → `null`, anonymous shape).
+- An app override: a test URLconf that mounts its own view under `name="auth-methods"` before
+  dcm's `api_urls` — the bootstrap returns the override's payload.
+- Providers: payload under its key for an authenticated user; not called for anonymous; a raising
+  provider and a provider returning a non-serialisable value each yield `null` while the other keys
+  and providers are returned; duplicate-name registration raises; invalid names are rejected.
+- Failure semantics: a part answering 429 (exhaust `UserRateThrottle` with a tiny rate) makes the
+  bootstrap answer 429 with `{"detail": "bootstrap_part_failed", "part": ...}` and the part's
+  `Retry-After`; a URLconf without `user-current` gives 501 `bootstrap_unavailable`; `POST` gives
+  405; every 200 carries `Cache-Control: no-store`.
+- Query count: an authenticated bootstrap with 3 and with 25 notifications runs the same number of
+  queries (`CaptureQueriesContext`), and that number stays under a fixed ceiling you state in the
+  test.
+- Existing endpoint tests are not edited.
+
+Run only the tests you wrote, from the target working directory:
+`python -m pytest tests/test_bootstrap.py -q -p no:cacheprovider`
+
+## Invariants and pitfalls
+
+- No change to the four existing endpoints, their serializers, permissions or throttles, to
+  authentication, sessions or the notification WebSocket.
+- Anonymous responses expose nothing beyond `auth_methods`.
+- Files are UTF-8: open them with explicit `encoding="utf-8"`.
+
+## Preamble
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`, and the
+> app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI
+> unless the spec says so; do not update `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` — the register
+> row and the review verdicts are the orchestrator's alone.** **Your tools are for editing source
+> and test files and for running the tests you wrote — nothing else.** Do NOT install dependencies,
+> touch a lockfile, run a package manager, or tidy up stray files; if something in the repo state
+> blocks you, stop and report it as `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT
+> `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests
+> the `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute
+> and pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any review).
+> The orchestrator re-runs the authoritative set + does the independent review after you finish —
+> those are the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
+
+Work from this package; do not explore broadly from scratch; open only the named files to verify.
 
 # C. Orchestrator only — NOT ADDRESSED TO THE IMPLEMENTER
 
-> **If you are the implementer reading this work order as your own specification: STOP at this line.**
-> Everything below describes what the Orchestrator does AFTER you finish.
+> **If you are the implementer reading this work order as your own specification: STOP at this line.
+> Everything below describes what the Orchestrator does AFTER you finish. You do none of it — no
+> reviewers, no verification run, no register edit, no commit.** You ARE the implementation
+> instance described below; do NOT launch or dispatch another implementer.
 
-To be filled by the Orchestrator. Recorded from the requirements round (2026-10-21): acceptance is
+### Execution directive
+
+Configured `implementation`: `codex/gpt-6-luna`, CLI route from the Claude Orchestrator
+(`codex exec -C <target dir> --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m
+gpt-6-luna -c model_reasoning_effort=high -`, WO on stdin). Dispatched only after DCM-PERF-3 has
+landed (operator order: PERF-3, then PERF-4). Launch evidence: (filled after dispatch).
+
+### Review routing
+
+Tier 3: all `review.lenses` plus `sec_review`, one concurrent batch, `codex exec --sandbox
+read-only -m gpt-6-luna`, diff inline (contract doc included); `review_fallback` only if Codex is
+unavailable. No `ui_review`.
+
+### Verification
+
+`tests/test_bootstrap.py`, the notification feed tests (`src/django_core_micha/notifications/tests`),
+`tests/test_self_edit_delete_restriction.py`, `tests/test_auth_throttles.py`; release as a minor
+(new public endpoint and registry).
+
+Recorded from the requirements round (2026-10-21): Recorded from the requirements round (2026-10-21): acceptance is
 measured before/after (request count and serial levels at page start) once hram has adopted it in
 `HRAM-WEBPERF-4`, recorded in the register Notiz; no fixed budget.
