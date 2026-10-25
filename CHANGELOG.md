@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.19.1] — 2026-10-25
+
+### Fixed
+
+DCM-CHAT-17: the Claude CLI tool bridge (`assistant/cli_bridge.py`) reads a tool answer until its terminating newline (or the
+connection closes) instead of a single socket read, so large tool answers (hundreds of KB) reach the model intact instead of
+ending as `tool_unavailable`. Answers above `MAX_ANSWER_BYTES` (1,000,000 bytes, today's cap made explicit) return the distinct
+error `tool_answer_too_large`; a truncated answer stays `tool_unavailable`; the 30 s socket timeout is unchanged.
+
 ## [3.19.0] — 2026-10-25
 
 ### Added

@@ -3,6 +3,10 @@ import json
 import os
 import socket
 import sys
+import time
+
+MAX_ANSWER_BYTES = 1_000_000
+CALL_TIMEOUT_SECONDS = 30  # the whole call, connect and read together
 
 
 def _config():
@@ -30,13 +34,31 @@ def _call(name, arguments):
     kind, _, target = endpoint.partition(":")
     try:
         if kind == "unix":
-            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); conn.settimeout(30); conn.connect(target)
+            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); conn.settimeout(CALL_TIMEOUT_SECONDS); conn.connect(target)
         elif kind == "tcp":
-            host, _, port = target.rpartition(":"); conn = socket.create_connection((host, int(port)), timeout=30)
+            host, _, port = target.rpartition(":"); conn = socket.create_connection((host, int(port)), timeout=CALL_TIMEOUT_SECONDS)
         else: return {"status": "error", "text": "tool_unavailable"}
         with conn:
             conn.sendall((json.dumps({"nonce": nonce, "name": name, "arguments": arguments}) + "\n").encode())
-            data = conn.recv(1_000_001)
+            data = bytearray()
+            deadline = time.monotonic() + CALL_TIMEOUT_SECONDS
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return {"status": "error", "text": "tool_unavailable"}
+                conn.settimeout(left)
+                chunk = conn.recv(65_536)
+                if not chunk:
+                    break
+                newline = chunk.find(b"\n")
+                if newline >= 0:
+                    data.extend(chunk[:newline])
+                    if len(data) > MAX_ANSWER_BYTES:
+                        return {"status": "error", "text": "tool_answer_too_large"}
+                    break
+                data.extend(chunk)
+                if len(data) > MAX_ANSWER_BYTES:
+                    return {"status": "error", "text": "tool_answer_too_large"}
         return json.loads(data.decode())
     except Exception:
         return {"status": "error", "text": "tool_unavailable"}
