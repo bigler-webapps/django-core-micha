@@ -49,23 +49,121 @@ Who counts as an app admin for these settings is decided by the app through a ho
 
 ## Part B — Implementation map — addressed to the implementer
 
-**Not dispatch-ready.** The Orchestrator fills the verified context package before dispatch.
+**Target working directory:** `C:/Users/Micha Bigler/Documents/webapps/django-core-micha` (git root,
+`main`). Use absolute paths. The checkout is shared: `src/django_core_micha/scripts/sync_secrets.py`
+and `tests/test_sync_secrets.py` carry another session's uncommitted edits — do not open, format or
+revert them.
 
-**Target working directory:** `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`.
+### The contract is fixed — implement it exactly
 
-### Named orientation files
+`docs/design/assistant-chat.md`, section "Period cost limit, model enablement, estimates, tool steps
+(DCM-CHAT-16)", plus the added `average_cost_usd_micros` in the catalogue row and `tool_steps` in the
+turn fields. It fixes settings, storage, the period and unknown-cost rules, the enablement and default
+rules, the estimate, every endpoint shape and error code. Do not edit `docs/`, `CHANGELOG.md`, the
+version or `WORK_ORDERS.md`. If the contract is contradictory or not implementable, stop with
+`RESULT: BLOCKED <the contradiction>`.
 
-- `src/django_core_micha/assistant/catalogue.py`, `availability.py`, `limits.py`, `turns.py`, `models.py`, `views.py`, `urls.py`, `hooks.py`, `history.py`, `consumers.py`
-- `src/django_core_micha/extraction/cost_guard.py` (existing daily guard, `reserve_user_budget`)
-- `docs/design/assistant-chat.md`
+### Verified facts (Orchestrator, 2026-10-25)
+
+- `assistant/models.py:22-45` `AssistantTurn` already has `sender`, `driver`, `model`, `state`,
+  `error_code`, `usage`, `cost_usd_micros`, `tool_trace` (list of `{name, label, sources}`, appended at
+  each tool `end` frame in `turns.py:349`) and `created_at`; `AssistantSummary` (`:47-57`) has
+  `cost_usd_micros` and `created_at`. Latest migration: `migrations/0005_assistant_summary.py`.
+- Cost: `turns.py:87-99` `_finish` stores `cost_usd_micros = price_usage(model, tokens)`; `price_usage`
+  (`ai_prices.py:39`) never prices a known usage at zero, so a zero cost with zero tokens means usage
+  was never reported.
+- Turn start: `turns.py:65-85` `_create_turn` (inside `transaction.atomic`, chat row locked): today a
+  missing selection or `validate(...)` failure raises `invalid_selection` (`:74-75`). The period check
+  and the disabled-entry fallback belong here, before the turn row is created; switching the chat's
+  selection is persisted on the locked chat row.
+- Catalogue: `catalogue.py:11-58` (`entries`, `entry_usable`, `usable_entries`, `default_entry`,
+  `entry_by_id`, `validate`). Enablement filters `usable_entries`/`default_entry` for users; the
+  admin view needs every settings entry. `catalogue_check` (`:78-88`) is where `dcm_assistant.E002`
+  for a malformed `DCM_ASSISTANT_COST_LIMIT` goes.
+- Status: `availability.py:5-12` and `views.py:80-89` `AvailabilityView`.
+- Views: `views.py:40-74` `CatalogueView` (add `average_cost_usd_micros` per entry; keep `estimate`
+  unchanged), `views.py:450ff` turn JSON comes from `turns.py:450-464` `turn_payload` (add
+  `tool_steps`). URLs: `urls.py:3`. Error shape: `views.py:37` `_problem(code, status)`.
+- Hooks: `hooks.py:199-201` `_hook("NAME")` resolves `DCM_ASSISTANT_<NAME>` (dotted path or callable);
+  use it for `SETTINGS_ADMIN`.
+- Audit: `audit_config.py` registers assistant models; register `AssistantConfig` there.
+- Cache: use Django's default cache for the estimate (key per entry id, 10 minutes).
+
+### Files
+
+- `assistant/models.py` (`AssistantConfig`), new `assistant/migrations/0006_assistant_config.py`
+  (hand-written in the style of `0005`; the Orchestrator verifies with `makemigrations --check`),
+  new `assistant/limit.py` (period window, usage, unknown-cost rule, config load), `catalogue.py`,
+  `availability.py` or `views.py` (the `no_model_enabled` status), `turns.py`, `views.py`, `urls.py`,
+  `audit_config.py`.
+- Tests: new `src/django_core_micha/assistant/tests/test_limit_models.py` (fixture patterns:
+  `assistant/tests/test_completion.py:1-15` for the catalogue override and users; the REST tests in
+  `assistant/tests/test_core.py` for authenticated API calls).
+
+### Required tests (Part A) — how to pin them
+
+1. Limit: seed turns with costs for a user inside and outside the current period (use
+   `freezegun`-free approaches: create rows with explicit `created_at` via `update()`); at the limit
+   the next turn start raises `quota_exceeded` and creates no row; a turn from the previous period does
+   not count; an admin PATCH raising the limit lets the next start through; a non-admin PATCH is 403;
+   `GET /assistant/limit/` returns usage, limit and `resets_at` for both periods (day and month
+   boundaries in a non-UTC `TIME_ZONE`); unknown-cost turns count at the entry average or the fallback,
+   and pre-provider failures (`not_configured`) count zero.
+2. Models: a disabled entry is absent from the user catalogue and present (with `enabled: false`) in the
+   admin view; a chat on a disabled entry starts its next turn on the default and the chat row now
+   carries the default; all disabled → status `unavailable`/`no_model_enabled`, empty catalogue,
+   turn start `not_configured`; disabling the default without a new one → 400 `default_disabled`;
+   non-admins get 403 on both admin endpoints.
+3. Estimate: 9 completed turns → `null`; 10 → their integer mean; turns older than 30 days and turns
+   without usage are excluded.
+4. Tool steps: a finished turn with a tool trace returns `tool_steps` in `GET .../turns/`.
+5. One-shot: a `complete()` call (fake driver as in `test_completion.py`) leaves the period usage
+   unchanged.
+
+Run only the tests you wrote, from the target working directory:
+`python -m pytest src/django_core_micha/assistant/tests/test_limit_models.py -q -p no:cacheprovider`
+
+### Invariants and pitfalls
+
+- No change to `extraction/cost_guard.py`, one-shot completion, drivers, the WebSocket frame shapes or
+  any existing response key.
+- Admin endpoints check the admin hook on every method; anonymous users get DRF's 401/403 as today.
+- Files are UTF-8: open them with explicit `encoding="utf-8"`.
 
 ### Preamble
 
-> Part A is the complete scope. Do not edit WORK_ORDERS.md; do not install dependencies, change lockfiles or tidy foreign changes. Do not git add/commit/push, self-review or treat your own run as the gate. Stop and report an out-of-scope cause. The Orchestrator supplies the progress contract and runtime-specific preamble.
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there
+> is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`, and the
+> app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI
+> unless the spec says so; do not update `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` — the register
+> row and the review verdicts are the orchestrator's alone.** **Your tools are for editing source
+> and test files and for running the tests you wrote — nothing else.** Do NOT install dependencies,
+> touch a lockfile, run a package manager, or tidy up stray files; if something in the repo state
+> blocks you, stop and report it as `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT
+> `git add`/`commit`/`push` — leave every
+> change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests
+> the `Required tests` section calls for AND **RUN the tests you just wrote** to confirm they execute
+> and pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any review).
+> The orchestrator re-runs the authoritative set + does the independent review after you finish —
+> those are the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line
+> `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on
+> completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final
+> `RESULT: DONE|BLOCKED <reason>`.
+
+Work from this package; do not explore broadly from scratch; open only the named files to verify.
+Schema (one migration) and admin endpoints ARE in this WO's scope, exactly as mapped.
 
 ## Part C — Orchestrator-only
 
-**STOP — this section is for the Orchestrator, not a dispatched implementer.**
+> **If you are the implementer reading this work order as your own specification: STOP at this line.
+> Everything below describes what the Orchestrator does AFTER you finish. You do none of it — no
+> reviewers, no verification run, no register edit, no commit.** You ARE the implementation
+> instance described below; do NOT launch or dispatch another implementer.
+
+- Execution: `codex/gpt-6-luna` CLI, reasoning high, WO on stdin, `-C` the target directory. Launch
+  evidence: (filled after dispatch).
 
 - Tier 3 (a change inside shared-core, a new migration, new admin endpoints): all reviewers incl. `sec_reviewer`, full context.
 - Release per dcm's publish-from-main topology; consumers bump in their own WOs (hram: HRAM-AI-2).
