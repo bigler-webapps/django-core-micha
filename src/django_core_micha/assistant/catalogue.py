@@ -24,6 +24,8 @@ def model_level(row):
     return value if value in {"top", "best", "balanced", "fast"} else "balanced"
 
 def entry_usable(user, row):
+    if not entry_enabled(row):
+        return False
     if availability().get("providers", {}).get(row["driver"]) != "available":
         return False
     try:
@@ -37,6 +39,13 @@ def usable_entries(user):
 
 def default_entry(user=None):
     rows = usable_entries(user) if user is not None else entries()
+    if user is not None and rows:
+        from .limit import stored_default_entry
+        selected = stored_default_entry()
+        if selected:
+            preferred = next((r for r in rows if entry_id(r) == selected), None)
+            if preferred:
+                return preferred
     level = getattr(settings, "DCM_ASSISTANT_DEFAULT_LEVEL", "balanced")
     return next((row for row in rows if model_level(row) == level),
                 next((row for row in rows if row.get("default")), rows[0] if rows else None))
@@ -50,6 +59,10 @@ def selection_of(row, effort=None):
 
 def entry_by_id(value):
     return next((row for row in entries() if entry_id(row) == value), None)
+
+def entry_enabled(row):
+    from .limit import disabled_entry_ids
+    return entry_id(row) not in disabled_entry_ids()
 
 def validate(driver, model, effort, user=None):
     for row in entries():
@@ -80,6 +93,9 @@ def catalogue_check(app_configs, **kwargs):
     errors = []
     try: validate_catalogue()
     except ImproperlyConfigured as exc: return [Error(str(exc), id="dcm_assistant.E000")]
+    from .limit import limit_setting_errors
+    errors.extend(Error(message, id="dcm_assistant.E002") for message in
+                  limit_setting_errors(getattr(settings, "DCM_ASSISTANT_COST_LIMIT", None)))
     from django_core_micha.extraction.cost_guard import _get_cost_table
     rates = _get_cost_table()
     for row in entries():

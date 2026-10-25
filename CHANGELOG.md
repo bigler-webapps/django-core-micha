@@ -1,5 +1,26 @@
 # Changelog
 
+## [3.19.0] — 2026-10-25
+
+### Added
+
+DCM-CHAT-16, four assistant capabilities, all additive. Contract: `docs/design/assistant-chat.md`, section "Period cost limit, model
+enablement, estimates, tool steps (DCM-CHAT-16)".
+
+- **Per-user period cost limit.** `DCM_ASSISTANT_COST_LIMIT = {"period": "day"|"month", "usd_micros": n}` (system check
+  `dcm_assistant.E002`). Usage is the user's turn costs plus their chats' summary costs in the current period; a turn without reported
+  usage counts at its entry's average or `DCM_ASSISTANT_UNKNOWN_TURN_COST_USD_MICROS` (default 50000). At the limit a new turn is
+  `quota_exceeded`. One-shot completions do not count. `GET /assistant/limit/` for the user; `GET|PATCH /assistant/admin/limit/` for
+  admins (stored override).
+- **Runtime model enablement.** `GET|PATCH /assistant/admin/models/` switches settings catalogue entries on and off and sets the default.
+  Users see only enabled entries; a chat on a disabled entry continues on the default; nothing enabled → status `unavailable` /
+  `no_model_enabled`. Admins are decided by `DCM_ASSISTANT_SETTINGS_ADMIN` (default staff or superuser).
+- **Estimate.** Catalogue entries carry `average_cost_usd_micros` (30-day mean per answer, null below 10 answers).
+- **Tool steps.** Turn JSON carries `tool_steps: [{name, label}]`.
+
+**Adoption:** a pin bump and `migrate dcm_assistant` (`0006_assistant_config`, one new table). Without settings and admin changes the
+only visible differences are the two added response fields.
+
 ## [3.18.0] — 2026-10-22
 
 ### Added

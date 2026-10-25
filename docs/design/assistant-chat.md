@@ -72,7 +72,7 @@ REST errors use `{ "code": code, "error": code }`. Selection errors return 400 `
 All four are additive. An app that configures nothing and never calls the admin endpoints sees today's behaviour, except that turn payloads gain `tool_steps` and catalogue entries gain `average_cost_usd_micros`.
 
 **Settings.**
-- `DCM_ASSISTANT_COST_LIMIT = {"period": "day"|"month", "usd_micros": <int ≥ 0>}` switches the per-user period limit on. Absent means no limit. A malformed value is the system check error `dcm_assistant.E002`.
+- `DCM_ASSISTANT_COST_LIMIT = {"period": "day"|"month", "usd_micros": <int ≥ 0>}` switches the per-user period limit on. Absent means no limit. A malformed value is the system check error `dcm_assistant.E002` and fails closed at runtime: it acts as a daily limit of 0, so every turn is refused until the setting is fixed.
 - `DCM_ASSISTANT_UNKNOWN_TURN_COST_USD_MICROS` (default `50000`) is the fallback cost of a turn whose usage was never reported (rule below).
 - `DCM_ASSISTANT_SETTINGS_ADMIN` is a dotted path or callable `(user) -> bool` deciding who is an app admin for these settings. The default is `user.is_staff or user.is_superuser`.
 
@@ -94,7 +94,7 @@ The settings catalogue stays the only source of which entries exist. Stored ids 
 - **Enabled set:** user-facing catalogue entries are the settings entries that are enabled, have an available provider and pass `DCM_ASSISTANT_ENTRY_ALLOWED`.
 - **Default:** the stored default when it is enabled, otherwise the settings default rule applied to the enabled entries.
 - **Disabled or removed entry:** a chat whose entry is disabled, or no longer in the catalogue, is switched to the current default (the effort is kept when the default allows it, otherwise its first effort) when its next turn starts, instead of failing with `invalid_selection`.
-- **None enabled:** `GET /assistant/status/` answers `{"status": "unavailable", "reason": "no_model_enabled", "providers": {...}}`, `GET /assistant/catalogue/` answers `{"default": null, "entries": []}`, and a turn start is refused with `not_configured`.
+- **None enabled:** when at least one provider is available but the user has no enabled, allowed entry, `GET /assistant/status/` answers `{"status": "unavailable", "reason": "no_model_enabled", "providers": {...}}`, `GET /assistant/catalogue/` answers `{"default": null, "entries": []}`, and a turn start is refused with `not_configured`.
 - **Admin writes** may not leave the default disabled while another entry is enabled: such a request is 400 `default_disabled`.
 
 **Estimate.** Every catalogue entry (user and admin views) carries `average_cost_usd_micros`: the mean `cost_usd_micros` of completed turns with reported usage for that driver and model over the last 30 days, across all users, rounded to an integer. It is `null` while fewer than 10 such turns exist. The value is cached for 10 minutes. The existing `estimate` field is unchanged.
@@ -109,7 +109,7 @@ The settings catalogue stays the only source of which entries exist. Stored ids 
 | `GET /assistant/admin/limit/` | Admins only (403 `forbidden` otherwise): `{"period", "limit_usd_micros", "default_limit_usd_micros", "override": bool}`; 404 `not_configured` without `DCM_ASSISTANT_COST_LIMIT`. |
 | `PATCH /assistant/admin/limit/` | Admins only: `{"limit_usd_micros": int ≥ 0 | null}` (null removes the override); answers the admin limit shape. Other keys or values are 400 `invalid_request`. Applies to the next turn. |
 | `GET /assistant/admin/models/` | Admins only: `{"default": entry_id|null, "entries": [entry + {"enabled": bool, "provider_available": bool}]}` with every settings entry, including disabled ones. |
-| `PATCH /assistant/admin/models/` | Admins only: `{"enabled": [entry_id, ...], "default": entry_id}` (each key optional); unknown ids are 400 `invalid_selection`, a disabled default is 400 `default_disabled`; answers the admin models shape. |
+| `PATCH /assistant/admin/models/` | Admins only: `{"enabled": [entry_id, ...], "default": entry_id|""|null}` (each key optional; an empty or null default clears the stored default, so the settings rule picks among the enabled entries); unknown ids are 400 `invalid_selection`, a disabled default is 400 `default_disabled`; answers the admin models shape. |
 
 The admin writes are recorded in the audit log.
 

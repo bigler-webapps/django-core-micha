@@ -1,5 +1,6 @@
 """Owner-only REST API for catalogue, persistent chats, and turns."""
 import uuid
+from django.conf import settings
 from django.db.models import Q
 from django.http import Http404
 from django.utils import timezone
@@ -9,8 +10,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .availability import availability
-from .catalogue import default_entry, entries, entry_by_id, entry_id, model_level, selection_of, usable_entries, validate
-from .hooks import availability_reason, can_access_scope, is_shared_scope
+from .catalogue import default_entry, entries, entry_by_id, entry_id, entry_enabled, model_level, selection_of, usable_entries, validate
+from .hooks import availability_reason, can_access_scope, is_shared_scope, _hook
 from .access import can_view_chat, is_creator
 from .models import AssistantChat
 from .history import summary_payload
@@ -37,6 +38,34 @@ def _selection(chat):
 def _problem(code, status_code=400): return Response({"code":code,"error":code},status=status_code)
 def _cursor_context(kind,user,**extra): return {"kind":kind,"user":str(user.pk),**extra}
 
+def _shape(request,rows,context_tokens):
+    """Catalogue entry JSON; shared by the user catalogue and the admin model list."""
+    from django_core_micha.ai_prices import price_usage
+    converter=_catalogue_hook("COST_TO_TOKENS")
+    medium_costs={entry_id(e):price_usage(e["model"],input_tokens=context_tokens,output_tokens=800) for e in rows}
+    ranked=sorted(medium_costs.values())
+    def relative(cost):
+        if len(ranked)<=1:return 1
+        rank=ranked.index(cost)
+        return min(3,1+(rank*3//len(ranked)))
+    shaped=[]
+    for e in rows:
+        estimates={}
+        for effort,output in (("low",300),("medium",800),("high",2000),("max",5000)):
+            if effort not in e["efforts"]:continue
+            low_cost=price_usage(e["model"],input_tokens=context_tokens,output_tokens=output//2)
+            high_cost=price_usage(e["model"],input_tokens=context_tokens,output_tokens=output*2)
+            if converter:
+                try: low,high=int(converter(request.user,low_cost)),int(converter(request.user,high_cost));unit="tokens"
+                except Exception: low,high,unit=relative(medium_costs[entry_id(e)]),relative(medium_costs[entry_id(e)]),"level"
+            else: low,high,unit=relative(medium_costs[entry_id(e)]),relative(medium_costs[entry_id(e)]),"level"
+            estimates[effort]={"min":low,"max":high,"unit":unit}
+        shaped.append({"id":entry_id(e),"driver":e["driver"],"model":e["model"],"label":e.get("name",e["model"]),
+            "provider":{"claude_cli":"claude_code","anthropic_api":"anthropic","openai_api":"openai"}[e["driver"]],
+            "level":model_level(e),"efforts":e["efforts"],"billing":e["billing"],"default":bool(e.get("default")),"estimate":estimates,
+            "average_cost_usd_micros":_average_cost(entry_id(e))})
+    return shaped
+
 class CatalogueView(APIView):
     permission_classes=[IsAuthenticated]
     def get(self,request):
@@ -48,30 +77,93 @@ class CatalogueView(APIView):
             chat=_chat(request.user,chat_id)
             last=chat.turns.filter(state="completed").order_by("-sequence").first()
             context_tokens=last.context_tokens if last else 0
-        from django_core_micha.ai_prices import price_usage
-        converter=_catalogue_hook("COST_TO_TOKENS")
-        medium_costs={entry_id(e):price_usage(e["model"],input_tokens=context_tokens,output_tokens=800) for e in rows}
-        ranked=sorted(medium_costs.values())
-        def relative(cost):
-            if len(ranked)<=1:return 1
-            rank=ranked.index(cost)
-            return min(3,1+(rank*3//len(ranked)))
-        shaped=[]
-        for e in rows:
-            estimates={}
-            for effort,output in (("low",300),("medium",800),("high",2000),("max",5000)):
-                if effort not in e["efforts"]:continue
-                low_cost=price_usage(e["model"],input_tokens=context_tokens,output_tokens=output//2)
-                high_cost=price_usage(e["model"],input_tokens=context_tokens,output_tokens=output*2)
-                if converter:
-                    try: low,high=int(converter(request.user,low_cost)),int(converter(request.user,high_cost));unit="tokens"
-                    except Exception: low,high,unit=relative(medium_costs[entry_id(e)]),relative(medium_costs[entry_id(e)]),"level"
-                else: low,high,unit=relative(medium_costs[entry_id(e)]),relative(medium_costs[entry_id(e)]),"level"
-                estimates[effort]={"min":low,"max":high,"unit":unit}
-            shaped.append({"id":entry_id(e),"driver":e["driver"],"model":e["model"],"label":e.get("name",e["model"]),
-                "provider":{"claude_cli":"claude_code","anthropic_api":"anthropic","openai_api":"openai"}[e["driver"]],
-                "level":model_level(e),"efforts":e["efforts"],"billing":e["billing"],"default":bool(e.get("default")),"estimate":estimates})
+        shaped=_shape(request,rows,context_tokens)
         return Response({"default":selection_of(row) if row else None,"entries":shaped})
+
+def _average_cost(value):
+    from .limit import average_cost_usd_micros
+    return average_cost_usd_micros(value)
+
+def _is_settings_admin(user):
+    try:
+        fn = _hook("SETTINGS_ADMIN")
+        return bool(fn(user)) if fn else bool(user.is_staff or user.is_superuser)
+    except Exception:
+        return False
+
+def _no_store(response):
+    response["Cache-Control"]="no-store"; return response
+
+class UserLimitView(APIView):
+    permission_classes=[IsAuthenticated]
+    def get(self, request):
+        from .limit import limit_state
+        return _no_store(Response(limit_state(request.user)))
+
+def _admin_limit():
+    from .limit import effective_limit, limit_setting, stored_config
+    conf=limit_setting(); row=stored_config()
+    return {"period":conf["period"],"limit_usd_micros":effective_limit(),"default_limit_usd_micros":conf["usd_micros"],
+            "override":bool(row and row.limit_usd_micros is not None)}
+
+class AdminLimitView(APIView):
+    permission_classes=[IsAuthenticated]
+    def _guard(self, request):
+        from .limit import limit_setting
+        if not _is_settings_admin(request.user): return _problem("forbidden",403)
+        if limit_setting() is None: return _problem("not_configured",404)
+        return None
+    def get(self, request):
+        return self._guard(request) or _no_store(Response(_admin_limit()))
+    def patch(self, request):
+        from .limit import save_config
+        denied=self._guard(request)
+        if denied: return denied
+        body=request.data if isinstance(request.data,dict) else None
+        if body is None or set(body)!={"limit_usd_micros"}: return _problem("invalid_request")
+        value=body["limit_usd_micros"]
+        if value is not None and (type(value) is not int or value<0): return _problem("invalid_request")
+        save_config(limit_usd_micros=value)
+        return _no_store(Response(_admin_limit()))
+
+def _admin_models(request):
+    from .limit import stored_default_entry
+    from .availability import availability
+    providers=availability().get("providers",{})
+    enabled=[row for row in entries() if entry_enabled(row)]
+    stored=stored_default_entry()
+    default=next((row for row in enabled if entry_id(row)==stored),None) if stored else None
+    if default is None and enabled:
+        level=getattr(settings,"DCM_ASSISTANT_DEFAULT_LEVEL","balanced")
+        default=next((row for row in enabled if model_level(row)==level),next((row for row in enabled if row.get("default")),enabled[0]))
+    shaped=[{**item,"enabled":entry_enabled(row),"provider_available":providers.get(row["driver"])=="available"}
+            for row,item in zip(entries(),_shape(request,entries(),0))]
+    return {"default":entry_id(default) if default else None,"entries":shaped}
+
+class AdminModelsView(APIView):
+    permission_classes=[IsAuthenticated]
+    def get(self, request):
+        if not _is_settings_admin(request.user): return _problem("forbidden",403)
+        return _no_store(Response(_admin_models(request)))
+    def patch(self, request):
+        from .limit import disabled_entry_ids, save_config, stored_default_entry
+        if not _is_settings_admin(request.user): return _problem("forbidden",403)
+        body=request.data if isinstance(request.data,dict) else None
+        if not body or set(body)-{"enabled","default"}: return _problem("invalid_request")
+        all_ids=[entry_id(row) for row in entries()]
+        if "enabled" in body:
+            picked=body["enabled"]
+            if not isinstance(picked,list) or any(not isinstance(item,str) for item in picked): return _problem("invalid_request")
+            if any(item not in all_ids for item in picked): return _problem("invalid_selection")
+            enabled=[item for item in all_ids if item in set(picked)]
+        else:
+            disabled=disabled_entry_ids(); enabled=[item for item in all_ids if item not in disabled]
+        default=body.get("default",stored_default_entry())
+        if default is None: default=""  # cleared: the settings default rule picks among the enabled entries
+        if "default" in body and (not isinstance(default,str) or (default and default not in all_ids)): return _problem("invalid_selection")
+        if default and default not in enabled: return _problem("default_disabled")
+        save_config(disabled_entries=[item for item in all_ids if item not in enabled],default_entry=default or "")
+        return _no_store(Response(_admin_models(request)))
 
 def _catalogue_hook(name):
     from .hooks import _hook
@@ -81,6 +173,9 @@ class AvailabilityView(APIView):
     permission_classes=[IsAuthenticated]
     def get(self,request):
         result=availability()
+        # a provider is up but this user has no enabled, allowed entry: nothing can run
+        if entries() and result.get("status")=="available" and not usable_entries(request.user):
+            return Response({"status":"unavailable","reason":"no_model_enabled","providers":result.get("providers",{})})
         if "scope" in request.query_params:
             scope=request.query_params.get("scope","")
             if not can_access_scope(request.user,scope): return _problem("not_found",404)

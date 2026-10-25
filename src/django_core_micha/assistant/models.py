@@ -55,3 +55,10 @@ class AssistantSummary(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=("chat", "up_to_sequence"), name="dcm_asst_summary_range_unique")]
         indexes = [models.Index(fields=("chat", "-up_to_sequence"), name="dcm_asst_summary_latest_idx")]
+
+class AssistantConfig(models.Model):
+    """Admin overrides of the assistant settings (one row, pk 1); absent until an admin writes."""
+    limit_usd_micros = models.PositiveBigIntegerField(null=True, blank=True)
+    disabled_entries = models.JSONField(default=list, blank=True)
+    default_entry = models.CharField(max_length=192, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)

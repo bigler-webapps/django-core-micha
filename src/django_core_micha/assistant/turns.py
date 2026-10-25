@@ -14,7 +14,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .catalogue import entry_by_id, validate
+from .catalogue import default_entry, entry_by_id, entry_enabled, validate
 from .access import can_view_chat
 from django.core.exceptions import ObjectDoesNotExist
 from django.contrib.auth import get_user_model
@@ -71,8 +71,18 @@ def _create_turn(chat_id, user_id, message):
             if not can_view_chat(user, chat): raise AccessLost()
 
             if chat.archived_at: raise DriverError("archived")
-            if not chat.selected_driver or not chat.selected_model: raise DriverError("invalid_selection")
+            selected = entry_by_id(f"{chat.selected_driver}:{chat.selected_model}") if chat.selected_driver and chat.selected_model else None
+            if selected is None or not entry_enabled(selected):
+                # a disabled or removed entry continues on the current default instead of failing
+                fallback = default_entry(user)
+                if fallback is None: raise DriverError("not_configured")
+                chat.selected_driver, chat.selected_model = fallback["driver"], fallback["model"]
+                efforts = fallback.get("efforts") or ["medium"]
+                if chat.selected_effort not in efforts: chat.selected_effort = efforts[0]
+                chat.save(update_fields=("selected_driver", "selected_model", "selected_effort", "updated_at"))
             validate(chat.selected_driver, chat.selected_model, chat.selected_effort)
+            from .limit import over_limit
+            if over_limit(user): raise DriverError("quota_exceeded")
             if chat.turns.filter(state="generating").exists(): raise DriverError("turn_active")
             active = AssistantTurn.objects.filter(state="generating", heartbeat_at__gte=timezone.now()-timedelta(seconds=get_limit("stale_turn_seconds")))
             if active.count() >= get_limit("max_concurrent_turns") or active.filter(_by_user(user_id)).count() >= get_limit("max_turns_per_user"):
@@ -451,6 +461,7 @@ def turn_payload(turn, chat=None):
     chat = chat or turn.chat
     result = {"id": str(turn.pk), "seq": turn.sequence, "user_text": turn.user_text,
         "assistant_text": turn.assistant_text, "state": turn.state, "error_code": turn.error_code or None,
+        "tool_steps": [{"name": item.get("name", ""), "label": item.get("label", "")} for item in turn.tool_trace],
         "sources": [source for item in turn.tool_trace for source in item.get("sources", [])],
         "driver": turn.driver, "model": turn.model, "effort": turn.effort,
           "usage": {**(turn.usage or {}), "input_tokens": int((turn.usage or {}).get("input_tokens", 0) or 0),
