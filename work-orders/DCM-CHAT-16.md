@@ -163,7 +163,8 @@ Schema (one migration) and admin endpoints ARE in this WO's scope, exactly as ma
 > instance described below; do NOT launch or dispatch another implementer.
 
 - Execution: `codex/gpt-6-luna` CLI, reasoning high, WO on stdin, `-C` the target directory. Launch
-  evidence: (filled after dispatch).
+  evidence: one dispatch 2026-10-25, banner read back (`model: gpt-6-luna`, reasoning high, workdir the
+  target directory), exit 0 with `RESULT: DONE`; no commit or register edit by the implementer.
 
 - Tier 3 (a change inside shared-core, a new migration, new admin endpoints): all reviewers incl. `sec_reviewer`, full context.
 - Release per dcm's publish-from-main topology; consumers bump in their own WOs (hram: HRAM-AI-2).
