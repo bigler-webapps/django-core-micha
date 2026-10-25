@@ -110,8 +110,9 @@ Do not edit `CHANGELOG.md`, the version, docs or `WORK_ORDERS.md`. Files are UTF
 > reviewers, no verification run, no register edit, no commit.** You ARE the implementation
 > instance described below; do NOT launch or dispatch another implementer.
 
-Execution: `codex/gpt-6-luna` CLI, reasoning high, WO on stdin, `-C` the target directory. Launch evidence: (filled
-after dispatch).
+Execution: `codex/gpt-6-luna` CLI, reasoning high, WO on stdin, `-C` the target directory. Launch evidence: one dispatch
+2026-10-25, banner read back (`model: gpt-6-luna`, reasoning high, workdir the target directory), `RESULT: DONE`; no
+commit or register edit by the implementer.
 
 Gate #1 approved by the operator on 2026-10-25 in the Maana Expertenchat (session
 local_cbfc9d51-5217-42a4-99ba-27a315c854ce). Tier 3: all reviewer lenses; no `ui_review` (no frontend); no
