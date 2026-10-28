@@ -38,7 +38,7 @@ ai = [
 ]
 extraction = [
     "pypdf>=6.19.0",
-    "Pillow>=12.3.0",
+    "Pillow>=13.0.0",
 ]
 push = ["pywebpush"]
 scripts = ["PyYAML"]
