@@ -48,10 +48,55 @@ Tier 3: a change inside the shared core, on a security surface (abuse protection
 
 # B. Implementation map — addressed to the implementer
 
-_Placeholder — filled by the Orchestrator on pickup._
+Work from this package; do not explore broadly from scratch; open only the named files to verify. If you must dig deeper, delegate to a read-only Explore sub-agent (Haiku).
+
+## Target working directory (absolute)
+
+`C:/Users/Micha Bigler/Documents/webapps/django-core-micha` — NEVER the workspace root. Foreign uncommitted edits exist in `src/django_core_micha/scripts/sync_secrets.py` and `tests/test_sync_secrets.py`: do not touch, stage or revert them. Use explicit UTF-8 for all file I/O.
+
+## Context package
+
+- **New module `src/django_core_micha/auth/client_ip.py`** — the one shared resolver. `resolve_client_ip(request) -> str | None`: take `request.META["HTTP_CF_CONNECTING_IP"]` (stripped); if absent or not a valid IP (`ipaddress.ip_address`), use `request.META["REMOTE_ADDR"]` (same validation); else `None`. Return the normalised full address (`str(ip_address(raw))`), never truncated. It must never read `HTTP_X_FORWARDED_FOR` or `HTTP_X_REAL_IP`. Works on a Django `HttpRequest` and a DRF `Request` (DRF proxies `.META`). Also define `ClientAddressThrottleMixin` there with `get_ident(self, request)` returning `resolve_client_ip(request) or "unknown"` (DRF's `SimpleRateThrottle.get_ident` is the identity for anon/scoped/user-anonymous buckets).
+- **`src/django_core_micha/auth/throttles.py`** (existing `_BodyKeyedScopedRateThrottle` and its subclasses stay as they are): add `CoreAnonRateThrottle(ClientAddressThrottleMixin, AnonRateThrottle)`, `CoreUserRateThrottle(ClientAddressThrottleMixin, UserRateThrottle)`, `CoreScopedRateThrottle(ClientAddressThrottleMixin, ScopedRateThrottle)` (DRF bases from `rest_framework.throttling`). Keep the mixin first in the MRO.
+- **`src/django_core_micha/settings/settings_base.py:335-338`** `DEFAULT_THROTTLE_CLASSES`: point both entries at the new `CoreAnonRateThrottle` / `CoreUserRateThrottle` dotted paths. Rates untouched.
+- **Throttle call sites** that name DRF's classes directly and must use the core classes instead: `src/django_core_micha/auth/views.py:20` (import) with uses at `:752` and `:886` (`throttle_classes=[ScopedRateThrottle, AnonRateThrottle]`); `src/django_core_micha/invitations/views.py:7` (import) with use at `:132`. `PerEmail*`/`PerAccessCode*` throttles are keyed by body, not address: unchanged.
+- **`src/django_core_micha/auth/adapters.py`** `CoreAccountAdapter` (class at line 36): override allauth's `get_client_ip(self, request)` (the hook `allauth.core.internal.ratelimit` calls for `/ip` limits) to return `resolve_client_ip(request)`, raising `django.core.exceptions.PermissionDenied("Unable to determine client IP address")` when it is `None`, as the allauth default does. Do NOT set `ALLAUTH_TRUSTED_CLIENT_IP_HEADER` (it would return `None` where the header is absent instead of `REMOTE_ADDR`).
+- **`src/django_core_micha/auth/_audit_helpers.py:6-30`** `_client_ip`: keep the `/24` (IPv4) and `/48` (IPv6) truncation and the `None` result for an unusable address, but obtain the address from `resolve_client_ip`; delete the `X-Real-IP` branch and fix the comment block to match.
+- **Pitfalls:** `tests/settings.py` ships a minimal Django settings module (see the `tests/test_auth_throttles.py` docstring) — build requests with `django.test.RequestFactory`, wrap with `rest_framework.request.Request` where needed, and use the locmem cache. A DRF `Request.META` is the underlying request's `META`. Do not change `ACCOUNT_RATE_LIMITS_DEFAULTS`, any rate value, any consumer app, `pyproject.toml`, `CHANGELOG.md` or the version: the Orchestrator does those.
+
+## Tests to write
+
+New file `tests/test_client_ip.py`; update an existing test only if it asserts the removed `X-Real-IP` behaviour (grep `tests/` for `_client_ip` / `X_REAL_IP`).
+
+1. Resolver: `CF-Connecting-IP` wins over `REMOTE_ADDR`; without it `REMOTE_ADDR`; an invalid `CF-Connecting-IP` falls back to `REMOTE_ADDR`; IPv6 is normalised; `X-Forwarded-For` and `X-Real-IP` never influence the result (parametrised, with and without the CF header).
+2. DRF: with `CoreAnonRateThrottle` (small rate such as `2/min` via a subclass `THROTTLE_RATES` or a settings override), a request carrying a forged, rotating `X-Forwarded-For` plus a fixed `CF-Connecting-IP` is throttled after the budget, and changing only `X-Forwarded-For` does not reset it; without the CF header the bucket is `REMOTE_ADDR` regardless of the forged headers. Add at least one assertion that `CoreScopedRateThrottle` and `CoreUserRateThrottle` use the same `get_ident`.
+3. allauth: for the same request, `CoreAccountAdapter().get_client_ip(request)` equals the DRF throttle's `get_ident(request)`; with no resolvable address it raises `PermissionDenied`.
+4. Audit helper: `_client_ip` returns `a.b.c.0/24` for IPv4 and a `/48` network for IPv6, resolves through the CF header, ignores `X-Real-IP` and `X-Forwarded-For`, and returns `None` for an empty or invalid address.
+
+## Preamble
+
+> The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`, and the app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI unless the spec says so; do not update `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` — the register row and the review verdicts are the orchestrator's alone.** **Your tools are for editing source and test files and for running the tests you wrote — nothing else.** Do NOT install dependencies, touch a lockfile, run a package manager, or tidy up stray files; if something in the repo state blocks you, stop and report it as `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT `git add`/`commit`/`push` — leave every change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests the `Tests to write` section calls for AND **RUN the tests you just wrote** to confirm they execute and pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any review). The orchestrator re-runs the authoritative set + does the independent review after you finish — those are the gate; your own run does not count as the gate.
+>
+> Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final `RESULT: DONE|BLOCKED <reason>`.
 
 # C. Orchestrator only — NOT ADDRESSED TO THE IMPLEMENTER
 
-> **If you are the implementer reading this work order as your own specification: STOP at this line.**
+> **If you are the implementer reading this work order as your own specification: STOP at this line. Everything below describes what the Orchestrator does AFTER you finish. You do none of it — no reviewers, no verification run, no register edit, no commit.** You ARE the implementation instance described below; do NOT launch or dispatch another implementer.
 
-_Placeholder — filled by the Orchestrator on pickup._
+## Execution directive
+
+Configured `implementation` entry (`codex/gpt-6-luna`), CLI route from the dcm repo, WO passed on stdin. No `codex-status.md` line for 2026-11-03: Codex is used.
+
+Launch evidence: pending.
+
+## Review routing
+
+Tier 3: the four `review` lenses concurrently plus `sec_reviewer`, then one re-run on the corrected diff. The Orchestrator reads the diff against Part A during the batch and does its own security pass.
+
+## Verification
+
+Scoped tests: `tests/test_client_ip.py`, `tests/test_auth_throttles.py`, `tests/test_account_rate_limits.py`, the audit tests touching `_client_ip`, `tests/test_bootstrap.py`, `tests/test_invite_link_lifetime.py`. X-Real-IP check (2026-11-03): the only reader in the workspace is Cinevia `backend/backend/views.py` (app code, out of scope); no deployment config sets the header; the dcm audit helper stops reading it. Origin evidence: see Risks.
+
+## Register + commit
+
+Row to `done` with the review line and landing SHAs; minor release 3.20.0 (version bump, CHANGELOG naming the behaviour change) per the repo's publish flow, as a separate commit.
