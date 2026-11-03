@@ -17,7 +17,6 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
-from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle
 
 from allauth.mfa.models import Authenticator
 from allauth.account.models import EmailAddress
@@ -64,7 +63,12 @@ from .serializers import (
     RegistrationRequestSerializer,
     SignupQrCreateSerializer,
 )
-from .throttles import PerAccessCodeScopedRateThrottle, PerEmailScopedRateThrottle
+from .throttles import (
+    CoreAnonRateThrottle,
+    CoreScopedRateThrottle,
+    PerAccessCodeScopedRateThrottle,
+    PerEmailScopedRateThrottle,
+)
 from .permissions import IsSupportAgent, IsAssignedSupportOrAdmin
 
 User = get_user_model()
@@ -749,7 +753,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         detail=False,
         methods=["post"],
         permission_classes=[AllowAny],
-        throttle_classes=[ScopedRateThrottle, AnonRateThrottle],
+        throttle_classes=[CoreScopedRateThrottle, CoreAnonRateThrottle],
         url_path="mfa/support-help",
     )
     def mfa_support_help(self, request):
@@ -883,7 +887,7 @@ class RecoveryRequestViewSet(viewsets.ReadOnlyModelViewSet):
         methods=["post"],
         detail=False,
         permission_classes=[AllowAny],
-        throttle_classes=[ScopedRateThrottle, AnonRateThrottle],
+        throttle_classes=[CoreScopedRateThrottle, CoreAnonRateThrottle],
         url_path="recovery-login",
     )
     def recovery_login(self, request):

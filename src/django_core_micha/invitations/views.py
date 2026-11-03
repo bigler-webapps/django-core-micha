@@ -4,7 +4,6 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
-from rest_framework.throttling import ScopedRateThrottle, AnonRateThrottle
 
 from allauth.account.models import EmailAddress
 
@@ -26,7 +25,11 @@ User = get_user_model()
 
 from django_core_micha.auth.permissions import IsAccessCodeAdminOrSuperuser
 from django_core_micha.auth.signals import registration_completed
-from django_core_micha.auth.throttles import PerAccessCodeScopedRateThrottle
+from django_core_micha.auth.throttles import (
+    CoreAnonRateThrottle,
+    CoreScopedRateThrottle,
+    PerAccessCodeScopedRateThrottle,
+)
 from .models import AccessCode
 from .serializers import AccessCodeSerializer
 from .conf import ACCESS_CODE_REGISTRATION_ENABLED
@@ -129,7 +132,7 @@ class AccessCodeViewSet(viewsets.ModelViewSet):
 
 
 class PasswordResetConfirmView(APIView):
-    throttle_classes = [ScopedRateThrottle, AnonRateThrottle]
+    throttle_classes = [CoreScopedRateThrottle, CoreAnonRateThrottle]
     throttle_scope = "password_reset"
 
     permission_classes = [AllowAny]

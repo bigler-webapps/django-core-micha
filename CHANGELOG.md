@@ -1,5 +1,27 @@
 # Changelog
 
+## [3.20.0] — 2026-11-03
+
+### Changed (behaviour change for consumers)
+
+DCM-SEC-4: rate limits identify the client by Cloudflare's address, never by a header the sender controls. One resolver,
+`django_core_micha.auth.client_ip.resolve_client_ip(request)`, returns the validated, normalised `CF-Connecting-IP`, else the
+connection's own `REMOTE_ADDR`, else `None`. `X-Forwarded-For` and `X-Real-IP` are never read.
+
+- **DRF.** New `CoreAnonRateThrottle`, `CoreUserRateThrottle`, `CoreScopedRateThrottle` (`auth/throttles.py`, mixin
+  `ClientAddressThrottleMixin`) take the throttle identity from the resolver. `DEFAULT_THROTTLE_CLASSES` in `settings_base.py` and
+  dcm's own views (`mfa/support-help`, `recovery-login`, password-reset confirm) use them. Rates are unchanged.
+- **allauth.** `CoreAccountAdapter.get_client_ip` returns the same address, so `/ip` rate limits and DRF agree for one request. As in
+  allauth's default, an unresolvable address raises `PermissionDenied`.
+- **Audit log.** `_client_ip` resolves through the shared resolver and keeps its /24 (IPv4) and /48 (IPv6) truncation. It no longer
+  consults `X-Real-IP`.
+
+**Adoption:** a pin bump. An app that overrides `REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"]` or names DRF's stock throttles in its own
+views, or has its own webhook throttle, keeps DRF's `X-Forwarded-For` identity until it switches to the `Core*` classes or adds
+`ClientAddressThrottleMixin` first in the MRO. Behind Cloudflare nothing else changes; without `CF-Connecting-IP` (local development)
+the identity is `REMOTE_ADDR`. The identity is only unforgeable where the origin is reachable through Cloudflare alone; the origins
+that answer directly are tracked as S260 (webapp-management, fix WM-SEC-9).
+
 ## [3.19.1] — 2026-10-25
 
 ### Fixed

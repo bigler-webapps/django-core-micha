@@ -2,22 +2,14 @@
 import hashlib
 import ipaddress
 
+from django_core_micha.auth.client_ip import resolve_client_ip
+
 
 def _client_ip(request) -> str | None:
     if not request:
         return None
-    # Prefer headers that cannot be forged by the client:
-    # CF-Connecting-IP is set exclusively by Cloudflare (platform standard).
-    # X-Real-IP is set by nginx when configured with proxy_set_header X-Real-IP.
-    # REMOTE_ADDR is the immediate peer (nginx/proxy) — correct in local/non-CF envs.
-    # X-Forwarded-For is intentionally NOT used: the leftmost entry is client-supplied
-    # and trivially spoofable (S1).
-    raw = (
-        request.META.get("HTTP_CF_CONNECTING_IP")
-        or request.META.get("HTTP_X_REAL_IP")
-        or request.META.get("REMOTE_ADDR", "")
-    ).strip()
-    if not raw:
+    raw = resolve_client_ip(request)
+    if raw is None:
         return None
     try:
         addr = ipaddress.ip_address(raw)

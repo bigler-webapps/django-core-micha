@@ -5,8 +5,10 @@ from django.contrib.auth import get_user_model
 from allauth.account.adapter import DefaultAccountAdapter
 from allauth.mfa.adapter import DefaultMFAAdapter
 from django.conf import settings
+from django.core.exceptions import PermissionDenied
 from django_core_micha.auth.security import get_security_level, set_security_level
 from django_core_micha.auth.social import provider_vouched_email
+from django_core_micha.auth.client_ip import resolve_client_ip
 import logging
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,12 @@ class InvitationOnlySocialAdapter(DefaultSocialAccountAdapter):
         return verified
 
 class CoreAccountAdapter(DefaultAccountAdapter):
+    def get_client_ip(self, request):
+        client_ip = resolve_client_ip(request)
+        if client_ip is None:
+            raise PermissionDenied("Unable to determine client IP address")
+        return client_ip
+
     def is_open_for_signup(self, request):
         """
         Generic allauth signup endpoints are intentionally closed.

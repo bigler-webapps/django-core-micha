@@ -333,8 +333,8 @@ REST_FRAMEWORK = {
     ],
     "EXCEPTION_HANDLER": "django_core_micha.auth.exception_handler.custom_exception_handler",
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        "django_core_micha.auth.throttles.CoreAnonRateThrottle",
+        "django_core_micha.auth.throttles.CoreUserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": "100/day",

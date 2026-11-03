@@ -16,7 +16,25 @@ from __future__ import annotations
 
 import hashlib
 
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.throttling import (
+    AnonRateThrottle,
+    ScopedRateThrottle,
+    UserRateThrottle,
+)
+
+from .client_ip import ClientAddressThrottleMixin
+
+
+class CoreAnonRateThrottle(ClientAddressThrottleMixin, AnonRateThrottle):
+    """Anonymous throttle keyed by Cloudflare's client address."""
+
+
+class CoreUserRateThrottle(ClientAddressThrottleMixin, UserRateThrottle):
+    """Anonymous user-throttle fallback keyed by Cloudflare's address."""
+
+
+class CoreScopedRateThrottle(ClientAddressThrottleMixin, ScopedRateThrottle):
+    """Scoped throttle keyed by Cloudflare's client address."""
 
 
 class _BodyKeyedScopedRateThrottle(ScopedRateThrottle):
