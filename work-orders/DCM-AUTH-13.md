@@ -49,11 +49,58 @@ Tier 3 — inside shared-core (`django-core-micha`), auth.
 
 # B. Implementation map — ADDRESSED TO THE IMPLEMENTER
 
-_Not yet filled. The Orchestrator fills the context package, target working directory, progress contract and preamble here before any dispatch. Dispatch is blocked while this placeholder remains._
+## Context package
+
+Work from this package; do not explore broadly from scratch; open only the named files to verify. If you must dig deeper, delegate to a read-only Explore sub-agent.
+
+**Established cause (verified against the allauth wheels, not release notes).** `session_used_mfa` (`src/django_core_micha/auth/admin_mfa_middleware.py:32`) calls `allauth.account.authentication.get_authentication_records(request)`. In allauth 65.15.0 and 65.20.0 that function is `request.session.get(AUTHENTICATION_METHODS_SESSION_KEY, [])`. In allauth 65.21.1 (defined in `allauth/account/internal/flows/login.py`, re-exported from `allauth.account.authentication`) the signature is `get_authentication_records(request, user=None)` and it returns `[]` when `user` is None or has no pk, and also when `user_id_to_str(user)` differs from the user id stored in the session under a second private key, `account_authentication_methods_user`. So on 65.21 the current call can never see a record: every real MFA login would be refused. That is the production defect; the failing test only exposes it, because it seeds the private key `account_authentication_methods` by hand and calls the real function. The writer, `allauth.account.internal.flows.login.record_authentication(request, user, method, **extra_data)`, exists on every version, is what `allauth.mfa` calls for a completed MFA step (`record_authentication(request, authenticator.user, "mfa", **extra_data)` with `type` and `id`), and on 65.21 refuses a user that is None, not authenticated or without a pk, and stores the user binding. dcm declares `django-allauth` with no lower bound, so the check has to work on both reader signatures (the old `(request)` and the new `(request, user=None)`).
+
+**Named files to change**
+
+- `src/django_core_micha/auth/admin_mfa_middleware.py`, function `session_used_mfa` only. The reader must be called with the request's user on versions that accept one, and without it on versions that do not (decide by the reader's signature, not by catching a `TypeError` that could hide other errors). Everything else in `session_used_mfa` stays: the list/tuple check, the allowlist `("totp", "webauthn")` on `type` with `method == "mfa"`, and the fail-closed `except`. An anonymous or missing user is "no MFA". Do not touch `AdminMfaRequiredMiddleware`, `_has_mfa`, `_needs_mfa_check` or `_is_admin_request`.
+- `tests/test_admin_session_mfa.py`: `_install_authentication_records` (line 24, replaces `allauth.account.authentication` in `sys.modules` with a one-argument lambda) and every place that seeds `request.session = {"account_authentication_methods": ...}` by hand (lines 50, 57, 95, 258, 267, 334). `test_session_used_mfa_record_cases` (line 34) is the parametrized record table.
+- `tests/test_admin_mfa_middleware.py`: the fake `allauth.account.authentication` installed at lines 101-107 and `_record_mfa` (line 116) seed the same private key by hand.
+
+**Tests to write and how.** Create records through the real `record_authentication(request, user, "mfa", type="totp", id=1)` (import from `allauth.account.internal.flows.login`), with a real user model instance (`get_user_model()(pk=..., username=...)`, unsaved is fine; it has `is_authenticated` True and a pk) and a request whose `session` is a plain dict. Stop replacing `allauth.account.authentication` in `sys.modules` for the tests that decide the record outcome: they must run against the real allauth reader. Passwords and recovery codes are recorded the same way (`method="password"`, `method="mfa"` with `type="recovery_codes"`). The "other user" case: record for user A, then call with `request.user` = user B. The "aborted login" case: record, then `allauth.account.internal.flows.login.clear_authentication_records(request)`, then the check fails. Keep the existing cases that cover malformed data and unknown or missing types fail-closed; those may keep seeding the raw key where the point is the malformed shape, but they must still run through the real reader on the installed allauth (on 65.21 a hand-seeded list without the user-binding key is correctly ignored, so seed it through `record_authentication` plus a direct mutation of the stored list, or assert only the False outcome knowingly). The enrolled-factor mock of `allauth.mfa.models` (`_install_authenticators`) is not part of this order.
+
+**Invariants and pitfalls**
+
+- Acceptance stays an allowlist; do not widen it to make a test green.
+- Do not count a record that allauth's own reader would not attribute to `request.user`.
+- The tests must pass on allauth 65.15.0 (installed here) and 65.21.1 (the Orchestrator runs that one). Do not use an allauth API that only one of them has beyond `record_authentication`, `clear_authentication_records` (65.21; absent on 65.15, so for the aborted-login case on 65.15 drop the session keys directly) and `get_authentication_records`; where a call differs by version, branch on the reader signature as in the source change.
+- `pyproject.toml`: do not add an allauth lower or upper bound.
+
+## Target repo working directory (absolute)
+
+`C:\Users\Micha Bigler\Documents\webapps\django-core-micha`. The tree also carries foreign uncommitted edits in `src/django_core_micha/scripts/sync_secrets.py` and `tests/test_sync_secrets.py`: leave them alone.
+
+## Required test run (yours, once)
+
+`python -m pytest tests/test_admin_session_mfa.py tests/test_admin_mfa_middleware.py -q`
+
+## Preamble
+
+The text above is the COMPLETE spec — the committed WO file's content, not a plan to refine; there is no separate plan file. Read the nearest `AGENTS.md`, the relevant `.codex/skills/<role>/SKILL.md`, and the app `MEMORY.md` ONLY for conventions. Stay in scope; do not touch auth/permissions/deps/schema/CI beyond what the spec says; do not update `MEMORY.md`. **Do NOT edit `WORK_ORDERS.md` or `CHANGELOG.md` or `pyproject.toml` — the register row, the release notes, the version and the review verdicts are the orchestrator's alone.** **Your tools are for editing source and test files and for running the tests you wrote — nothing else.** Do NOT install dependencies, touch a lockfile, run a package manager, or tidy up stray files; if something in the repo state blocks you, stop and report it as `RESULT: BLOCKED <reason>` instead of fixing it. Do NOT `git add`/`commit`/`push` — leave every change uncommitted in the working tree for the orchestrator's independent review. WRITE the tests the `Required tests` section calls for AND RUN the tests you just wrote to confirm they execute and pass — that is the ONLY test run you do (NOT the app's affected/full suite, NOT any review). The orchestrator re-runs the authoritative set and does the independent review after you finish — those are the gate; your own run does not count as the gate.
+
+Narrate continuously: a `PLAN: <step1> | <step2> | …` line up front, then a single-line `PROGRESS: [<n>/<total>] <present-tense action>` before every relevant action (and `… done` on completion), spaced so no gap exceeds ~2 min, stdout unbuffered, plus exactly one final `RESULT: DONE|BLOCKED <reason>`.
 
 # C. Orchestrator only — NOT ADDRESSED TO THE IMPLEMENTER
 
-> Implementer: STOP here. Integration, verification, reviews and git belong to the Orchestrator.
+> **If you are the implementer reading this work order as your own specification: STOP at this line. Everything below describes what the Orchestrator does AFTER you finish. You do none of it — no reviewers, no verification run, no register edit, no commit.** You ARE the implementation instance described below; do NOT launch or dispatch another implementer.
+
+## Execution directive
+
+Configured `implementation` entry from `.claude/models.local.json`: codex / gpt-6-luna, CLI route (`codex exec`, explicit `-m gpt-6-luna`, banner read back). `.claude/codex-status.md` has no line for 2026-11-03, so Codex is used. Launch evidence: recorded in the register Notiz after the run.
+
+## Review routing
+
+Tier 3 in shared-core auth: lenses `envelope`, `regression`, `duplication`, `tests` plus `sec_review`, all concurrent, codex/gpt-6-luna read-only, one fix round and a closing pass on `envelope` and `tests`; the Orchestrator reads the diff against Part A while they run.
+
+## Verification
+
+Orchestrator runs `tests/test_admin_session_mfa.py`, `tests/test_admin_mfa_middleware.py` and the auth security tests (`test_client_ip.py`, the permission/ws inventory tests) on allauth 65.15.0 (installed) and on allauth 65.21.1 (a separate `--target` install on `PYTHONPATH`, never into the user site), then the full suite once as the publish gate's equivalent, justified as a shared-core dependency-ripple exception.
+
+## Register + commit
 
 - The publish after landing is the normal push-triggered `publish.yml` run; a manual dispatch still needs the operator's confirmation naming the workflow.
-- Record in the register which allauth versions the gate tests ran on.
+- 3.20.0 was never published, so no further version bump: the existing `## [3.20.0]` entry in `CHANGELOG.md` gains a Fixed note for this order. Record in the register which allauth versions the gate tests ran on, and the review line.
