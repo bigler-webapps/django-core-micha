@@ -92,19 +92,12 @@ def _install_fake_allauth(monkeypatch, authenticators):
     fake_mfa = ModuleType("allauth.mfa")
     fake_mfa.models = fake_models
 
-    fake_allauth = ModuleType("allauth")
-    fake_allauth.mfa = fake_mfa
+    import allauth
 
-    monkeypatch.setitem(sys.modules, "allauth", fake_allauth)
+    monkeypatch.setattr(allauth, "mfa", fake_mfa, raising=False)
+    monkeypatch.setitem(sys.modules, "allauth", allauth)
     monkeypatch.setitem(sys.modules, "allauth.mfa", fake_mfa)
     monkeypatch.setitem(sys.modules, "allauth.mfa.models", fake_models)
-    fake_account = ModuleType("allauth.account")
-    fake_authentication = ModuleType("allauth.account.authentication")
-    fake_authentication.get_authentication_records = lambda request: request.session.get(
-        "account_authentication_methods", []
-    )
-    monkeypatch.setitem(sys.modules, "allauth.account", fake_account)
-    monkeypatch.setitem(sys.modules, "allauth.account.authentication", fake_authentication)
     return _Authenticator
 
 
@@ -114,7 +107,17 @@ def _auth(type_: str):
 
 
 def _record_mfa(request, type_="totp"):
-    request.session = {"account_authentication_methods": [{"method": "mfa", "type": type_}]}
+    from allauth.account.internal.flows.login import record_authentication
+    from django.contrib.auth import get_user_model
+
+    previous_user = request.user
+    user_pk = getattr(previous_user, "pk", 1)
+    user = get_user_model()(pk=user_pk, username=f"admin-{user_pk}")
+    user.is_superuser = getattr(previous_user, "is_superuser", False)
+    user.is_staff = getattr(previous_user, "is_staff", False)
+    request.user = user
+    request.session = {}
+    record_authentication(request, user, "mfa", type=type_, id=1)
 
 
 # --------------------------------------------------------------------------- #

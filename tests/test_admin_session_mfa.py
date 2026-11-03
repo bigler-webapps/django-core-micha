@@ -1,6 +1,7 @@
 """Tests for MFA-authenticated admin sessions and allauth admin login wiring."""
 from __future__ import annotations
 
+import inspect
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -8,6 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from django.contrib.admin.sites import AdminSite
+from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from django.test import RequestFactory, override_settings
@@ -21,40 +23,125 @@ from django_core_micha.auth.admin_mfa_middleware import (
 urlpatterns = []
 
 
-def _install_authentication_records(monkeypatch):
-    account = ModuleType("allauth.account")
-    authentication = ModuleType("allauth.account.authentication")
-    authentication.get_authentication_records = lambda request: request.session.get(
-        "account_authentication_methods", []
-    )
-    monkeypatch.setitem(sys.modules, "allauth.account", account)
-    monkeypatch.setitem(sys.modules, "allauth.account.authentication", authentication)
+def _make_user(*, pk=1, superuser=False, staff=False):
+    user = get_user_model()(pk=pk, username=f"admin-{pk}")
+    user.is_superuser = superuser
+    user.is_staff = staff
+    return user
+
+
+def _record_authentication(request, user, method, **extra_data):
+    from allauth.account.internal.flows.login import record_authentication
+
+    record_authentication(request, user, method, **extra_data)
 
 
 @pytest.mark.parametrize(
-    ("records", "expected"),
+    ("method", "type_", "expected"),
     [
-        ([], False),
-        ([{"method": "password", "type": "password"}], False),
-        ([{"method": "social", "type": "oauth2"}], False),
-        ([{"method": "mfa", "type": "totp"}], True),
-        ([{"method": "mfa", "type": "webauthn"}], True),
-        ([{"method": "mfa", "type": "recovery_codes"}], False),
-        (None, False),
-        ([{"method": "mfa"}], False),
+        (None, None, False),
+        ("password", None, False),
+        ("mfa", "totp", True),
+        ("mfa", "webauthn", True),
+        ("mfa", "recovery_codes", False),
     ],
 )
-def test_session_used_mfa_record_cases(monkeypatch, records, expected):
-    _install_authentication_records(monkeypatch)
+def test_session_used_mfa_record_cases(method, type_, expected):
     request = RequestFactory().get("/admin/")
-    request.session = {"account_authentication_methods": records}
+    request.user = _make_user()
+    request.session = {}
+    if method is not None:
+        extra_data = {} if type_ is None else {"type": type_}
+        _record_authentication(request, request.user, method, **extra_data)
     assert session_used_mfa(request) is expected
 
 
-def test_session_used_mfa_malformed_records_fail_closed(monkeypatch):
-    _install_authentication_records(monkeypatch)
+def test_session_used_mfa_malformed_records_fail_closed():
     request = RequestFactory().get("/admin/")
-    request.session = {"account_authentication_methods": [{"method": "mfa"}, "bad"]}
+    request.user = _make_user()
+    request.session = {}
+    _record_authentication(request, request.user, "mfa", type="totp")
+    request.session["account_authentication_methods"][:] = ["bad"]
+    assert session_used_mfa(request) is False
+
+
+def test_session_used_mfa_malformed_record_container_fails_closed():
+    request = RequestFactory().get("/admin/")
+    request.user = _make_user()
+    request.session = {}
+    _record_authentication(request, request.user, "mfa", type="totp")
+    request.session["account_authentication_methods"] = None
+    assert session_used_mfa(request) is False
+
+
+def test_session_used_mfa_reader_exception_fails_closed(monkeypatch):
+    from allauth.account import authentication
+
+    monkeypatch.setattr(
+        authentication,
+        "get_authentication_records",
+        lambda request: (_ for _ in ()).throw(RuntimeError("reader failed")),
+    )
+    request = RequestFactory().get("/admin/")
+    request.user = _make_user()
+    request.session = {}
+    assert session_used_mfa(request) is False
+
+
+def test_session_used_mfa_requires_an_authenticated_user():
+    for user in (None, SimpleNamespace(is_authenticated=False, pk=1)):
+        request = RequestFactory().get("/admin/")
+        if user is not None:
+            request.user = user
+        request.session = {}
+        assert session_used_mfa(request) is False
+
+
+def test_session_used_mfa_rejects_a_record_for_another_user():
+    from allauth.account.authentication import get_authentication_records
+
+    if "user" not in inspect.signature(get_authentication_records).parameters:
+        pytest.skip("this allauth reader version does not bind records to a user")
+    request = RequestFactory().get("/admin/")
+    user_a = _make_user(pk=101)
+    request.user = user_a
+    request.session = {}
+    _record_authentication(request, user_a, "mfa", type="totp")
+    assert session_used_mfa(request) is True  # control: the record is valid for its own user
+    request.user = _make_user(pk=102)
+    assert session_used_mfa(request) is False
+
+
+def test_session_used_mfa_does_not_take_a_kwargs_wrapper_for_a_user_bound_reader(monkeypatch):
+    from allauth.account import authentication
+
+    calls = []
+
+    def reader(request, **kwargs):
+        calls.append(kwargs)
+        return [{"method": "mfa", "type": "totp"}]
+
+    monkeypatch.setattr(authentication, "get_authentication_records", reader)
+    request = RequestFactory().get("/admin/")
+    request.user = _make_user()
+    request.session = {}
+    assert session_used_mfa(request) is True
+    assert calls == [{}]
+
+
+def test_session_used_mfa_rejects_records_cleared_after_aborted_login():
+    from allauth.account.internal.flows import login
+
+    request = RequestFactory().get("/admin/")
+    request.user = _make_user()
+    request.session = {}
+    _record_authentication(request, request.user, "mfa", type="totp")
+    assert session_used_mfa(request) is True  # control: the record counts until it is cleared
+    clear_records = getattr(login, "clear_authentication_records", None)
+    if clear_records is not None:
+        clear_records(request)
+    else:
+        request.session.pop("account_authentication_methods", None)
     assert session_used_mfa(request) is False
 
 
@@ -78,8 +165,9 @@ def _install_authenticators(monkeypatch, enrolled=True):
     models.Authenticator = SimpleNamespace(Type=_AuthenticatorType, objects=Manager())
     mfa = ModuleType("allauth.mfa")
     mfa.models = models
-    allauth = ModuleType("allauth")
-    allauth.mfa = mfa
+    import allauth
+
+    monkeypatch.setattr(allauth, "mfa", mfa, raising=False)
     monkeypatch.setitem(sys.modules, "allauth", allauth)
     monkeypatch.setitem(sys.modules, "allauth.mfa", mfa)
     monkeypatch.setitem(sys.modules, "allauth.mfa.models", models)
@@ -87,12 +175,18 @@ def _install_authenticators(monkeypatch, enrolled=True):
 
 def _middleware_request(*, superuser=False, staff=False, authenticated=True, records=None):
     request = RequestFactory().get("/admin/")
-    request.user = SimpleNamespace(
-        is_authenticated=authenticated,
-        is_superuser=superuser,
-        is_staff=staff,
-    )
-    request.session = {"account_authentication_methods": records or []}
+    if authenticated and records is not None:
+        request.user = _make_user(superuser=superuser, staff=staff)
+    else:
+        request.user = SimpleNamespace(
+            is_authenticated=authenticated,
+            is_superuser=superuser,
+            is_staff=staff,
+        )
+    request.session = {}
+    for record in records or []:
+        extra_data = {key: value for key, value in record.items() if key != "method"}
+        _record_authentication(request, request.user, record["method"], **extra_data)
     return request
 
 
@@ -100,8 +194,11 @@ def _middleware_request(*, superuser=False, staff=False, authenticated=True, rec
 @pytest.mark.parametrize("staff_role", [False, True], ids=["superuser", "staff"])
 def test_enrolled_password_only_session_is_refused(monkeypatch, staff_role):
     _install_authenticators(monkeypatch, enrolled=True)
-    _install_authentication_records(monkeypatch)
-    request = _middleware_request(superuser=not staff_role, staff=staff_role)
+    request = _middleware_request(
+        superuser=not staff_role,
+        staff=staff_role,
+        records=[{"method": "password"}],
+    )
     response = AdminMfaRequiredMiddleware(lambda _request: HttpResponse("ok"))(request)
     assert response.status_code == 403
     assert b"not authenticated with MFA" in response.content
@@ -111,7 +208,6 @@ def test_enrolled_password_only_session_is_refused(monkeypatch, staff_role):
 @pytest.mark.parametrize("staff_role", [False, True], ids=["superuser", "staff"])
 def test_enrolled_mfa_session_is_allowed(monkeypatch, staff_role):
     _install_authenticators(monkeypatch, enrolled=True)
-    _install_authentication_records(monkeypatch)
     request = _middleware_request(
         superuser=not staff_role,
         staff=staff_role,
@@ -160,7 +256,6 @@ def test_missing_admin_mfa_setting_allows_password_only_session(monkeypatch, set
 @override_settings(ADMIN_MFA_REQUIRED=True, IS_LOCAL=False)
 def test_mfa_session_without_enrolled_factor_is_refused(monkeypatch):
     _install_authenticators(monkeypatch, enrolled=False)
-    _install_authentication_records(monkeypatch)
     request = _middleware_request(
         superuser=True, records=[{"method": "mfa", "type": "totp"}]
     )
@@ -255,7 +350,14 @@ def test_script_prefix_does_not_hide_the_admin_from_the_gate(monkeypatch):
 def test_unknown_or_missing_mfa_types_fail_closed():
     for record in ({"method": "mfa", "type": "unknown"}, {"method": "mfa"}, {"method": "mfa", "type": ""}):
         request = RequestFactory().get("/admin/")
-        request.session = {"account_authentication_methods": [record]}
+        request.user = _make_user()
+        request.session = {}
+        _record_authentication(request, request.user, "mfa", type="totp")
+        stored_record = request.session["account_authentication_methods"][-1]
+        if "type" in record:
+            stored_record["type"] = record["type"]
+        else:
+            stored_record.pop("type", None)
         assert session_used_mfa(request) is False
 
 
@@ -263,8 +365,9 @@ def test_staff_with_an_mfa_session_but_no_enrolled_factor_is_refused(monkeypatch
     from django_core_micha.auth import admin_mfa_middleware as module
     monkeypatch.setattr(AdminMfaRequiredMiddleware, "_has_mfa", staticmethod(lambda user: False))
     request = RequestFactory().get("/admin/")
-    request.user = SimpleNamespace(is_authenticated=True, is_superuser=False, is_staff=True, pk=2)
-    request.session = {"account_authentication_methods": [{"method": "mfa", "type": "totp"}]}
+    request.user = _make_user(pk=2, staff=True)
+    request.session = {}
+    _record_authentication(request, request.user, "mfa", type="totp")
     with override_settings(IS_LOCAL=False, ADMIN_MFA_REQUIRED=True):
         response = AdminMfaRequiredMiddleware(lambda r: HttpResponse("ok"))(request)
     assert response.status_code == 403 and module.session_used_mfa(request) is True
@@ -330,8 +433,9 @@ def test_an_admin_mounted_at_another_prefix_is_gated_too():
 def test_a_password_only_session_is_refused_on_the_prefixed_admin(monkeypatch):
     monkeypatch.setattr(AdminMfaRequiredMiddleware, "_has_mfa", staticmethod(lambda user: True))
     request = RequestFactory().get("/backend/admin/")
-    request.user = SimpleNamespace(is_authenticated=True, is_superuser=True, is_staff=True, pk=4)
-    request.session = {"account_authentication_methods": [{"method": "password"}]}
+    request.user = _make_user(pk=4, superuser=True, staff=True)
+    request.session = {}
+    _record_authentication(request, request.user, "password")
     response = AdminMfaRequiredMiddleware(lambda r: HttpResponse("ok"))(request)
     assert response.status_code == 403
 

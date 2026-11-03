@@ -25,6 +25,8 @@ Audit-Trail: webapp-management/SECURITY_FINDINGS.md S267.
 """
 from __future__ import annotations
 
+import inspect
+
 from django.conf import settings
 from django.http import HttpResponseForbidden
 
@@ -36,9 +38,24 @@ def session_used_mfa(request) -> bool:
     session data, malformed records, and import/runtime failures as no MFA.
     """
     try:
+        user = getattr(request, "user", None)
+        if (
+            user is None
+            or not getattr(user, "is_authenticated", False)
+            or getattr(user, "pk", None) is None
+        ):
+            return False
+
         from allauth.account.authentication import get_authentication_records
 
-        records = get_authentication_records(request)
+        # allauth 65.21 binds the records to the user and needs it named
+        # (``user=None`` returns nothing); older versions take the request only.
+        # Only a parameter literally named ``user`` counts: a ``**kwargs``
+        # wrapper that may drop it must not be taken for a user-bound reader.
+        if "user" in inspect.signature(get_authentication_records).parameters:
+            records = get_authentication_records(request, user=user)
+        else:
+            records = get_authentication_records(request)
         if not isinstance(records, (list, tuple)):
             return False
         return any(

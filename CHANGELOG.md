@@ -22,6 +22,15 @@ views, or has its own webhook throttle, keeps DRF's `X-Forwarded-For` identity u
 the identity is `REMOTE_ADDR`. The identity is only unforgeable where the origin is reachable through Cloudflare alone; the origins
 that answer directly are tracked as S260 (webapp-management, fix WM-SEC-9).
 
+### Fixed
+
+DCM-AUTH-13: the admin MFA gate (`ADMIN_MFA_REQUIRED=True`) works with django-allauth 65.21. allauth 65.21 binds authentication
+records to the user and `get_authentication_records(request)` without the user returns nothing, so `session_used_mfa` refused every
+staff member and superuser, MFA login or not (a lockout, not a bypass). `session_used_mfa` now passes `request.user` when the reader
+accepts a `user` parameter and keeps the request-only call for older allauth; an anonymous or unsaved user counts as no MFA. The
+acceptance rule is unchanged (a TOTP or WebAuthn record only). 3.20.0 is the first published release with this fix: the 3.20.0 publish
+failed on allauth 65.21.1 before this fix.
+
 ## [3.19.1] — 2026-10-25
 
 ### Fixed
