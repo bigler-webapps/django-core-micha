@@ -36,7 +36,7 @@ Tier 3: a change inside the shared core, on a security surface (abuse protection
 
 ## Risks
 
-- Trusting `CF-Connecting-IP` is safe only where an app is reachable through Cloudflare alone. If an origin accepts traffic that bypasses Cloudflare, a client could set the header itself. Before landing, the Orchestrator establishes (read-only, from outside) that the app origins do not answer requests that bypass Cloudflare, and records the evidence; a reachable origin stops the order.
+- Trusting `CF-Connecting-IP` is fully safe only where an app is reachable through Cloudflare alone. **Measured 2026-11-03 by the Orchestrator:** the main-prod origin answers requests that bypass Cloudflare (`--resolve` to 91.99.199.135 → 200; webapp-management S260, fix WM-SEC-9 live on staging only). **Operator decision 2026-11-03: proceed anyway.** A client that reaches the origin directly can already set `X-Forwarded-For` freely today, so it gains nothing new by setting `CF-Connecting-IP`; for all traffic through Cloudflare the identity becomes unforgeable. The remaining gap is tracked as S260 and closes with the WM-SEC-9 rollout to the prod hosts; it is a residual risk, not a stop condition.
 - The audit log stops consulting `X-Real-IP`. No deployment of the estate sets it today as far as known; the Orchestrator confirms before landing.
 
 ## Required tests to write
