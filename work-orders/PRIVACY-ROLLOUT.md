@@ -81,17 +81,17 @@ These are design inputs, not a complete legal opinion or evidence of any individ
 
 ## Publication record
 
-All 24 work orders are committed locally. Nineteen app work orders are published on `origin/develop` as of 2026-11-04; the table below records the specification commits. No privacy feature is implemented by these specification files.
+All 24 work orders are committed locally. Twenty app work orders are published on `origin/develop`, and both dcm work orders on `origin/main`, as of 2026-11-04. Only the two ucm work orders and shared prototype await publication; the table below records the specification commits. No privacy feature is implemented by these specification files.
 
 | Repository | Specification commit | Publication |
 |---|---|---|
-| django-core-micha | `32e3cc4` | Pending: preceding DCM-BILL-8 specification from another session; publication approval requested. |
+| django-core-micha | `32e3cc4` | Published; the operator explicitly authorised publishing the preceding DCM-BILL-8 specification. |
 | ui-core-micha | `032b1e7`; prototype `ced7a28` | Pending: preceding UCM-BILL-11 implementation is still registered in progress; its owner must clear publication. |
 | hram | `1e6ecc32` | Published |
 | Gustav | `03b6b79` | Published |
 | Photogallery | `d7d8c84` | Published |
 | Cinevia | `dc9b625` | Published |
-| maana | `4aa05b5` | Pending: preceding billing specifications and secrets.yaml declaration from another session; publication approval requested. |
+| maana | `4aa05b5` | Published; the operator explicitly authorised publishing the preceding billing specifications and secrets.yaml declaration. |
 | Kira | `6e26507` | Published |
 | webshop-guenter | `08eee06` | Published |
 | reimbursements | `3f4d3f2` | Published |
