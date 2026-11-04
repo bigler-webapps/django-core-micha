@@ -1,5 +1,33 @@
 # Changelog
 
+## [3.21.0] — 2026-11-04
+
+### Added
+
+DCM-BILL-8 (shared core of maana MAANA-APP-40): contracts, cancellation and withdrawal declarations, a full-refund withdrawal policy
+and an annual-to-monthly continuation, all opt-in through a new `contract:` block in `billing.yaml`. Apps without the block answer
+exactly as before (`me/` carries no `contract` key; the new endpoints answer 404).
+
+- Models `Contract`, `ContractPayment`, `Declaration`, `Refund` (migration `0004`, which backfills one legacy contract and payment per
+  existing purchase).
+- Plan kind `continuation`, `continuation:` on annual subscription plans, `available: false` on purchasable plans. A Stripe
+  subscription schedule moves the annual subscription to the continuation price (verified in Stripe test mode with Managed Payments);
+  a transition guard ends the subscription at the period end instead of renewing annually when no schedule exists.
+- Endpoints `contracts/`, `contracts/<reference>/cancel|withdraw/`, `public/declarations/` (anonymous, CSRF, throttled per IP and
+  address, no account disclosure), `public/declarations/confirm/`, `operator/declarations/`; overview counts
+  `declarations_needing_review` and `refunds_overdue`.
+- Commands `billing_process_declarations` (mail retries, schedules, refunds, due cancellations, transition guard, overdue report) and
+  `billing_resolve_declaration` (operator decision, including an extraordinary termination with an earlier end and a refund).
+- New setting `DCM_BILLING_DECLARATION_CONFIRM_URL` (frontend URL with `{token}` for the owner's confirmation link).
+
+### Fixed
+
+- Subscription purchases stored an empty payment intent with current Stripe API versions (invoices no longer carry
+  `payment_intent`), so a subscription withdrawal failed with `payment_reference_missing`; the intent is now read from the invoice's
+  `InvoicePayment`.
+- A cancelled subscription's end time preferred Stripe's `canceled_at` (the request time) over `ended_at`.
+- The legacy withdrawal confirmation mail is marked sent only after the mail backend accepted it.
+
 ## [3.20.1] — 2026-11-04
 
 ### Fixed

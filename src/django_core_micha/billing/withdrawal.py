@@ -72,23 +72,28 @@ def _note(calc, currency):
     return f"Time share: {calc.time_share_cents} {currency} cents; token share: {calc.token_share_cents} {currency} cents; used: {calc.used_cents} {currency} cents; refund: {calc.refund_cents} {currency} cents."
 
 def _send_confirmation(purchase, now, calc, note):
-    if Purchase.objects.filter(pk=purchase.pk, withdrawal_email_sent=False).update(withdrawal_email_sent=True) != 1: return
     try:
         from django.core.mail import send_mail
         from django_core_micha.emails import get_preferred_language, get_greeting_name
-        lang = get_preferred_language(purchase.user)
-        date = timezone.localtime(now).strftime("%Y-%m-%d %H:%M %Z")
-        greeting = _clean(get_greeting_name(purchase.user))
-        plan_key = _clean(purchase.plan_key)
-        if lang.startswith("de"):
-            subject = "Bestätigung Ihres Widerrufs"
-            body = f"Guten Tag {greeting},\n\nIhr Widerruf für {plan_key} wurde am {date} erfasst. Bezahlt: {purchase.amount_paid_cents} {purchase.currency}. {note} Die Rückzahlung erfolgt innerhalb von 14 Tagen auf das ursprüngliche Zahlungsmittel."
-        else:
-            subject = "Withdrawal confirmation"
-            body = f"Hello {greeting},\n\nYour withdrawal for {plan_key} was recorded on {date}. Paid: {purchase.amount_paid_cents} {purchase.currency}. {note} The refund will be paid to the original payment method within 14 days."
-        send_mail(subject, body, getattr(settings, "DEFAULT_FROM_EMAIL", None), [purchase.user.email])
+        with transaction.atomic():
+            locked=Purchase.objects.select_for_update().select_related("user").get(pk=purchase.pk)
+            if locked.withdrawal_email_sent: return
+            lang = get_preferred_language(locked.user)
+            date = timezone.localtime(now).strftime("%Y-%m-%d %H:%M %Z")
+            greeting = _clean(get_greeting_name(locked.user))
+            plan_key = _clean(locked.plan_key)
+            if lang.startswith("de"):
+                subject = "Bestätigung Ihres Widerrufs"
+                body = f"Guten Tag {greeting},\n\nIhr Widerruf für {plan_key} wurde am {date} erfasst. Bezahlt: {locked.amount_paid_cents} {locked.currency}. {note} Die Rückzahlung erfolgt innerhalb von 14 Tagen auf das ursprüngliche Zahlungsmittel."
+            else:
+                subject = "Withdrawal confirmation"
+                body = f"Hello {greeting},\n\nYour withdrawal for {plan_key} was recorded on {date}. Paid: {locked.amount_paid_cents} {locked.currency}. {note} The refund will be paid to the original payment method within 14 days."
+            accepted=send_mail(subject,body,getattr(settings,"DEFAULT_FROM_EMAIL",None),[locked.user.email])>0
+            if accepted:
+                locked.withdrawal_email_sent=True
+                locked.save(update_fields=("withdrawal_email_sent",))
     except Exception as exc:
-        log.error("Withdrawal confirmation email failed (%s)", type(exc).__name__)
+        log.error("Withdrawal confirmation email failed (%s)",type(exc).__name__)
 
 def _send_after_commit(pk, now, calc, note):
     purchase = Purchase.objects.select_related("user").filter(pk=pk).first()

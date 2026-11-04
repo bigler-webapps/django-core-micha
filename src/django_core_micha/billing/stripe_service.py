@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 
@@ -12,8 +14,11 @@ from django.db import transaction
 from django.utils import timezone
 
 from .config import load_billing_config
-from .models import BillingCustomer, StripePrice, Subscription, TeamPackage, Purchase, TokenEntry, CheckoutAttempt
+from .models import (BillingCustomer, StripePrice, Subscription, TeamPackage, Purchase, TokenEntry, CheckoutAttempt,
+                     Contract, ContractPayment, Refund)
 from .services import credit_purchase, grant_tokens
+
+log = logging.getLogger(__name__)
 
 
 def _stripe():
@@ -74,7 +79,7 @@ def sync_plans(*, dry_run=False):
             args = {"product": product_id, "unit_amount": plan.amount_cents, "currency": cfg.currency,
                     "lookup_key": lookup_key, "tax_behavior": "exclusive",
                     "metadata": {"app": app, "plan_key": plan.key, "version": str(version)}}
-            if plan.kind == "subscription":
+            if plan.kind in ("subscription", "continuation"):
                 args["recurring"] = {"interval": plan.interval}
             price = stripe.Price.create(**args)
         StripePrice.objects.create(app=app, plan_key=plan.key, version=version, lookup_key=lookup_key,
@@ -116,6 +121,8 @@ def get_customer(user):
 
 def checkout_session_params(*, plan, price, user, customer_id, success_url=None, cancel_url=None, attempt_reference=None, context=None):
     """Build only parameters supported by Stripe Checkout SessionCreateParams in Stripe 16."""
+    if plan.kind == "continuation" or not getattr(plan, "available", True):
+        raise LookupError("unknown_plan")
     mode = "subscription" if plan.kind == "subscription" else "payment"
     params = {"mode": mode, "customer": customer_id, "line_items": [{"price": price.stripe_price_id, "quantity": 1}],
         "success_url": success_url if success_url is not None else getattr(settings, "DCM_BILLING_SUCCESS_URL", ""),
@@ -123,6 +130,8 @@ def checkout_session_params(*, plan, price, user, customer_id, success_url=None,
         "metadata": {"app": getattr(settings, "DCM_BILLING_APP", ""), "plan_key": plan.key, "user_id": str(user.pk)},
         "billing_address_collection": "required",
         "managed_payments": {"enabled": True}}
+    policy=load_billing_config().contract
+    if policy: params["metadata"]["terms_version"]=policy["terms_version"]
     if getattr(settings, "DCM_BILLING_AUTOMATIC_TAX", False) is True:  # a real boolean only: the string "False" must not switch it on
         params["automatic_tax"] = {"enabled": True}
     for key in ("seats", "term_months", "token_allowance", "tokens"):
@@ -136,6 +145,8 @@ def checkout_session_params(*, plan, price, user, customer_id, success_url=None,
     if mode == "subscription":
         params["subscription_data"] = {"metadata": {"app": getattr(settings, "DCM_BILLING_APP", ""),
             "plan_key": plan.key, "user_id": str(user.pk)}}
+        if policy:
+            params["subscription_data"]["metadata"]["terms_version"]=policy["terms_version"]
     else:
         params["payment_intent_data"] = {"metadata": params["metadata"]}
     return params
@@ -160,6 +171,35 @@ def _invoice_subscription_id(invoice):
     if isinstance(sub_id, dict):
         sub_id = sub_id.get("id")
     return sub_id
+
+
+def _invoice_payment_intent(invoice):
+    """Payment intent of a paid invoice: `payment_intent` (older API versions) or its InvoicePayment (2025+ versions,
+    where the invoice itself no longer carries it; measured on 2026-10-28.endive)."""
+    invoice = _dict(invoice or {})
+    value = invoice.get("payment_intent")
+    if isinstance(value, dict):
+        value = value.get("id")
+    if value:
+        return str(value)
+    payments = (invoice.get("payments") or {}).get("data") if isinstance(invoice.get("payments"), dict) else None
+    if payments is None and invoice.get("id"):
+        try:
+            payments = getattr(_stripe().InvoicePayment.list(invoice=invoice["id"], limit=10), "data", [])
+        except Exception as exc:
+            log.error("Invoice payment lookup failed (%s)", type(exc).__name__)
+            payments = []
+    for item in payments or []:
+        item = _dict(item)
+        if item.get("status") not in (None, "paid"):
+            continue
+        payment = _dict(item.get("payment") or {})
+        intent = payment.get("payment_intent")
+        if isinstance(intent, dict):
+            intent = intent.get("id")
+        if intent:
+            return str(intent)
+    return ""
 
 
 def _utc(timestamp):
@@ -189,6 +229,14 @@ def _plan(plan_key):
     return next((p for p in load_billing_config().plans if p.key == plan_key), None)
 
 
+def _contract_policy():
+    """The app's `contract:` block, or None when the app has none (or, in a bare event path, no billing.yaml at all)."""
+    try:
+        return load_billing_config().contract
+    except FileNotFoundError:
+        return None
+
+
 def _grant_period(user, plan, subscription_id, period_start, period_end):
     if not user or not plan or plan.token_allowance <= 0 or not period_end:
         return
@@ -197,7 +245,7 @@ def _grant_period(user, plan, subscription_id, period_start, period_end):
         reference=f"stripe:{subscription_id}:{start_key}", purpose=f"plan:{plan.key}")
 
 
-def _upsert_subscription(obj, *, user=None):
+def _upsert_subscription(obj, *, user=None, allow_grant=True):
     data = _dict(obj)
     metadata = data.get("metadata") or {}
     user = user or _user_from_metadata(metadata)
@@ -209,18 +257,42 @@ def _upsert_subscription(obj, *, user=None):
     # the row lock waits for a running withdrawal, so a concurrent event never regrants after it
     if Purchase.objects.select_for_update().filter(stripe_object_id=sid, status="withdrawn").exists():
         return Subscription.objects.filter(stripe_subscription_id=sid).first()
-    plan_key = metadata.get("plan_key") or ""
+    items=((data.get("items") or {}).get("data") or [])
+    price_id=""
+    if items:
+        price=items[0].get("price") or {}
+        price_id=price.get("id") if isinstance(price,dict) else price
+    price_row=StripePrice.objects.filter(app=getattr(settings,"DCM_BILLING_APP",""),stripe_price_id=price_id).first() if price_id else None
+    plan_key=(price_row.plan_key if price_row else "") or metadata.get("plan_key") or ""
     status = data.get("status", "incomplete")
     start, end = _period(data)
+    contract=Contract.objects.filter(stripe_object_id=sid,app=getattr(settings,"DCM_BILLING_APP","")).first()
+    if contract and contract.status in ("withdrawn","ended"):
+        return Subscription.objects.filter(stripe_subscription_id=sid).first()
+    if contract and contract.status=="cancellation_scheduled" and contract.cancel_effective_at and _utc(start) and _utc(start)>=contract.cancel_effective_at:
+        return Subscription.objects.filter(stripe_subscription_id=sid).first()
+    cancel_at_period_end=bool(data.get("cancel_at_period_end"))
+    if contract and contract.status=="cancellation_scheduled" and contract.cancel_effective_at and _utc(end)==contract.cancel_effective_at:
+        cancel_at_period_end=True
     values = {"user": user, "plan_key": plan_key, "status": status,
         "current_period_start": _utc(start), "current_period_end": _utc(end),
-        "cancel_at_period_end": bool(data.get("cancel_at_period_end")),
-        "ended_at": _utc(data.get("canceled_at") or data.get("ended_at")) if status in ("canceled", "unpaid", "incomplete_expired") else None}
+        "cancel_at_period_end": cancel_at_period_end,
+        "ended_at": _utc(data.get("ended_at") or data.get("canceled_at")) if status in ("canceled", "unpaid", "incomplete_expired") else None}
     sub, _ = Subscription.objects.update_or_create(stripe_subscription_id=sid, defaults=values)
+    if contract and status in ("canceled","incomplete_expired") and contract.status=="cancellation_scheduled":
+        ended=_utc(data.get("ended_at") or data.get("canceled_at")) or timezone.now()
+        contract.status="ended"; contract.save(update_fields=("status","updated_at"))
+        for declaration in Declaration.objects.filter(contract=contract,kind="cancellation",status="scheduled"):
+            declaration.status="effective"; declaration.effective_at=ended; declaration.save(update_fields=("status","effective_at"))
     plan = _plan(plan_key)
+    if contract and contract.continuation_plan_key==plan_key and contract.continuation_token_allowance is not None:
+        plan=SimpleNamespace(key=plan_key,kind="continuation",token_allowance=contract.continuation_token_allowance,
+            amount_cents=contract.continuation_amount_cents or 0,interval=contract.continuation_interval)
     # No allowance for a period whose payment failed: past_due keeps access for now but grants nothing.
-    if plan and status == "active":
+    if plan and status == "active" and allow_grant:
         _grant_period(user, plan, sid, start, end)
+    if contract and plan and plan.kind=="continuation":
+        Contract.objects.filter(pk=contract.pk).update(phase="continuation")
     return sub
 
 
@@ -249,6 +321,29 @@ def _event_app_and_metadata(event_type, obj):
             sub = _dict(_stripe().Subscription.retrieve(sub_id))
             return sub.get("metadata") or {}
     return metadata
+
+
+def _invoice_plan_key(invoice):
+    for line in ((invoice.get("lines") or {}).get("data") or []):
+        price=line.get("price") or (((line.get("pricing") or {}).get("price_details") or {}).get("price"))
+        if isinstance(price,dict): price=price.get("id")
+        row=StripePrice.objects.filter(app=getattr(settings,"DCM_BILLING_APP",""),stripe_price_id=price).first() if price else None
+        if row: return row.plan_key
+    return ""
+
+
+def _record_contract_payment(contract,invoice,billing_reason):
+    invoice_id=invoice.get("id") or ""
+    if invoice_id and ContractPayment.objects.filter(stripe_invoice_id=invoice_id).exists(): return ContractPayment.objects.get(stripe_invoice_id=invoice_id)
+    payment_intent=_invoice_payment_intent(invoice)
+    charge=invoice.get("charge") or ""
+    if isinstance(charge,dict): charge=charge.get("id") or ""
+    try: paid=max(0,int(invoice.get("amount_paid") or 0))
+    except (TypeError,ValueError): paid=0
+    timestamp=((invoice.get("status_transitions") or {}).get("paid_at") or invoice.get("created"))
+    return ContractPayment.objects.create(contract=contract,stripe_invoice_id=invoice_id,
+        stripe_payment_intent_id=str(payment_intent),stripe_charge_id=str(charge),amount_paid_cents=paid,
+        currency=(invoice.get("currency") or "usd").lower(),paid_at=_utc(timestamp) or timezone.now(),billing_reason=billing_reason)
 
 
 def _withdrawal_purchase_pk(app, *candidates):
@@ -314,15 +409,43 @@ def complete_withdrawal_from_refund(refund, idempotency_key=None):
     return True
 
 
+def complete_contract_refund(refund, idempotency_key=None, event_kind="refund.updated"):
+    data=_dict(refund); metadata=data.get("metadata") or {}; app=getattr(settings,"DCM_BILLING_APP","")
+    key=metadata.get("dcm_refund") or idempotency_key
+    if not isinstance(key,str) or not key.startswith(f"dcm-refund:{app}:"): return False
+    row=Refund.objects.select_for_update().select_related("payment","contract").filter(idempotency_key=key,contract__app=app).first()
+    if not row or metadata.get("app")!=app: return False
+    if metadata.get("contract_id") not in (None,"",str(row.contract_id)): return False
+    payment_intent=data.get("payment_intent")
+    if isinstance(payment_intent,dict): payment_intent=payment_intent.get("id")
+    if payment_intent != row.payment.stripe_payment_intent_id: return False
+    amount=data.get("amount")
+    if not isinstance(amount,int) or isinstance(amount,bool) or amount<=0 or amount>row.amount_cents: return False
+    currency=data.get("currency")
+    if not currency or str(currency).lower()!=row.currency.lower(): return False
+    if row.status=="succeeded": return True
+    provider_status=data.get("status") or ("failed" if event_kind=="refund.failed" else "pending")
+    next_status={"succeeded":"succeeded","pending":"requested","failed":"failed","requires_action":"requires_action"}.get(provider_status,"requested")
+    if row.status in ("failed","cancelled") and next_status in ("requested","requires_action"): return True
+    if next_status=="succeeded":
+        row.payment.refunded_cents=int(row.payment.refunded_cents or 0)+amount
+        row.payment.save(update_fields=("refunded_cents",))
+    row.status=next_status; row.stripe_refund_id=data.get("id") or row.stripe_refund_id
+    row.last_error_code="" if next_status!="failed" else event_kind
+    row.save(update_fields=("status","stripe_refund_id","last_error_code","updated_at"))
+    return True
+
+
 def process_stripe_event(event):
     """Process one verified Stripe event. Caller owns the event-row transaction."""
     event = _dict(event)
     kind = event.get("type", "")
     obj = ((event.get("data") or {}).get("object") or {})
     obj = _dict(obj)
-    if kind in ("refund.created", "refund.updated"):
+    if kind in ("refund.created", "refund.updated", "refund.failed"):
         request_info = event.get("request")
         request_key = _dict(request_info).get("idempotency_key") if isinstance(request_info, dict) else None
+        complete_contract_refund(obj,request_key,kind)
         complete_withdrawal_from_refund(obj, request_key)
         return "processed"
     if kind == "charge.refunded":
@@ -330,9 +453,11 @@ def process_stripe_event(event):
         if isinstance(payment_intent, dict):
             payment_intent = payment_intent.get("id")
         active = Purchase.objects.filter(status="active", stripe_payment_intent_id=payment_intent).exists() if payment_intent else False
-        if active:
+        contract_refunds=Refund.objects.filter(payment__stripe_payment_intent_id=payment_intent).exclude(status__in=("succeeded","cancelled")).exists() if payment_intent else False
+        if active or contract_refunds:
             refunds = _stripe().Refund.list(charge=obj.get("id"), limit=100)
             for refund in getattr(refunds, "data", refunds if isinstance(refunds, list) else []):
+                complete_contract_refund(refund)
                 complete_withdrawal_from_refund(refund)
         return "processed"
     metadata = _event_app_and_metadata(kind, obj)
@@ -341,7 +466,12 @@ def process_stripe_event(event):
     if kind in ("checkout.session.async_payment_failed", "checkout.session.expired"):
         return "processed" if _update_checkout_attempt(kind, obj, metadata) else "ignored"
     if kind in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
-        _upsert_subscription(obj)
+        contract=Contract.objects.filter(stripe_object_id=obj.get("id"),app=getattr(settings,"DCM_BILLING_APP","")).first()
+        if contract:
+            allow_grant=not bool(contract.terms_version)
+        else:
+            allow_grant=not bool((metadata.get("terms_version") or _contract_policy()))
+        _upsert_subscription(obj,allow_grant=allow_grant)
     elif kind in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
         plan = _plan(metadata.get("plan_key", ""))
         user = _user_from_metadata(metadata)
@@ -353,16 +483,18 @@ def process_stripe_event(event):
             sid = obj.get("subscription")
             if sid:
                 remote = _dict(_stripe().Subscription.retrieve(sid))
-                sub = _upsert_subscription(remote, user=user)
+                paid=obj.get("payment_status") in ("paid","no_payment_required")
+                opted=bool((remote.get("metadata") or {}).get("terms_version") or _contract_policy())
+                sub = _upsert_subscription(remote, user=user,allow_grant=paid or not opted)
                 inv = remote.get("latest_invoice") or {}
                 if isinstance(inv, str):
                     try: inv = _dict(_stripe().Invoice.retrieve(inv))
                     except Exception: inv = {}
-                if obj.get("payment_status") in ("paid", "no_payment_required"):  # a delayed payment creates it on the success event
+                if paid:  # a delayed payment creates it on the success event
                   _create_purchase(obj, event, user, plan, "subscription", sid,
-                    payment_intent=((inv.get("payment_intent") or {}).get("id") if isinstance(inv.get("payment_intent"),dict) else inv.get("payment_intent")) or obj.get("payment_intent"),
+                    payment_intent=(_invoice_payment_intent(inv) if inv else "") or obj.get("payment_intent"),
                     invoice_id=inv.get("id") or "", term_start=_utc(_period(remote)[0]), term_end=_utc(_period(remote)[1]),
-                    grant_refs=[f"stripe:{sid}:{int(_period(remote)[0] or _period(remote)[1] or 0)}"] if _period(remote)[1] else [], tokens=plan.token_allowance)
+                    grant_refs=[f"stripe:{sid}:{int(_period(remote)[0] or _period(remote)[1] or 0)}"] if _period(remote)[1] else [], tokens=plan.token_allowance, invoice_data=inv)
         elif plan.kind == "team_package":
             if obj.get("payment_status") not in ("paid", "no_payment_required"):
                 return "ignored"  # seats and tokens only after the payment has succeeded
@@ -387,7 +519,16 @@ def process_stripe_event(event):
     elif kind == "invoice.paid":
         sub_id = _invoice_subscription_id(obj)
         if sub_id:
-            _upsert_subscription(_stripe().Subscription.retrieve(sub_id))
+            sub=_upsert_subscription(_stripe().Subscription.retrieve(sub_id),allow_grant=True)
+            contract=Contract.objects.filter(stripe_object_id=sub_id,app=getattr(settings,"DCM_BILLING_APP","")).first()
+            if contract and contract.status not in ("withdrawn","ended"):
+                invoice_start=(obj.get("period_start") or next((line.get("period",{}).get("start") for line in ((obj.get("lines") or {}).get("data") or []) if line.get("period",{}).get("start")),None))
+                if contract.cancel_effective_at and invoice_start and _utc(invoice_start)>=contract.cancel_effective_at:
+                    return "processed"
+                plan_key=_invoice_plan_key(obj) or (sub.plan_key if sub else "")
+                plan=_plan(plan_key); is_continuation=bool(contract.continuation_plan_key and contract.continuation_plan_key==plan_key)
+                reason="continuation" if is_continuation or (plan and plan.kind=="continuation") else ("initial" if obj.get("billing_reason")=="subscription_create" else "renewal")
+                _record_contract_payment(contract,obj,reason)
     elif kind == "invoice.payment_failed":
         sub_id = _invoice_subscription_id(obj)
         sub = Subscription.objects.filter(stripe_subscription_id=sub_id).first()
@@ -431,7 +572,7 @@ def _update_checkout_attempt(kind, obj, metadata):
         attempt.save(update_fields=("status","stripe_session_id","updated_at"))
     return transitioned
 
-def _create_purchase(obj,event,user,plan,kind,object_id,*,payment_intent=None,invoice_id="",term_start=None,term_end=None,grant_refs=None,tokens=0):
+def _create_purchase(obj,event,user,plan,kind,object_id,*,payment_intent=None,invoice_id="",term_start=None,term_end=None,grant_refs=None,tokens=0,invoice_data=None):
     details=obj.get("customer_details") or {}
     address=details.get("address") or {}
     tax_ids=details.get("tax_ids") or []
@@ -441,8 +582,30 @@ def _create_purchase(obj,event,user,plan,kind,object_id,*,payment_intent=None,in
     existing=Purchase.objects.filter(stripe_object_id=str(object_id)).first()
     if existing and not existing.stripe_payment_intent_id and payment_intent and existing.status=="active":
         existing.stripe_payment_intent_id=str(payment_intent); existing.save(update_fields=("stripe_payment_intent_id",))
-    return Purchase.objects.get_or_create(stripe_object_id=str(object_id),defaults={
+    purchase=Purchase.objects.get_or_create(stripe_object_id=str(object_id),defaults={
         "user":user,"kind":kind,"plan_key":plan.key,"stripe_payment_intent_id":str(payment_intent or ""),"stripe_invoice_id":str(invoice_id or ""),
         "amount_paid_cents":amount,"currency":(obj.get("currency") or load_billing_config().currency).lower(),"billing_country":(address.get("country") or "").upper(),
         "has_business_tax_id":bool(tax_ids),"purchased_at":created,"term_start":term_start,"term_end":term_end,
         "grant_references":grant_refs or [],"tokens_granted":max(0,int(tokens or 0))})[0]
+    cfg=load_billing_config(); terms=(obj.get("metadata") or {}).get("terms_version")
+    from .contracts import create_contract_for_purchase
+    contract,_=create_contract_for_purchase(purchase,plan,info_delivered=bool(cfg.contract and terms==cfg.contract["terms_version"]))
+    if invoice_data is None: invoice_data={}
+    invoice_data=_dict(invoice_data)
+    if not invoice_data.get("amount_paid"):
+        invoice_data["amount_paid"]=amount
+    if not invoice_data.get("id"):
+        invoice_data["id"]=str(invoice_id or "")
+    if not invoice_data.get("payment_intent"):
+        invoice_data["payment_intent"]=payment_intent or ""
+    if not invoice_data.get("currency"):
+        invoice_data["currency"]=(obj.get("currency") or cfg.currency).lower()
+    if not invoice_data.get("created"):
+        invoice_data["created"]=int(created.timestamp())
+    if invoice_id and ContractPayment.objects.filter(stripe_invoice_id=str(invoice_id)).exists():
+        pass
+    elif not invoice_id and ContractPayment.objects.filter(contract=contract,stripe_invoice_id="",billing_reason="initial").exists():
+        pass
+    else:
+        _record_contract_payment(contract,invoice_data,"initial")
+    return purchase

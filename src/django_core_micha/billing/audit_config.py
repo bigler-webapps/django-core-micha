@@ -1,4 +1,6 @@
-from django_core_micha.billing.models import BillingCustomer, StripePrice, Subscription, TeamPackage, TeamSeat, FreeAccess, TokenAccount, TokenEntry, StripeEvent, AICostRecord, Purchase, CheckoutAttempt
+from django_core_micha.billing.models import BillingCustomer, StripePrice, Subscription, TeamPackage, TeamSeat, FreeAccess, TokenAccount, TokenEntry, StripeEvent, AICostRecord, Purchase, CheckoutAttempt, Contract, ContractPayment, Declaration, Refund
 from django_core_micha.auditlog import register
 for model in (BillingCustomer, StripePrice, Subscription, TeamPackage, TeamSeat, FreeAccess, TokenAccount, TokenEntry, StripeEvent, AICostRecord, Purchase, CheckoutAttempt):
     register(model, redact_fields=tuple(f.name for f in model._meta.fields if f.name.startswith("stripe_") or f.name in ("email", "reference")))
+for model in (Contract,ContractPayment,Declaration,Refund):
+    register(model,redact_fields=tuple(f.name for f in model._meta.fields if f.name.startswith("stripe_") or f.name in ("email","reference","name","contract_hint","reason","message","decision_note","confirm_token_hash")))

@@ -62,7 +62,7 @@ A request with a `context` key is a contextual checkout instead (next section); 
 | `checkout.session.completed` (team package) | Create the prepaid package and team token grant once. |
 | `checkout.session.completed` (token package) | Credit the purchased token amount once. |
 | `customer.subscription.created` / `.updated` | Upsert status and period; active, trialing, and past-due periods grant access and allowance. |
-| `customer.subscription.deleted` | Upsert cancellation/end time; access ends according to the period end. |
+| `customer.subscription.deleted` | Upsert status and end time (Stripe's `ended_at`, falling back to `canceled_at`). A cancellation scheduled for the period end keeps access until then; an immediate cancellation (portal "cancel now", withdrawal) ends access at once, because only active, trialing and past-due subscriptions grant access. |
 | `invoice.paid` | Retrieve and upsert the subscription; grant the new period allowance once per period. |
 | `invoice.payment_failed` | Mark the known subscription past due; access remains during its current period. |
 | `checkout.session.async_payment_succeeded` | Same effect as a paid `checkout.session.completed`. |
@@ -158,6 +158,53 @@ Execution locks the purchase and ends the associated subscription or team packag
 **Completing a withdrawal from Stripe's refund event (DCM-BILL-4).** The refund is created with the metadata `dcm_withdrawal` = `dcm-withdrawal:<app>:<purchase id>` (also its idempotency key), `app` and `purchase_id`. Ending the access, expiring the purchase's remaining tokens, marking the purchase `withdrawn` and registering the confirmation e-mail is ONE routine (`withdrawal.complete_withdrawal`) that locks the purchase row, re-reads the status under the lock and does nothing unless the purchase is still `active`. The POST path calls it right after `Refund.create`; the webhook and `billing_reconcile` call it for a refund event. So if the server crashes after Stripe accepted the refund but before the local commit, the refund event completes the withdrawal without any action by the person; whichever path runs second finds the purchase withdrawn (the POST then answers `already_withdrawn: true` with the stored result, one e-mail, one set of ledger rows). A refund counts as a withdrawal only if its `metadata.dcm_withdrawal` (or, for the refund events of refunds created by 3.5.0 to 3.6.0 before the metadata key existed, the idempotency key of the request that created it, carried by the event) is the key of an ACTIVE purchase of this app, its status is `succeeded`, its payment intent equals the purchase's, its currency equals the purchase's and its amount is an integer between 1 and the amount paid; manual refunds in the Stripe dashboard and disputes never match and keep being recorded as no-ops. Handled events: `refund.created`, `refund.updated` (the event object is the refund) and `charge.refunded` (only when an active purchase has the charge's payment intent: the charge's refunds are then listed from the API). The Stripe webhook endpoint of each app must subscribe at least `refund.created` and `refund.updated`. `billing_reconcile` additionally lists the refunds since `--since` and completes pending withdrawals, so a missed webhook is repaired. Such an older refund is therefore completed from its `refund.created`/`refund.updated` event (also through `billing_reconcile`'s event pass), but not from `charge.refunded` or the refund list, which carry no request key.
 
 Apps can reverse an action debit after a provider fault with `reverse_debit(owner, reference=action_id, reason=...)`. The service writes one non-expiring adjustment entry with reference `reversal:<action_id>` for exactly the debit amount; repeated calls return that entry. Unknown debits raise `ValueError("unknown_debit")` and an empty reason is rejected.
+
+## Contracts and continuation (DCM-BILL-8)
+
+An app opts in with a top-level `contract:` block in `billing.yaml`:
+
+```yaml
+contract:
+  terms_version: "2026-11-04"          # required; also sent as checkout metadata
+  seller: "<seller of record>"          # required; stored on each contract
+  withdrawal_refund: full               # full | prorated (default prorated)
+  public_declarations: true             # default false; false = public endpoints answer 404
+  transition_guard_days: 7              # default 7, 1..60
+```
+
+Without the block every existing endpoint answers as before (`me/` carries no `contract` key) and the new endpoints answer 404. A subscription plan with `interval: year` may name `continuation: <key>`, a plan of kind `continuation` (`interval: month`, `amount_cents`, `token_allowance`, `tax_code`). Continuation plans are synced to Stripe like monthly prices but are never purchasable and are not listed; the annual plan row in `me/` `plans` carries `continuation: {amount_cents, interval, token_allowance}`. Any purchasable plan may set `available: false`; checkout then refuses it with `unknown_plan` and it is not listed.
+
+Every purchase gets a `Contract` (reference, terms version, seller, withdrawal policy, consumer status, start, initial term end, continuation terms copied at creation, phase, status, schedule state, review flag) and every paid invoice a `ContractPayment` (tax-inclusive amount paid, payment intent, charge, invoice). The policy recorded on a contract never changes with later configuration. Migration `0004` backfills one legacy contract (`prorated`, no terms version) and one payment per existing purchase.
+
+**Annual-to-monthly transition.** After the first payment of an annual plan with a continuation, a Stripe subscription schedule is attached to the Checkout-created subscription (`from_subscription`, idempotency key `dcm-schedule:<app>:<subscription>`): phase 1 is the current annual period as Stripe returns it, phase 2 the continuation price with `proration_behavior: none`, `duration: {interval: month, interval_count: 1}` and metadata naming the continuation plan, `end_behavior: release`. After that month the schedule releases the subscription, which keeps renewing monthly. `phases[].iterations` is rejected by current Stripe API versions. The plan of a paid period is resolved from the invoice line's price (`StripePrice`), metadata only as a fallback, so the continuation allowance is granted and the annual allowance never twice. Verified in Stripe test mode with Managed Payments on 2026-11-04 (maana MAANA-APP-40 Part C). `billing_process_declarations` retries a missing schedule; when none exists `transition_guard_days` before the initial term ends, it sets the subscription to end at the period end and flags the contract for review (`transition_schedule_missing`) rather than letting the annual price renew.
+
+**Payment references.** Current Stripe API versions no longer put `payment_intent` on invoices; the payment intent is read from the invoice's `InvoicePayment` (`InvoicePayment.list(invoice=…)`), with the old field as a fallback.
+
+## Declarations: cancellation and withdrawal (DCM-BILL-8)
+
+A `Declaration` is stored with its `received_at` before anything else happens; that time never changes. Kinds `cancellation` and `withdrawal`, channels `public`, `account` and `operator`, statuses `received`, `awaiting_confirmation`, `needs_review`, `accepted`, `scheduled`, `effective`, `rejected`.
+
+| Endpoint | Auth | Effect |
+| --- | --- | --- |
+| `GET public/declarations/csrf/` | none | Sets the CSRF cookie, returns `{}`. |
+| `POST public/declarations/` | none, CSRF, 10/hour per client IP and 3/hour per submitted address | Stores the declaration and answers 201 `{reference, kind, received_at, submitted, status: "received"}` whether or not anything matched. An acknowledgement goes to the submitted address. If exactly one active contract of the app belongs to an account with that address and `DCM_BILLING_DECLARATION_CONFIRM_URL` (a frontend URL containing `{token}`) is set, the account address also gets a signed, single-use confirmation link valid 14 days; otherwise the declaration goes to review. A public declaration never changes a contract by itself. |
+| `POST public/declarations/confirm/` | none, CSRF | `{token}` applies the declaration as an owner action with its original receipt time; an invalid, expired or used token answers 400 `invalid_token`. |
+| `GET contracts/` | session | The user's own contracts: phase, status, dates, next charge, cancellation date, withdrawal eligibility and deadline, declarations, refunds. |
+| `POST contracts/<reference>/cancel/` | session, CSRF | `{cancellation_type, requested_end_date?, reason?}`; ordinary cancellation is applied at once, extraordinary goes to review. Another user's reference answers 404. |
+| `POST contracts/<reference>/withdraw/` | session, CSRF | `{confirm: true}`; runs the withdrawal below. |
+| `GET operator/declarations/` | operator guard | Queue of declarations needing review and overdue refunds; no Stripe ids. |
+
+**Cancellation.** The effective date is the current period end (the initial term end during the first year, the monthly period end afterwards) or, for a later requested date, the first period end on or after it. During the first year the schedule is cut to phase 1 with `end_behavior: cancel`, so the continuation never starts; afterwards the subscription gets `cancel_at_period_end`. A later date stays `scheduled` and is applied by `billing_process_declarations` once it is the current period end. Access stays until the effective date. Packages do not renew: their cancellation is recorded as effective at the package end.
+
+## Full-refund withdrawal policy (DCM-BILL-8)
+
+For contracts with `withdrawal_policy: full` the deadline is 14 days from the later of contract start and legal-information delivery (`info_delivered_at`, set when the checkout carried the terms version), and 12 months plus 14 days from the start when there is no delivery evidence. Renewal invoices open no new window. The EU/EEA billing country remains the consumer-law gate; a business tax id alone sets the consumer status to `unknown` and sends the declaration to review instead of refusing it. Ineligible or doubtful withdrawals are stored and reviewed, never discarded.
+
+A valid withdrawal, in separately committed steps: stop future charges (cancel the subscription, release or cancel the schedule), revoke the remaining grants attributable to the contract, then create one `Refund` per contract payment with a remaining refundable amount (amount paid minus what the charge already shows as refunded). Each row fixes its amount and its idempotency key `dcm-refund:<app>:<refund id>` before Stripe is called, so a retry after a timeout repeats the same request. Refund events find their row by `metadata.dcm_refund` or the request's idempotency key and are checked against app, currency, payment intent and amount. A refund is `succeeded` only on Stripe's word; `pending`, `requested`, `requires_action` and `failed` are shown as such. Every refund is due 14 days after the declaration's receipt; overdue ones are counted in `operator/overview/` (`refunds_overdue`, `declarations_needing_review`).
+
+The existing withdrawal endpoints keep their paths: for a full-policy purchase the list rows add `deadline` and `policy`, the preview returns `{policy, eligible, reason, deadline, amount_paid_cents, refunded_cents, refund_cents, currency}`, and the POST returns `{status, declaration_reference, refund_status, refund_cents, withdrawn_at}`. Prorated purchases answer exactly as before.
+
+Public-intake mails are sent off the request thread, so the response time does not reveal whether an address matched; acknowledgement (German and English) and confirmation mails are marked sent only after the mail backend accepted them, and `billing_process_declarations` retries failures without touching the receipt time. All batch helpers act on the configured app's records only. A refund Stripe definitively failed is retried as a new row with a new key; a timeout repeats the same row and key. Decisions on queued declarations: `manage.py billing_resolve_declaration <reference> --accept [--contract <reference>] [--effective YYYY-MM-DD] [--refund-cents N] | --reject --note "..."`. For an accepted extraordinary cancellation, `--effective` may lie before the period end (today or earlier ends the contract at once; a later date sets Stripe's `cancel_at` without proration) and `--refund-cents` refunds prepaid time, newest payment first.
 
 ## Operator data and the account view (DCM-BILL-5)
 

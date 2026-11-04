@@ -1,4 +1,4 @@
-import hashlib, hmac, re
+import hashlib, hmac, json, re
 import secrets
 from datetime import datetime, timezone as dt_timezone
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
@@ -9,23 +9,36 @@ from django.db.models import Sum, Count, F
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods
-from django.views.decorators.csrf import csrf_exempt, csrf_protect
+from django.views.decorators.csrf import csrf_exempt, csrf_protect, ensure_csrf_cookie
 from .config import load_billing_config
-from .models import TeamPackage, TeamSeat, AICostRecord, TokenEntry, Purchase, CheckoutAttempt
+from .models import TeamPackage, TeamSeat, AICostRecord, TokenEntry, Purchase, CheckoutAttempt, Contract, ContractPayment, Declaration, Refund
 from .services import access_state, token_balance, models_q_expiry
 from .models import BillingCustomer, StripeEvent
 from .stripe_service import checkout_session_params, get_customer, process_stripe_event
 from .withdrawal import eligibility, refund_amount, withdraw as execute_withdrawal
 
 def _plans():
+    config=load_billing_config()
+    by_key={p.key:p for p in config.plans}
     result=[]
-    for p in load_billing_config().plans:
+    for p in config.plans:
+        if p.kind == "continuation" or not p.available: continue
         row={"key":p.key,"kind":p.kind,"name":p.name,"amount_cents":p.amount_cents,"token_allowance":p.token_allowance}
         for k in ("interval","term_months","seats","tokens"):
             v=getattr(p,k)
             if v is not None: row[k]=v
+        follow=by_key.get(getattr(p,"continuation",None) or "")
+        if follow is not None:
+            row["continuation"]={"amount_cents":follow.amount_cents,"interval":follow.interval,"token_allowance":follow.token_allowance}
         result.append(row)
     return result
+
+def _plan_names():
+    """Names of every plan an account can hold, including plans no longer offered (`available: false`)."""
+    names={p["key"]:p["name"] for p in _plans()}
+    try: names.update({p.key:p.name for p in load_billing_config().plans if p.key not in names})
+    except FileNotFoundError: pass
+    return names
 
 def _grant_origin(entry):
     if entry.kind == "purchase": return "package"
@@ -38,7 +51,7 @@ def me(request):
     if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
     s=access_state(request.user)
     from .models import Subscription, TokenAccount
-    now=timezone.now(); plans={p["key"]:p["name"] for p in _plans()}
+    now=timezone.now(); plans=_plan_names()
     subs=list(Subscription.objects.filter(user=request.user).order_by("-current_period_end","-pk"))
     chosen=next((x for x in subs if x.current_period_end and x.status in ("active","trialing","past_due") and x.current_period_end>now),None)
     chosen=chosen or next((x for x in subs if not x.ended_at),None)
@@ -61,7 +74,10 @@ def me(request):
     if owned:
         holders=list(TeamSeat.objects.filter(package=owned,active=True).select_related("user").order_by("user__email","user_id"))
         team={"plan_key":owned.plan_key,"plan_name":plans.get(owned.plan_key,""),"ends_at":owned.ends_at.isoformat(),"seats_total":owned.seats,"seats_used":len(holders),"seat_holders":[{"user_id":x.user_id,"name":x.user.get_full_name() or "","email":x.user.email} for x in holders]}
+    from .contracts import contract_summary
+    chosen_contract=Contract.objects.filter(user=request.user,app=getattr(settings,"DCM_BILLING_APP",""),stripe_object_id=chosen.stripe_subscription_id).first() if chosen else None
     result={"access":{"status":s.status,"source":s.source,"ends_at":s.ends_at.isoformat() if s.ends_at else None},"tokens":{"balance":token_balance(request.user),"grants":grants,"pool":pool},"plans":_plans(),"subscription":subscription,"team":team}
+    if _contract_config_enabled(): result["contract"]=contract_summary(chosen_contract,now) if chosen_contract else None
     if held:
         owner=held.package.owner
         payer_name=owner.get_full_name().strip() or owner.email or owner.username  # never the database id
@@ -124,6 +140,7 @@ def checkout(request):
         if data is None: data=json.loads(request.body or b"{}")
         key=data.get("plan_key") if isinstance(data,dict) else None
         plan=next(p for p in load_billing_config().plans if p.key==key)
+        if plan.kind == "continuation" or not plan.available: raise StopIteration
         from .stripe_service import _latest_price, _stripe
         price=_latest_price(plan.key)
         customer=get_customer(request.user)
@@ -158,7 +175,7 @@ def _contextual_checkout(request,data):
     if not isinstance(idem,str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}",idem,flags=re.ASCII): return JsonResponse({"detail":"invalid_idempotency_key"},status=400)
     key=data.get("plan_key")
     plan=next((p for p in load_billing_config().plans if p.key==key),None)
-    if plan is None: return JsonResponse({"detail":"unknown_plan"},status=400)
+    if plan is None or plan.kind == "continuation" or not plan.available: return JsonResponse({"detail":"unknown_plan"},status=400)
     app=getattr(settings,"DCM_BILLING_APP","")
     attempt=CheckoutAttempt.objects.filter(user=request.user,app=app,idempotency_key=idem).first()
     if attempt is not None:
@@ -223,9 +240,15 @@ def withdrawal_list(request):
     if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
     now=timezone.now()
     rows=[]
+    contracts={c.purchase_id:c for c in Contract.objects.filter(user=request.user,app=getattr(settings,"DCM_BILLING_APP",""),purchase__isnull=False)}
     for p in Purchase.objects.filter(user=request.user).order_by("-purchased_at"):
         result=eligibility(p,now)
-        rows.append({"id":p.pk,"kind":p.kind,"plan_key":p.plan_key,"purchased_at":p.purchased_at.isoformat(),"amount_paid_cents":p.amount_paid_cents,"currency":p.currency,"eligible":result.eligible,"reason":result.reason,"withdrawn_at":p.withdrawn_at.isoformat() if p.withdrawn_at else None})
+        row={"id":p.pk,"kind":p.kind,"plan_key":p.plan_key,"purchased_at":p.purchased_at.isoformat(),"amount_paid_cents":p.amount_paid_cents,"currency":p.currency,"eligible":result.eligible,"reason":result.reason,"withdrawn_at":p.withdrawn_at.isoformat() if p.withdrawn_at else None}
+        contract=contracts.get(p.pk)
+        if contract and contract.withdrawal_policy=="full":
+            from .contracts import withdrawal_eligibility
+            full=withdrawal_eligibility(contract,now); row.update({"deadline":full.deadline.isoformat(),"policy":"full","eligible":full.eligible,"reason":full.reason})
+        rows.append(row)
     return JsonResponse({"purchases":rows})
 
 def _purchase_or_404(request, purchase_id):
@@ -236,7 +259,14 @@ def _purchase_or_404(request, purchase_id):
 @require_GET
 def withdrawal_preview(request,purchase_id):
     if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
-    p=_purchase_or_404(request,purchase_id); now=timezone.now(); eligible=eligibility(p,now); calc=refund_amount(p,now)
+    p=_purchase_or_404(request,purchase_id); now=timezone.now()
+    contract=Contract.objects.filter(purchase=p,app=getattr(settings,"DCM_BILLING_APP",""),withdrawal_policy="full").first()
+    if contract:
+        from .contracts import withdrawal_eligibility
+        result=withdrawal_eligibility(contract,now); payments=list(contract.payments.all())
+        amount=sum(int(x.amount_paid_cents) for x in payments); refunded=sum(int(x.refunded_cents) for x in payments)
+        return JsonResponse({"policy":"full","eligible":result.eligible,"reason":result.reason,"deadline":result.deadline.isoformat(),"amount_paid_cents":amount,"refunded_cents":refunded,"refund_cents":max(0,amount-refunded),"currency":(payments[0].currency if payments else p.currency)})
+    eligible=eligibility(p,now); calc=refund_amount(p,now)
     line=f"Paid {p.amount_paid_cents} {p.currency}; time share {calc.time_share_cents}; token share {calc.token_share_cents}; amount used {calc.used_cents}; refund {calc.refund_cents} {p.currency}."
     return JsonResponse({"eligible":eligible.eligible,"reason":eligible.reason,"amount_paid_cents":p.amount_paid_cents,"currency":p.currency,"time_share_cents":calc.time_share_cents,"token_share_cents":calc.token_share_cents,"used_cents":calc.used_cents,"refund_cents":calc.refund_cents,"calculation":line})
 
@@ -246,6 +276,25 @@ def withdrawal_execute(request,purchase_id):
     if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
     import json
     p=_purchase_or_404(request,purchase_id)
+    contract=Contract.objects.filter(purchase=p,app=getattr(settings,"DCM_BILLING_APP",""),withdrawal_policy="full").first()
+    if contract:
+        try: data=json.loads(request.body or b"{}")
+        except (ValueError,UnicodeDecodeError): return JsonResponse({"code":"invalid_json"},status=400)
+        if not isinstance(data,dict) or data.get("confirm") is not True: return JsonResponse({"code":"confirmation_required"},status=400)
+        from .declarations import create_owner_declaration
+        with transaction.atomic():
+            locked=Contract.objects.select_for_update().get(pk=contract.pk)
+            declaration=Declaration.objects.filter(contract=locked,kind="withdrawal",channel="account").order_by("-received_at","-pk").first()
+            if not declaration or declaration.status in ("needs_review","rejected"):
+                declaration=create_owner_declaration(locked,"withdrawal")
+        p.refresh_from_db()
+        refunds=list(Refund.objects.filter(declaration=declaration))
+        payment_total=sum(x.amount_paid_cents for x in contract.payments.all())
+        refunded_total=sum(x.refunded_cents for x in contract.payments.all())
+        refund_status=next((r.status for r in refunds if r.status not in ("succeeded","cancelled")),"succeeded" if refunded_total>=payment_total else "pending")
+        return JsonResponse({"status":declaration.status,"declaration_reference":declaration.reference,
+            "refund_status":refund_status,
+            "refund_cents":sum(r.amount_cents for r in refunds),"withdrawn_at":p.withdrawn_at.isoformat() if p.withdrawn_at else None})
     if p.status=="withdrawn":
         return JsonResponse({"already_withdrawn":True,"withdrawn_at":p.withdrawn_at.isoformat() if p.withdrawn_at else None,"refund_cents":p.refund_cents or 0,"currency":p.currency,"calculation":p.withdrawal_note})
     try: data=json.loads(request.body or b"{}")
@@ -258,6 +307,120 @@ def withdrawal_execute(request,purchase_id):
     return JsonResponse({"already_withdrawn":already,"refund_cents":p.refund_cents if already else calc.refund_cents,"currency":p.currency,"withdrawn_at":p.withdrawn_at.isoformat() if p.withdrawn_at else timezone.now().isoformat(),"calculation":p.withdrawal_note})
 
 from django.http import HttpResponse
+
+
+def _contract_config_enabled():
+    try: return bool(load_billing_config().contract)
+    except Exception: return False
+
+
+def _public_declarations_enabled():
+    try:
+        policy=load_billing_config().contract
+        return bool(policy and policy["public_declarations"])
+    except Exception: return False
+
+
+@ensure_csrf_cookie
+@require_GET
+def public_declarations_csrf(request):
+    if not _public_declarations_enabled(): return JsonResponse({"code":"not_found"},status=404)
+    return JsonResponse({})
+
+
+@csrf_protect
+@require_http_methods(["POST"])
+def public_declarations(request):
+    if not _public_declarations_enabled(): return JsonResponse({"code":"not_found"},status=404)
+    from .declarations import DeclarationInputError,check_public_throttles,create_public_declaration,validate_declaration
+    try: data=json.loads(request.body or b"{}")
+    except (ValueError,UnicodeDecodeError): data=None
+    email=data.get("email","") if isinstance(data,dict) and isinstance(data.get("email", ""),str) else ""
+    if not check_public_throttles(request,email): return JsonResponse({"code":"throttled"},status=429)
+    try: values=validate_declaration(data)
+    except DeclarationInputError as exc: return JsonResponse({"code":exc.code},status=400)
+    declaration=create_public_declaration(values)
+    submitted={k:(v.isoformat() if hasattr(v,"isoformat") else v) for k,v in values.items()}
+    response=JsonResponse({"reference":declaration.reference,"kind":declaration.kind,"received_at":declaration.received_at.isoformat(),"submitted":submitted,"status":"received"},status=201)
+    response["Cache-Control"]="no-store"
+    return response
+
+
+@csrf_protect
+@require_http_methods(["POST"])
+def public_declarations_confirm(request):
+    if not _public_declarations_enabled(): return JsonResponse({"code":"not_found"},status=404)
+    try: data=json.loads(request.body or b"{}")
+    except (ValueError,UnicodeDecodeError): data={}
+    from .declarations import confirm_public_declaration
+    declaration=confirm_public_declaration(data.get("token","") if isinstance(data,dict) else "")
+    if declaration is None: return JsonResponse({"code":"invalid_token"},status=400)
+    response=JsonResponse({"reference":declaration.reference,"status":declaration.status,"effective_at":declaration.effective_at.isoformat() if declaration.effective_at else None})
+    response["Cache-Control"]="no-store"
+    return response
+
+
+@csrf_protect
+@require_GET
+def contracts_list(request):
+    if not _contract_config_enabled(): return JsonResponse({"code":"not_found"},status=404)
+    if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
+    from .contracts import contract_summary
+    rows=Contract.objects.filter(user=request.user,app=getattr(settings,"DCM_BILLING_APP","" )).order_by("-started_at","-pk")
+    response=JsonResponse({"contracts":[contract_summary(c) for c in rows]}); response["Cache-Control"]="no-store"
+    return response
+
+
+def _own_contract(request,reference):
+    from django.shortcuts import get_object_or_404
+    return get_object_or_404(Contract.objects.select_related("purchase","user"),reference=reference,user=request.user,app=getattr(settings,"DCM_BILLING_APP",""))
+
+
+@csrf_protect
+@require_http_methods(["POST"])
+def contract_cancel(request,reference):
+    if not _contract_config_enabled(): return JsonResponse({"code":"not_found"},status=404)
+    if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
+    contract=_own_contract(request,reference)
+    try: data=json.loads(request.body or b"{}")
+    except (ValueError,UnicodeDecodeError): return JsonResponse({"code":"invalid_json"},status=400)
+    if not isinstance(data,dict): return JsonResponse({"code":"invalid_request"},status=400)
+    cancellation_type=data.get("cancellation_type","ordinary")
+    if cancellation_type not in ("ordinary","extraordinary"): return JsonResponse({"code":"invalid_cancellation_type"},status=400)
+    requested=data.get("requested_end_date")
+    if requested in (None,""): requested_date=None
+    elif isinstance(requested,str) and len(requested)<=10:
+        from django.utils.dateparse import parse_date
+        requested_date=parse_date(requested)
+        if requested_date is None: return JsonResponse({"code":"invalid_requested_end_date"},status=400)
+    else: return JsonResponse({"code":"invalid_requested_end_date"},status=400)
+    reason=data.get("reason",""); message=data.get("message","")
+    if not isinstance(reason,str) or len(reason)>2000 or (cancellation_type=="extraordinary" and not reason.strip()): return JsonResponse({"code":"invalid_reason"},status=400)
+    if not isinstance(message,str) or len(message)>2000: return JsonResponse({"code":"invalid_message"},status=400)
+    from .declarations import create_owner_declaration
+    declaration=create_owner_declaration(contract,"cancellation",cancellation_type=cancellation_type,requested_end_date=requested_date,reason=reason,message=message)
+    response=JsonResponse({"reference":declaration.reference,"status":declaration.status,"received_at":declaration.received_at.isoformat(),"effective_at":declaration.effective_at.isoformat() if declaration.effective_at else None},status=201)
+    response["Cache-Control"]="no-store"
+    return response
+
+
+@csrf_protect
+@require_http_methods(["POST"])
+def contract_withdraw(request,reference):
+    if not _contract_config_enabled(): return JsonResponse({"code":"not_found"},status=404)
+    if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
+    contract=_own_contract(request,reference)
+    try: data=json.loads(request.body or b"{}")
+    except (ValueError,UnicodeDecodeError): return JsonResponse({"code":"invalid_json"},status=400)
+    if not isinstance(data,dict) or data.get("confirm") is not True: return JsonResponse({"code":"confirmation_required"},status=400)
+    from .declarations import create_owner_declaration
+    declaration=create_owner_declaration(contract,"withdrawal")
+    refunds=list(Refund.objects.filter(declaration=declaration))
+    payment_total=sum(x.amount_paid_cents for x in contract.payments.all()); refunded_total=sum(x.refunded_cents for x in contract.payments.all())
+    refund_status=next((r.status for r in refunds if r.status not in ("succeeded","cancelled")),"succeeded" if refunded_total>=payment_total else "pending")
+    response=JsonResponse({"reference":declaration.reference,"status":declaration.status,"refund_status":refund_status,"refund_cents":sum(x.amount_cents for x in refunds)},status=201)
+    response["Cache-Control"]="no-store"
+    return response
 
 @csrf_exempt
 @require_http_methods(["POST"])

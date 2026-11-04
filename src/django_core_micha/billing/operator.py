@@ -15,7 +15,7 @@ from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET, require_http_methods
 
 from django_core_micha.auth.permissions import can_view_users_admin
-from .models import AICostRecord, FreeAccess, Purchase, Subscription, TeamPackage, TeamSeat, TokenEntry
+from .models import AICostRecord, FreeAccess, Purchase, Subscription, TeamPackage, TeamSeat, TokenEntry, Declaration, Refund
 from .services import access_state, models_q_expiry, token_balance
 
 
@@ -91,7 +91,35 @@ def overview(request):
     by_model=[{"provider":r["provider"],"model":r["model"],"calls":r["calls"],"usd_micros":r["cost"] or 0,"input_tokens":r["inp"] or 0,"output_tokens":r["out"] or 0,"cache_tokens":r["cache"] or 0} for r in ai.values("provider","model").annotate(calls=Count("id"),cost=Sum("cost_usd_micros"),inp=Sum("input_tokens"),out=Sum("output_tokens"),cache=Sum("cache_tokens")).order_by("-cost","provider","model")]
     used=-token_totals.get("debit",0); cost=ai_total["cost"] or 0
     per_token=(2*cost+used)//(2*used) if used else None
-    return _response({"app":app,"month":month,"accounts":{"active":active,"by_source":by_source},"subscriptions":{"new":subs_new,"ended":subscriptions_ended},"team":{"packages_active":team_data["packages_active"] or 0,"packages_sold":team_sold,"seats_total":team_data["seats_total"] or 0,"seats_used":seats_used},"token_packages":{"sold":token_packages["sold"] or 0,"tokens":token_packages["tokens"] or 0},"tokens":{"granted":token_totals.get("grant",0)+token_totals.get("purchase",0),"used":used,"expired":expired},"ai_cost":{"calls":ai_total["calls"] or 0,"usd_micros":cost,"by_model":by_model,"usd_micros_per_used_token":per_token}})
+    review_count=Declaration.objects.filter(app=app,status="needs_review").count()
+    overdue_count=Refund.objects.filter(contract__app=app,due_by__lt=now).exclude(status__in=("succeeded","cancelled")).count()
+    return _response({"app":app,"month":month,"accounts":{"active":active,"by_source":by_source},"subscriptions":{"new":subs_new,"ended":subscriptions_ended},"team":{"packages_active":team_data["packages_active"] or 0,"packages_sold":team_sold,"seats_total":team_data["seats_total"] or 0,"seats_used":seats_used},"token_packages":{"sold":token_packages["sold"] or 0,"tokens":token_packages["tokens"] or 0},"tokens":{"granted":token_totals.get("grant",0)+token_totals.get("purchase",0),"used":used,"expired":expired},"ai_cost":{"calls":ai_total["calls"] or 0,"usd_micros":cost,"by_model":by_model,"usd_micros_per_used_token":per_token},"declarations_needing_review":review_count,"refunds_overdue":overdue_count})
+
+
+@_operator("GET")
+def declarations(request):
+    try:
+        from .config import load_billing_config
+        if not load_billing_config().contract: return _response({"detail":"not_found"},404)
+    except Exception: return _response({"detail":"not_found"},404)
+    app=getattr(settings,"DCM_BILLING_APP","")
+    q=Declaration.objects.filter(app=app).select_related("contract")
+    status=request.GET.get("status","")
+    if status:
+        if status not in {x for x,_ in Declaration.STATUSES}: return _response({"detail":"invalid_status"},400)
+        q=q.filter(status=status)
+    if request.GET.get("overdue")=="1":
+        now=timezone.now()
+        overdue_ids=Refund.objects.filter(contract__app=app,due_by__lt=now).exclude(status__in=("succeeded","cancelled")).values_list("declaration_id",flat=True)
+        q=q.filter(pk__in=overdue_ids)
+    try:
+        page=int(request.GET.get("page","1")); size=int(request.GET.get("page_size","25"))
+        if page<1 or page>10000 or size<1 or size>100: raise ValueError
+    except (TypeError,ValueError): return _response({"detail":"invalid_page"},400)
+    count=q.count(); rows=q.order_by("received_at","pk")[(page-1)*size:page*size]
+    return _response({"count":count,"page":page,"page_size":size,"results":[{"reference":x.reference,"kind":x.kind,"status":x.status,
+        "received_at":x.received_at.isoformat(),"effective_at":x.effective_at.isoformat() if x.effective_at else None,
+        "contract_reference":x.contract.reference if x.contract_id else None,"review_reason":x.contract.review_reason if x.contract_id else x.decision_note} for x in rows]})
 
 
 def _state_data(state):

@@ -71,3 +71,122 @@ class CheckoutAttempt(models.Model):
     class Meta:
         constraints=[models.UniqueConstraint(fields=("user","app","idempotency_key"),name="dcm_bill_attempt_key_unique"),
                      models.UniqueConstraint(fields=("stripe_session_id",),condition=~Q(stripe_session_id=""),name="dcm_bill_attempt_session_unique")]
+
+
+def _reference():
+    import secrets
+    return secrets.token_urlsafe(9)
+
+
+class Contract(models.Model):
+    KINDS=[(x,x) for x in ("subscription","team_package","token_package")]
+    POLICIES=[(x,x) for x in ("full","prorated")]
+    CONSUMER_STATUSES=[(x,x) for x in ("consumer","business","unknown")]
+    PHASES=[(x,x) for x in ("initial","continuation","none")]
+    STATUSES=[(x,x) for x in ("active","cancellation_scheduled","ended","withdrawn")]
+    SCHEDULE_STATUSES=[(x,x) for x in ("not_needed","pending","created","failed","released","cancelled")]
+    user=models.ForeignKey(User,on_delete=models.CASCADE,related_name="billing_contracts")
+    app=models.CharField(max_length=80,db_index=True)
+    kind=models.CharField(max_length=24,choices=KINDS)
+    plan_key=models.CharField(max_length=40)
+    purchase=models.OneToOneField(Purchase,null=True,blank=True,on_delete=models.SET_NULL,related_name="contract")
+    stripe_object_id=models.CharField(max_length=255,db_index=True)
+    reference=models.CharField(max_length=32,unique=True,default=_reference)
+    terms_version=models.CharField(max_length=80,blank=True,default="")
+    seller=models.CharField(max_length=255,blank=True,default="")
+    withdrawal_policy=models.CharField(max_length=16,choices=POLICIES,default="prorated")
+    consumer_status=models.CharField(max_length=16,choices=CONSUMER_STATUSES,default="unknown")
+    billing_country=models.CharField(max_length=2,blank=True,default="")
+    started_at=models.DateTimeField(default=timezone.now)
+    info_delivered_at=models.DateTimeField(null=True,blank=True)
+    initial_term_end=models.DateTimeField(null=True,blank=True)
+    continuation_plan_key=models.CharField(max_length=40,blank=True,default="")
+    continuation_stripe_price_id=models.CharField(max_length=255,blank=True,default="")
+    continuation_amount_cents=models.PositiveBigIntegerField(null=True,blank=True)
+    continuation_token_allowance=models.PositiveBigIntegerField(null=True,blank=True)
+    continuation_interval=models.CharField(max_length=16,blank=True,default="")
+    transition_guard_days=models.PositiveSmallIntegerField(default=7)
+    phase=models.CharField(max_length=16,choices=PHASES,default="none")
+    status=models.CharField(max_length=32,choices=STATUSES,default="active")
+    cancel_effective_at=models.DateTimeField(null=True,blank=True)
+    stripe_schedule_id=models.CharField(max_length=255,blank=True,default="")
+    schedule_status=models.CharField(max_length=16,choices=SCHEDULE_STATUSES,default="not_needed")
+    needs_review=models.BooleanField(default=False)
+    review_reason=models.CharField(max_length=120,blank=True,default="")
+    created_at=models.DateTimeField(default=timezone.now)
+    updated_at=models.DateTimeField(auto_now=True)
+
+
+class ContractPayment(models.Model):
+    REASONS=[(x,x) for x in ("initial","renewal","continuation")]
+    contract=models.ForeignKey(Contract,on_delete=models.CASCADE,related_name="payments")
+    stripe_invoice_id=models.CharField(max_length=255,blank=True,default="")
+    stripe_payment_intent_id=models.CharField(max_length=255,blank=True,default="")
+    stripe_charge_id=models.CharField(max_length=255,blank=True,default="")
+    amount_paid_cents=models.PositiveBigIntegerField()
+    refunded_cents=models.PositiveBigIntegerField(default=0)
+    currency=models.CharField(max_length=8)
+    paid_at=models.DateTimeField(default=timezone.now)
+    billing_reason=models.CharField(max_length=16,choices=REASONS,default="initial")
+    class Meta:
+        constraints=[models.UniqueConstraint(fields=("stripe_invoice_id",),condition=~Q(stripe_invoice_id=""),name="dcm_bill_invoice_unique")]
+
+
+class Declaration(models.Model):
+    KINDS=[(x,x) for x in ("cancellation","withdrawal")]
+    CHANNELS=[(x,x) for x in ("public","account","operator")]
+    STATUSES=[(x,x) for x in ("received","awaiting_confirmation","needs_review","accepted","scheduled","effective","rejected")]
+    ACK=[(x,x) for x in ("pending","sent","failed")]
+    reference=models.CharField(max_length=32,unique=True,default=_reference)
+    app=models.CharField(max_length=80,db_index=True)
+    kind=models.CharField(max_length=16,choices=KINDS)
+    channel=models.CharField(max_length=16,choices=CHANNELS)
+    received_at=models.DateTimeField(default=timezone.now,editable=False)
+    name=models.CharField(max_length=200,blank=True,default="")
+    email=models.EmailField(max_length=254,blank=True,default="")
+    contract_hint=models.CharField(max_length=200,blank=True,default="")
+    cancellation_type=models.CharField(max_length=16,blank=True,default="")
+    requested_end_date=models.DateField(null=True,blank=True)
+    reason=models.CharField(max_length=2000,blank=True,default="")
+    message=models.CharField(max_length=2000,blank=True,default="")
+    user=models.ForeignKey(User,null=True,blank=True,on_delete=models.SET_NULL,related_name="billing_declarations")
+    contract=models.ForeignKey(Contract,null=True,blank=True,on_delete=models.SET_NULL,related_name="declarations")
+    status=models.CharField(max_length=32,choices=STATUSES,default="received")
+    effective_at=models.DateTimeField(null=True,blank=True)
+    decision_note=models.TextField(blank=True,default="")
+    actor_label=models.CharField(max_length=200,blank=True,default="")
+    decision_refund_cents=models.PositiveBigIntegerField(null=True,blank=True)
+    ack_email_status=models.CharField(max_length=12,choices=ACK,default="pending")
+    ack_attempts=models.PositiveIntegerField(default=0)
+    ack_sent_at=models.DateTimeField(null=True,blank=True)
+    confirm_email_status=models.CharField(max_length=12,choices=ACK,default="pending")
+    confirm_attempts=models.PositiveIntegerField(default=0)
+    confirm_sent_at=models.DateTimeField(null=True,blank=True)
+    confirm_token_hash=models.CharField(max_length=64,blank=True,default="")
+    confirm_expires_at=models.DateTimeField(null=True,blank=True)
+    confirmed_at=models.DateTimeField(null=True,blank=True)
+
+    def save(self,*args,**kwargs):
+        if self.pk:
+            original=type(self).objects.filter(pk=self.pk).values_list("received_at",flat=True).first()
+            if original is not None: self.received_at=original
+        super().save(*args,**kwargs)
+
+
+class Refund(models.Model):
+    STATUSES=[(x,x) for x in ("pending","requested","succeeded","failed","requires_action","cancelled")]
+    contract=models.ForeignKey(Contract,on_delete=models.CASCADE,related_name="refunds")
+    payment=models.ForeignKey(ContractPayment,on_delete=models.CASCADE,related_name="refunds")
+    declaration=models.ForeignKey(Declaration,null=True,blank=True,on_delete=models.SET_NULL,related_name="refunds")
+    amount_cents=models.PositiveBigIntegerField()
+    currency=models.CharField(max_length=8)
+    status=models.CharField(max_length=20,choices=STATUSES,default="pending")
+    stripe_refund_id=models.CharField(max_length=255,blank=True,default="")
+    idempotency_key=models.CharField(max_length=180,unique=True)
+    due_by=models.DateTimeField()
+    attempts=models.PositiveIntegerField(default=0)
+    last_error_code=models.CharField(max_length=120,blank=True,default="")
+    created_at=models.DateTimeField(default=timezone.now)
+    updated_at=models.DateTimeField(auto_now=True)
+    class Meta:
+        constraints=[models.UniqueConstraint(fields=("payment",),condition=Q(status__in=("pending","requested","requires_action")),name="dcm_bill_refund_open_payment")]

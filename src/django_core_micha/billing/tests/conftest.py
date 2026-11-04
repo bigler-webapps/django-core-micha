@@ -18,3 +18,10 @@ def _factory_requests_skip_csrf(monkeypatch):
         return built
 
     monkeypatch.setattr(RequestFactory, "request", request)
+
+
+@pytest.fixture(autouse=True)
+def _declaration_mail_in_request_thread(monkeypatch):
+    """Production sends public-intake mail on a background thread; tests send it inline so outbox assertions are deterministic."""
+    from django_core_micha.billing import declarations
+    monkeypatch.setattr(declarations, "_in_background", lambda function, *args: function(*args))
