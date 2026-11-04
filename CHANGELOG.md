@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.20.1] — 2026-11-04
+
+### Fixed
+
+DCM-BILL-7: the shared checkout no longer sends `automatic_tax` by default. Stripe lists `automatic_tax` among the Checkout Session
+parameters that are not available with Managed Payments (which computes, collects and remits the tax itself), and the checkout always
+sends `managed_payments[enabled]=true`, so the combination may have been rejected by Stripe. `checkout_session_params` now omits the
+key; the new setting `DCM_BILLING_AUTOMATIC_TAX` (default `False`) adds `automatic_tax: {"enabled": true}` back for a deployment
+without Managed Payments. Managed Payments itself stays always on in this contract. Every other parameter is unchanged.
+
+**Adoption:** a pin bump; no configuration change is needed. An app that relied on automatic tax being requested gets none now, which is
+correct with Managed Payments.
+
 ## [3.20.0] — 2026-11-03
 
 ### Changed (behaviour change for consumers)

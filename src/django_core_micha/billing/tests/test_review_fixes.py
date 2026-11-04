@@ -94,6 +94,7 @@ def test_checkout_endpoint_sends_managed_payments_and_the_app_metadata_to_stripe
         response = checkout(request)
     assert response.status_code == 200 and json.loads(response.content)["url"] == "https://stripe.test/c"
     assert sent["managed_payments"] == {"enabled": True} and sent["metadata"]["app"] == "maana" and sent["customer"] == "cus_1"
+    assert "automatic_tax" not in sent
     assert sent["subscription_data"]["metadata"]["app"] == "maana"
 
 

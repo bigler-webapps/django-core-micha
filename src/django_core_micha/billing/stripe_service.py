@@ -121,8 +121,10 @@ def checkout_session_params(*, plan, price, user, customer_id, success_url=None,
         "success_url": success_url if success_url is not None else getattr(settings, "DCM_BILLING_SUCCESS_URL", ""),
         "cancel_url": cancel_url if cancel_url is not None else getattr(settings, "DCM_BILLING_CANCEL_URL", ""),
         "metadata": {"app": getattr(settings, "DCM_BILLING_APP", ""), "plan_key": plan.key, "user_id": str(user.pk)},
-        "billing_address_collection": "required", "automatic_tax": {"enabled": True},
+        "billing_address_collection": "required",
         "managed_payments": {"enabled": True}}
+    if getattr(settings, "DCM_BILLING_AUTOMATIC_TAX", False) is True:  # a real boolean only: the string "False" must not switch it on
+        params["automatic_tax"] = {"enabled": True}
     for key in ("seats", "term_months", "token_allowance", "tokens"):
         value = getattr(plan, key, None)
         if value:

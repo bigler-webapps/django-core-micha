@@ -101,11 +101,31 @@ def test_checkout_session_parameters_match_stripe_16_checkout_fields(tmp_path):
     assert params["mode"] == "subscription"
     assert params["metadata"] == {"app": "maana", "plan_key": "monthly", "user_id": str(user.pk), "token_allowance": "100"}
     assert params["subscription_data"]["metadata"] == {"app": "maana", "plan_key": "monthly", "user_id": str(user.pk)}
-    assert params["automatic_tax"] == {"enabled": True}
+    assert "automatic_tax" not in params
+    assert params["billing_address_collection"] == "required"
     assert params["managed_payments"] == {"enabled": True}
     assert "tax_id_collection" not in params
     from stripe.params.checkout._session_create_params import SessionCreateParams
     assert set(params) <= set(SessionCreateParams.__annotations__)
+
+
+def test_checkout_session_parameters_include_automatic_tax_when_enabled(tmp_path):
+    from django_core_micha.billing.config import load_billing_config
+    path = _config(tmp_path)
+    user = _user()
+    price = StripePrice(app="maana", plan_key="monthly", version=1, lookup_key="maana:monthly:v1",
+        fingerprint="x", stripe_product_id="prod_1", stripe_price_id="price_1")
+    with override_settings(DCM_BILLING_APP="maana", DCM_BILLING_FILE=path,
+            DCM_BILLING_SUCCESS_URL="https://app.example/success", DCM_BILLING_CANCEL_URL="https://app.example/cancel",
+            DCM_BILLING_AUTOMATIC_TAX=True):
+        plan = load_billing_config().plans[0]
+        params = stripe_service.checkout_session_params(plan=plan, price=price, user=user, customer_id="cus_1")
+    assert params["automatic_tax"] == {"enabled": True}
+    from stripe.params.checkout._session_create_params import SessionCreateParams
+    assert set(params) <= set(SessionCreateParams.__annotations__)
+    with override_settings(DCM_BILLING_APP="maana", DCM_BILLING_FILE=path, DCM_BILLING_AUTOMATIC_TAX="False"):
+        plan = load_billing_config().plans[0]
+        assert "automatic_tax" not in stripe_service.checkout_session_params(plan=plan, price=price, user=user, customer_id="cus_1")
 
 
 def test_one_time_checkout_sets_payment_intent_metadata(tmp_path):
