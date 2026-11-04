@@ -81,5 +81,34 @@ These are design inputs, not a complete legal opinion or evidence of any individ
 
 ## Publication record
 
-Pending final repository commits and pushes. No feature is implemented by these specification files.
+All 24 work orders are committed locally. Nineteen app work orders are published on `origin/develop` as of 2026-11-04; the table below records the specification commits. No privacy feature is implemented by these specification files.
+
+| Repository | Specification commit | Publication |
+|---|---|---|
+| django-core-micha | `32e3cc4` | Pending: preceding DCM-BILL-8 specification from another session; publication approval requested. |
+| ui-core-micha | `032b1e7`; prototype `ced7a28` | Pending: preceding UCM-BILL-11 implementation is still registered in progress; its owner must clear publication. |
+| hram | `1e6ecc32` | Published |
+| Gustav | `03b6b79` | Published |
+| Photogallery | `d7d8c84` | Published |
+| Cinevia | `dc9b625` | Published |
+| maana | `4aa05b5` | Pending: preceding billing specifications and secrets.yaml declaration from another session; publication approval requested. |
+| Kira | `6e26507` | Published |
+| webshop-guenter | `08eee06` | Published |
+| reimbursements | `3f4d3f2` | Published |
+| jg-ferien | `b511e76` | Published |
+| hpc-bridge | `73916ea` | Published |
+| fitness-monitor | `d277f2b` | Published |
+| survey_contact_app | `64d5d95` | Published |
+| kerzenziehen | `2050f60` | Published |
+| bigler-consult | `f9150a0` | Published |
+| spesix | `fad8edd` | Published |
+| survey_app | `1c1ea4c` | Published by the concurrent owner session; verified reachable from origin/develop. |
+| cockpit | `9ed6fc6` | Published |
+| innoservice | `1c6c16c` | Published |
+| yopoulab-hhs-2026 | `c25ad53` | Published |
+| musiknoten | `66e7e2a` | Published |
+
+The operator authorised the Gustav, Spesix and Innoservice Git repairs. Gustav's obstructing local file was byte-identical to upstream. The Spesix reconciliation tree equalled the reviewed remote tree before adding the privacy specification. Innoservice's two foreign register additions remain uncommitted and unchanged. The excluded standalone DHIS2 repository received no commit or push.
+
+Verification: 24 complete requirements Envelopes, unique register entries, no conflict markers and clean diff whitespace checks. The common prototype was rendered and visually inspected at both specified widths. These are specification checks, not application tests. Gate #1 remains pending; no implementer is dispatched by this publication.
 
