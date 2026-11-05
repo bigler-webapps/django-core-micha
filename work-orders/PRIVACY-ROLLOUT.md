@@ -112,3 +112,43 @@ The operator authorised the Gustav, Spesix and Innoservice Git repairs. Gustav's
 
 Verification: 24 complete requirements Envelopes, unique register entries, no conflict markers and clean diff whitespace checks. The common prototype was rendered and visually inspected at both specified widths, then accepted by the operator after an interactive chat preview on 2026-11-06. These are specification checks, not application tests. Gate #1 is approved; Part B must still be completed by the Orchestrator before dispatch. No implementer is dispatched by this publication.
 
+## Gate #1 records and implementation handoff
+
+The approval recorded above is binding for all 24 work orders, including the two final cleanup orders subject to their migration prerequisites. The existing per-repository register rows remain `planned` until implementation starts; this does not revoke Gate #1.
+
+| Repository | Approved work orders | Approval commit | Publication |
+|---|---|---|---|
+| django-core-micha | DCM-PRIV-1, DCM-PRIV-2 | `835f4932` | Published |
+| ui-core-micha | UCM-PRIV-1, UCM-PRIV-2 | `a4a5178a` | Published |
+| hram | HRAM-PRIV-1 | `342c25e5` | Committed locally; publication pending permission to include preceding documentation commits. |
+| Gustav | GUS-PRIV-1 | `0a1b6852` | Published |
+| Photogallery | PG-PRIV-1 | `194e451d` | Published |
+| Cinevia | CIN-PRIV-1 | `2058f337` | Published |
+| maana | MAANA-PRIV-1 | `7dd2f707` | Published |
+| Kira | KIRA-PRIV-1 | `89fbb2cf` | Published |
+| webshop-guenter | WSG-PRIV-1 | `45866b18` | Published |
+| reimbursements | RMB-PRIV-1 | `db611676` | Published |
+| jg-ferien | JG-PRIV-1 | `393d8efb` | Published |
+| hpc-bridge | HPC-PRIV-1 | `6aef1eb7` | Published |
+| fitness-monitor | FM-PRIV-1 | `0a52018c` | Published |
+| survey_contact_app | SCA-PRIV-1 | `86271946` | Published |
+| kerzenziehen | KZ-PRIV-1 | `a05919f9` | Published |
+| bigler-consult | BCO-PRIV-1 | `25d21311` | Published |
+| spesix | SPX-PRIV-1 | `f856d47c` | Published |
+| survey_app | SVA-PRIV-1 | `403d310a` | Published |
+| cockpit | CKP-PRIV-1 | `2c0c02d6` | Published |
+| innoservice | INNO-PRIV-1 | `b76fd0e1` | Published |
+| yopoulab-hhs-2026 | YOP-PRIV-1 | `0a4995a8` | Published |
+| musiknoten | MUS-PRIV-1 | `21fe4546` | Published |
+
+Start the Orchestrator in `C:/Users/Micha Bigler/Documents/webapps`. Pull the target repositories, read the relevant work-order files and follow `orchestrate-codex`. Read current model routing and repository instructions. Complete Part B with the current context package, progress contract and mandatory preamble before any implementer dispatch. Do not treat an Envelope placeholder as a complete coder specification.
+
+Execution order:
+1. Implement and release DCM-PRIV-1 in django-core-micha on main.
+2. Implement and release UCM-PRIV-1 in ui-core-micha on main against that released contract. Shared visual reference: ui-core-micha@ced7a28; the operator approved the prototype and explanatory copy on 2026-11-06.
+3. Adopt the released shared contracts through each of the 20 listed app work orders on develop. Each app remains independently reviewable; different app repositories may proceed independently after their stated prerequisites. YOP-PRIV-1 keeps its upstream-authoring prerequisite and does not gain an artificial Django/React dependency.
+4. Only after all applicable consumer migrations and compatibility checks, implement UCM-PRIV-2, then DCM-PRIV-2, including the consumer pin/migration follow-through specified in their Envelopes.
+
+Use the scoped tests, independent reviews and applicable prototype comparison required by each Envelope and the current governance. Verify actual requests/storage before optional-service activation. Preserve necessary functional data and the separate study/AI/terms permissions. The standalone bottleneck-analysis-app remains excluded. The deferred EU representative issue and separate billing work are not expanded by this rollout. Production promotion and provider-console/operational changes retain their separate gates.
+
+For HRAM, publish the local approval record only after the preceding foreign documentation commits are cleared for publication; do not rewrite shared history or publish them silently. This sequencing issue does not revoke the operator's recorded approval.
