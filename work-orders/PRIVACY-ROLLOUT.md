@@ -120,7 +120,7 @@ The approval recorded above is binding for all 24 work orders, including the two
 |---|---|---|---|
 | django-core-micha | DCM-PRIV-1, DCM-PRIV-2 | `835f4932` | Published |
 | ui-core-micha | UCM-PRIV-1, UCM-PRIV-2 | `a4a5178a` | Published |
-| hram | HRAM-PRIV-1 | `342c25e5` | Committed locally; publication pending permission to include preceding documentation commits. |
+| hram | HRAM-PRIV-1 | `342c25e5` | Published; the operator explicitly authorised inclusion of the preceding HRAM-DOC-40 documentation commits. |
 | Gustav | GUS-PRIV-1 | `0a1b6852` | Published |
 | Photogallery | PG-PRIV-1 | `194e451d` | Published |
 | Cinevia | CIN-PRIV-1 | `2058f337` | Published |
@@ -151,4 +151,4 @@ Execution order:
 
 Use the scoped tests, independent reviews and applicable prototype comparison required by each Envelope and the current governance. Verify actual requests/storage before optional-service activation. Preserve necessary functional data and the separate study/AI/terms permissions. The standalone bottleneck-analysis-app remains excluded. The deferred EU representative issue and separate billing work are not expanded by this rollout. Production promotion and provider-console/operational changes retain their separate gates.
 
-For HRAM, publish the local approval record only after the preceding foreign documentation commits are cleared for publication; do not rewrite shared history or publish them silently. This sequencing issue does not revoke the operator's recorded approval.
+All 24 dated Gate #1 records are published. The HRAM publication sequencing issue was resolved by the operator's explicit permission on 2026-11-06; no shared history was rewritten.
