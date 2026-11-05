@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.21.1] — 2026-11-05
+
+### Fixed
+
+DCM-BILL-9 (the DCM-BILL-8 closing-review follow-ups). No behaviour change for apps without a `contract:` block, except the
+Stripe webhook fixes below. No migration, no new setting.
+
+- The `refund.failed` webhook stored `refund.failed` as the error code while the fresh-key retry looks for `refund_failed`, so a
+  provider-failed refund was never retried with a fresh row and key. The webhook now writes `refund_failed`; rows written by 3.21.0
+  with the old code are retried the same way. A replayed failed event no longer revives a row that was already replaced.
+- When `billing_process_declarations` ended a scheduled cancellation before Stripe's `customer.subscription.deleted` webhook, the local
+  subscription stayed active. It now ends with the cancellation (`status=canceled`, `ended_at` = the period end); the late webhook
+  is idempotent. That webhook also crashed with a `NameError` (missing `Declaration` import) for a contract in
+  `cancellation_scheduled`; fixed.
+- Refunds made directly in Stripe (no `dcm_refund` metadata) are reconciled into `ContractPayment.refunded_cents` from the
+  `charge.refunded` event (`amount_refunded`, minus what our own open refund rows still carry, never lowering the value), so the
+  withdrawal preview and the next refund amount follow.
+- Resuming a withdrawal (`resume_withdrawals`, and the operator-accepted termination refund) retries a failed refund row with a fresh
+  key instead of replaying it.
+- The public declaration intake does the same work before the response for every submission: the contract match, the owner link, the
+  confirmation token and its mail now run after the response in `finish_public_declaration`. A declaration still `received` after five
+  minutes (thread lost to a restart) is finished by `billing_process_declarations`.
+
 ## [3.21.0] — 2026-11-04
 
 ### Added

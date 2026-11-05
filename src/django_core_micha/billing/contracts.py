@@ -18,6 +18,10 @@ from .withdrawal import EU_EEA_COUNTRIES
 
 log=logging.getLogger(__name__)
 
+# A refund Stripe definitively failed carries `refund_failed`. Rows written by 3.21.0's refund.failed webhook carry the
+# event name instead; both are retried with a fresh row and key, so no existing row is orphaned.
+REFUND_FAILED_CODES=("refund_failed","refund.failed")
+
 
 def _app():
     return getattr(settings,"DCM_BILLING_APP","")
@@ -404,7 +408,7 @@ def _perform_withdrawal(declaration_id):
         row=_refund_row(declaration,payment,refunded,override)
         if remaining_override is not None and row:
             remaining_override=max(0,remaining_override-row.amount_cents)
-        if row: process_refund(row.pk)
+        if row: retry_refund(row.pk)  # a failed row gets a fresh key; replaying it would return Stripe's failed result again
     payments=list(contract.payments.all())
     if declaration.decision_refund_cents is not None:
         complete=all(not payment.refunds.exclude(status__in=("succeeded","cancelled")).exists() for payment in payments)
@@ -429,6 +433,9 @@ def apply_due_cancellations(now=None):
         if sub.status=="canceled" or (sub.current_period_end and sub.current_period_end<=now):
             declaration.status="effective"; declaration.effective_at=declaration.effective_at or sub.ended_at or sub.current_period_end or now
             declaration.save(update_fields=("status","effective_at"))
+            if sub.status!="canceled":
+                # The period ended before Stripe's deletion webhook: end the local subscription now. The webhook is idempotent.
+                Subscription.objects.filter(pk=sub.pk).update(status="canceled",ended_at=sub.ended_at or sub.current_period_end,cancel_at_period_end=False)
             contract.status="ended"; contract.save(update_fields=("status","updated_at")); count+=1
             continue
         if declaration.cancellation_type!="extraordinary" and sub.current_period_end >= declaration.effective_at and sub.current_period_end > now and not (sub.cancel_at_period_end and contract.cancel_effective_at==sub.current_period_end):
@@ -486,10 +493,10 @@ def resume_withdrawals():
 def retry_refund(refund_id):
     """Retry one open refund. A request Stripe definitively failed gets a fresh row and key instead of replaying the failed one."""
     row=Refund.objects.select_related("payment","declaration").get(pk=refund_id)
-    if row.status=="failed" and row.last_error_code=="refund_failed" and row.declaration_id:
+    if row.status=="failed" and row.last_error_code in REFUND_FAILED_CODES and row.declaration_id:
         with transaction.atomic():
             locked=Refund.objects.select_for_update().get(pk=row.pk)
-            if locked.status!="failed" or locked.last_error_code!="refund_failed": return locked
+            if locked.status!="failed" or locked.last_error_code not in REFUND_FAILED_CODES: return locked
             locked.status="cancelled"; locked.save(update_fields=("status","updated_at"))
         fresh=_refund_row(row.declaration,row.payment,int(row.payment.refunded_cents or 0),row.amount_cents)
         return process_refund(fresh.pk) if fresh else row
@@ -511,7 +518,7 @@ def _allocate_refund(declaration_id,total):
         row=_refund_row(declaration,payment,refunded,remaining)
         if row:
             remaining-=row.amount_cents
-            process_refund(row.pk)
+            retry_refund(row.pk)
 
 
 def apply_extraordinary_termination(declaration, effective_date=None, refund_cents=None):

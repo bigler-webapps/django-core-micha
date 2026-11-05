@@ -11,11 +11,12 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
 from .config import load_billing_config
 from .models import (BillingCustomer, StripePrice, Subscription, TeamPackage, Purchase, TokenEntry, CheckoutAttempt,
-                     Contract, ContractPayment, Refund)
+                     Contract, ContractPayment, Declaration, Refund)
 from .services import credit_purchase, grant_tokens
 
 log = logging.getLogger(__name__)
@@ -423,17 +424,36 @@ def complete_contract_refund(refund, idempotency_key=None, event_kind="refund.up
     if not isinstance(amount,int) or isinstance(amount,bool) or amount<=0 or amount>row.amount_cents: return False
     currency=data.get("currency")
     if not currency or str(currency).lower()!=row.currency.lower(): return False
-    if row.status=="succeeded": return True
+    if row.status in ("succeeded","cancelled"): return True  # cancelled = replaced by a fresh row; a replayed event must not revive it
     provider_status=data.get("status") or ("failed" if event_kind=="refund.failed" else "pending")
     next_status={"succeeded":"succeeded","pending":"requested","failed":"failed","requires_action":"requires_action"}.get(provider_status,"requested")
     if row.status in ("failed","cancelled") and next_status in ("requested","requires_action"): return True
     if next_status=="succeeded":
-        row.payment.refunded_cents=int(row.payment.refunded_cents or 0)+amount
-        row.payment.save(update_fields=("refunded_cents",))
+        # atomic in the database: a concurrent reconciliation of a provider refund must not be overwritten by a stale instance
+        ContractPayment.objects.filter(pk=row.payment_id).update(refunded_cents=F("refunded_cents")+amount)
     row.status=next_status; row.stripe_refund_id=data.get("id") or row.stripe_refund_id
-    row.last_error_code="" if next_status!="failed" else event_kind
+    row.last_error_code="" if next_status!="failed" else "refund_failed"  # the code retry_refund looks for (not the event name)
     row.save(update_fields=("status","stripe_refund_id","last_error_code","updated_at"))
     return True
+
+
+def reconcile_provider_refunds(charge, payment_intent):
+    """Reflect refunds made in Stripe itself (no `dcm_refund` metadata) in `ContractPayment.refunded_cents`.
+
+    `amount_refunded` of the charge is the provider's total; our own open refund rows that Stripe already accepted (they
+    carry its refund id) are subtracted, so a refund of ours that is counted at Stripe but not yet `succeeded` here is not
+    counted twice when its own event arrives. A row Stripe has not accepted yet is not in the total and is not subtracted. The value only ever grows (`max`), so a replayed or reordered event changes nothing."""
+    if not payment_intent: return
+    amount=charge.get("amount_refunded")
+    if not isinstance(amount,int) or isinstance(amount,bool) or amount<=0: return
+    app=getattr(settings,"DCM_BILLING_APP","")
+    with transaction.atomic():
+        for payment in ContractPayment.objects.select_for_update().filter(contract__app=app,stripe_payment_intent_id=payment_intent):
+            # only rows Stripe already knows (they carry its refund id) are inside `amount_refunded`
+            open_ours=sum(int(r.amount_cents) for r in payment.refunds.exclude(status__in=("succeeded","cancelled","failed")).exclude(stripe_refund_id=""))
+            foreign=min(int(payment.amount_paid_cents),amount-open_ours)
+            if foreign>int(payment.refunded_cents or 0):
+                payment.refunded_cents=foreign; payment.save(update_fields=("refunded_cents",))
 
 
 def process_stripe_event(event):
@@ -459,6 +479,7 @@ def process_stripe_event(event):
             for refund in getattr(refunds, "data", refunds if isinstance(refunds, list) else []):
                 complete_contract_refund(refund)
                 complete_withdrawal_from_refund(refund)
+        reconcile_provider_refunds(obj, payment_intent)
         return "processed"
     metadata = _event_app_and_metadata(kind, obj)
     if metadata.get("app") != getattr(settings, "DCM_BILLING_APP", ""):

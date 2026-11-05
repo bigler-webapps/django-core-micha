@@ -89,23 +89,39 @@ def _confirmation_token(declaration):
 
 
 def create_public_declaration(values):
+    """Store a public declaration and answer. Everything that depends on whether the address belongs to a contract
+    (the match, the owner link, the confirmation token and mail) runs after the response in `finish_public_declaration`,
+    so a matching and a non-matching submission do the same work before the response."""
     app=getattr(settings,"DCM_BILLING_APP","")
-    token=""
     with transaction.atomic():
         declaration=Declaration.objects.create(app=app,kind=values["kind"],channel="public",name=values["name"],email=values["email"],
             contract_hint=values["contract_hint"],cancellation_type=values["cancellation_type"],requested_end_date=values["requested_end_date"],
             reason=values["reason"],message=values["message"],status="received")
-        matches=list(Contract.objects.filter(app=app,user__email__iexact=values["email"],status__in=("active","cancellation_scheduled")).select_related("user")[:2])
+        transaction.on_commit(lambda pk=declaration.pk: _in_background(finish_public_declaration,pk))
+    return declaration
+
+
+def finish_public_declaration(declaration_id):
+    """Match a stored public declaration to a contract, then send the owner confirmation and the acknowledgement.
+
+    Only a declaration still `received` is processed, under a row lock, so the background thread and
+    `billing_process_declarations` cannot both finish it."""
+    app=getattr(settings,"DCM_BILLING_APP","")
+    token=""
+    with transaction.atomic():
+        declaration=Declaration.objects.select_for_update().filter(pk=declaration_id,app=app,channel="public",status="received").first()
+        if declaration is None: return False
+        matches=list(Contract.objects.filter(app=app,user__email__iexact=declaration.email,status__in=("active","cancellation_scheduled")).select_related("user")[:2])
         confirm_url=getattr(settings,"DCM_BILLING_DECLARATION_CONFIRM_URL","")
         if len(matches)==1 and confirm_url and "{token}" in confirm_url:
             contract=matches[0]; declaration.contract=contract; declaration.user=contract.user
             declaration.status="awaiting_confirmation"; token=_confirmation_token(declaration)
             declaration.save(update_fields=("contract","user","status","confirm_token_hash","confirm_expires_at"))
-            transaction.on_commit(lambda pk=declaration.pk,t=token: _in_background(send_confirmation_email,pk,t))
         else:
             declaration.status="needs_review"; declaration.save(update_fields=("status",))
-        transaction.on_commit(lambda pk=declaration.pk: _in_background(send_acknowledgement,pk))
-    return declaration
+    if token: send_confirmation_email(declaration.pk,token)
+    send_acknowledgement(declaration.pk)
+    return True
 
 
 def _in_background(function,*args):
@@ -171,6 +187,9 @@ def send_confirmation_email(declaration_id,token):
 
 def retry_declaration_emails():
     app=getattr(settings,"DCM_BILLING_APP","")
+    # A background thread that never ran (restart between commit and thread start) leaves the declaration `received`.
+    for row in Declaration.objects.filter(app=app,channel="public",status="received",received_at__lt=timezone.now()-timedelta(minutes=5)):
+        finish_public_declaration(row.pk)
     pending=Declaration.objects.filter(app=app,ack_email_status__in=("pending","failed"))
     for row in pending: send_acknowledgement(row.pk)
     for row in Declaration.objects.filter(app=app,confirm_email_status__in=("pending","failed"),status="awaiting_confirmation",confirm_expires_at__gt=timezone.now()):

@@ -43,7 +43,16 @@ resolver with a future date, transition guard scoped to the app.
 
 ## Part B — Implementation map (implementer)
 
-To be filled by the Orchestrator.
+Implemented by the Orchestrator as author (operator decision of 2026-11-02, no Luna dispatch); no implementer preamble applies. Mapped 2026-11-05.
+
+Seams (all in `src/django_core_micha/billing/`):
+- Decision 1: `stripe_service.complete_contract_refund` stored `event_kind` as `last_error_code`; `contracts.retry_refund` matches `refund_failed`. The webhook now writes `refund_failed`; `contracts.REFUND_FAILED_CODES` also accepts the legacy `refund.failed` so rows from 3.21.0 are retried. A `cancelled` row ignores later events (a replayed failed event revived the replaced row).
+- Decision 2: `contracts.apply_due_cancellations`, branch `period_end <= now` with a local subscription still `active`: set `status=canceled`, `ended_at`, `cancel_at_period_end=False`. `stripe_service._upsert_subscription` used `Declaration` without importing it (NameError on the deletion webhook of a scheduled cancellation).
+- Decision 3: new `stripe_service.reconcile_provider_refunds`, called at the end of the `charge.refunded` branch of `process_stripe_event` after our own refund rows were completed. Provider total (`amount_refunded`) minus our open rows, capped at the payment, only ever raising `refunded_cents`.
+- Decision 4: `contracts._perform_withdrawal` and `_allocate_refund` call `retry_refund` (failed row to fresh row and key) instead of `process_refund`.
+- Decision 5: `declarations.create_public_declaration` stores the row and defers `finish_public_declaration` (match, link, token, confirmation mail, acknowledgement) via `_in_background` on commit; `retry_declaration_emails` finishes a declaration still `received` after five minutes.
+- Release: `pyproject.toml` 3.21.1, `CHANGELOG.md`. No migration.
+- Tests: new `billing/tests/test_bill9_followups.py` (self-contained fixtures; the suite runs with the `billing` extra, a venv with `.[test,billing,scripts]`). Do-not-touch: models, migrations, the contract policy, the confirmation-link format.
 
 ## Part C — Orchestrator only
 
