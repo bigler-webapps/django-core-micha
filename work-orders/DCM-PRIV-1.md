@@ -19,7 +19,7 @@ Tier 3. Target: django-core-micha, main. Deliver an opt-in shared privacy module
 
 ### Scope boundaries
 
-This is an implementation specification, not permission to start implementation. No server/secret/provider-console change, production promotion, framework migration, new analytics vendor or broad dependency refresh is included. Narrow shared-library adoption pins and necessary lock/migration changes are in scope after implementation approval. Other active work must remain intact.
+No server/secret/provider-console change, production promotion, framework migration, new analytics vendor or broad dependency refresh is included. Narrow shared-library adoption pins and necessary lock/migration changes are in scope. Other active work must remain intact.
 
 ### Configuration, information and evidence
 
@@ -51,7 +51,7 @@ PLACEHOLDER — after Gate #1 the Orchestrator supplies absolute working directo
 
 STOP — this section is not an instruction to the implementer.
 
-Gate #1 pending. The operator requested specifications and the prototype, not feature implementation. Follow orchestrate-codex before dispatch. Requirements-only authoring needs no independent code review; future Tier-3 source delivery does, including the security boundary and UI changes where applicable. Use the configured roles and the app's existing test harness. In joined apps, put the named cross-layer click path into the existing browser suite; do not introduce a harness or expand screenshots beyond the canonical prototype comparison merely for this rollout.
+Gate #1 approved by the operator 2026-11-06 (Codex Expertenchat, session 01a1a807-3193-7793-8e43-50d6d7fd7263). Approval covers this Envelope and the shared privacy prototype/copy, accepted after the interactive preview. The canonical visual reference remains ui-core-micha@ced7a28. Dependencies and activation prerequisites still apply; production promotion is not approved. The Orchestrator must complete Part B and the mandatory preamble before dispatch. Follow orchestrate-codex before dispatch. Requirements-only authoring needs no independent code review; future Tier-3 source delivery does, including the security boundary and UI changes where applicable. Use the configured roles and the app's existing test harness. In joined apps, put the named cross-layer click path into the existing browser suite; do not introduce a harness or expand screenshots beyond the canonical prototype comparison merely for this rollout.
 
 Reorient and re-read current instructions/pins at handoff. The shared visual reference is ui-core-micha/work-orders/assets/app-prototype.html@ced7a28 (375/1280 px); match composition and interaction using the consuming app's own theme. It covers only privacy choices and notice entry points. The Envelope governs behavior, permissions and data contracts, not prototype omissions.
 

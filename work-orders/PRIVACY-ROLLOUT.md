@@ -1,12 +1,12 @@
 # Privacy services and application rollout
 
-Status: specifications authored, implementation approval pending. Date: 2026-11-04.
+Status: all 24 specifications and the shared prototype approved for implementation on 2026-11-06. Specifications authored 2026-11-04.
 
 ## Decisions and scope
 
 The operator requested work orders for shared dcm/ucm services and **all apps**, based on Sol's read-only source inventory. Explicit decisions: prior opt-in for optional services uniformly across CH/EU; visit measurement only after choice; one common visual prototype. The scope is the 20 repositories in webapp-management/recovery/staging/adoption-inventory.json (20 apps). All checkouts were present. The standalone DHIS2 repository is explicitly excluded by the operator. The staging catalogue is a scope baseline, not proof that all current production deployments or edge-injected services were observed.
 
-No feature implementation or production activation was approved by these requirements answers. Gate #1 remains pending for each WO. The requested branch repairs are separately authorised; they are not privacy-feature approval.
+Gate #1 approved by the operator 2026-11-06 (Codex Expertenchat, session 01a1a807-3193-7793-8e43-50d6d7fd7263), after accepting the interactive privacy prototype and explicitly requesting release of the work orders and printed implementation instructions. This approval covers all 24 Envelopes and the shared prototype/copy. Dependencies, actual-provider verification and activation prerequisites remain binding. Production promotion remains separately gated. No implementation was started by the requirements session.
 
 ## Dependency order
 
@@ -81,12 +81,12 @@ These are design inputs, not a complete legal opinion or evidence of any individ
 
 ## Publication record
 
-All 24 work orders are committed locally. Twenty app work orders are published on `origin/develop`, and both dcm work orders on `origin/main`, as of 2026-11-04. Only the two ucm work orders and shared prototype await publication; the table below records the specification commits. No privacy feature is implemented by these specification files.
+All 24 original work orders and the shared prototype are published, verified on 2026-11-06. App specifications use `origin/develop`; shared libraries use `origin/main`. The table below records the original specification commits. The dated Gate #1 record is in each work order's Part C and register entry. No privacy feature is implemented by these specification files.
 
 | Repository | Specification commit | Publication |
 |---|---|---|
 | django-core-micha | `32e3cc4` | Published; the operator explicitly authorised publishing the preceding DCM-BILL-8 specification. |
-| ui-core-micha | `032b1e7`; prototype `ced7a28` | Pending: preceding UCM-BILL-11 implementation is still registered in progress; its owner must clear publication. |
+| ui-core-micha | `032b1e7`; prototype `ced7a28` | Published; verified reachable from origin/main on 2026-11-06. |
 | hram | `1e6ecc32` | Published |
 | Gustav | `03b6b79` | Published |
 | Photogallery | `d7d8c84` | Published |
@@ -110,5 +110,5 @@ All 24 work orders are committed locally. Twenty app work orders are published o
 
 The operator authorised the Gustav, Spesix and Innoservice Git repairs. Gustav's obstructing local file was byte-identical to upstream. The Spesix reconciliation tree equalled the reviewed remote tree before adding the privacy specification. Innoservice's two foreign register additions remain uncommitted and unchanged. The excluded standalone DHIS2 repository received no commit or push.
 
-Verification: 24 complete requirements Envelopes, unique register entries, no conflict markers and clean diff whitespace checks. The common prototype was rendered and visually inspected at both specified widths. These are specification checks, not application tests. Gate #1 remains pending; no implementer is dispatched by this publication.
+Verification: 24 complete requirements Envelopes, unique register entries, no conflict markers and clean diff whitespace checks. The common prototype was rendered and visually inspected at both specified widths, then accepted by the operator after an interactive chat preview on 2026-11-06. These are specification checks, not application tests. Gate #1 is approved; Part B must still be completed by the Orchestrator before dispatch. No implementer is dispatched by this publication.
 
