@@ -1,6 +1,6 @@
 # Privacy services and application rollout
 
-Status: all 24 specifications and the shared prototype approved for implementation on 2026-11-06. Specifications authored 2026-11-04.
+Status: all 24 privacy specifications and the shared privacy prototype approved for implementation on 2026-11-06. Specifications authored 2026-11-04. BCO-LEGAL-5 and its legal-reader prototype were additionally approved on 2026-11-06 and are coordinated below: 25 work orders in total, with no duplicate app adoption orders.
 
 ## Decisions and scope
 
@@ -12,10 +12,26 @@ Gate #1 approved by the operator 2026-11-06 (Codex Expertenchat, session 01a1a80
 
 1. DCM-PRIV-1 supplies public-safe manifest, notice references, anonymous/browser-scoped consent receipts and enforcement.
 2. UCM-PRIV-1 supplies common UI and gated lifecycle against that contract.
-3. Each app adoption below is independently reviewable and retains its controller and functional data. No release is automatically rolled across apps.
-4. UCM-PRIV-2 removes old UI/adapters after caller migration; DCM-PRIV-2 removes the old profile fields with concrete consumer migrations after UI adoption. Neither removal is complete without its app follow-through.
+3. BCO-LEGAL-5 supplies the branded, app-aware legal reader and publication-registry interface in parallel with shared consent work. BCO-PRIV-1 reuses it for processing disclosures and adoption. Reader/registry changes land before overlapping BCO-PRIV-1 work and before consumer links activate in that environment.
+4. Each app adoption below is independently reviewable and retains its controller and functional data. No release is automatically rolled across apps. Integrate the footer entries during that app's existing PRIV-1 implementation, using the coordinated handoff below.
+5. UCM-PRIV-2 removes old UI/adapters after caller migration; DCM-PRIV-2 removes the old profile fields with concrete consumer migrations after UI adoption. Neither removal is complete without its app follow-through.
 
 The static report follows the same privacy principles without acquiring a Django backend or a fake banner. No app is required to add an optional purpose that it does not currently need.
+
+## Coordinated legal reader and footer handoff — approved 2026-11-06
+
+The operator accepted the revised legal-reader prototype, requested release of [BCO-LEGAL-5](../../bigler-consult/work-orders/BCO-LEGAL-5.md), and requested coordination with the existing privacy orders so each app receives footer entry points. The operator also confirmed that the included applications are own apps. BCO-LEGAL-5's visual reference is `bigler-consult/work-orders/assets/app-prototype.html@319cdd1`, `page=legal`, with the committed 375/1280 comparison. The shared privacy prototype remains `ui-core-micha@ced7a28`; the two prototypes govern different surfaces.
+
+This section is the common orchestration handoff for the existing app Envelopes' document and persistent-settings integration, not a separate implementer dispatch. Copy the relevant app-specific requirements into Part B before dispatch. Preserve each Envelope's functional boundaries, processing disclosures, independent permissions and tests; do not use this coordination to bypass an unresolved prerequisite.
+
+- Put persistent, translated Privacy notice and Terms links in the existing public and authenticated app footers, plus a local Privacy settings action in the 19 interactive apps. Cover each shipped shell, including login/registration and public entry points; links require neither login nor optional consent. Avoid duplicate footers. Preserve existing imprint and applicable cancellation/DPA links. Other legal documents remain reachable in the central reader; do not imply that Maana-specific commercial clauses apply to unrelated apps.
+- Resolve document destinations from the app's validated legal/notice configuration and the one central publication registry. The link contract is `/legal/<existing-document-slug>?app=<registered-id>&lang=<document-locale>` on the configured bigler-consult origin; for example `/legal/privacy?app=maana&lang=de`. Use stable registered IDs, not display names or Referer inference. Production links target the published production reader; staging verification targets the matching staging reader. Do not embed account identifiers, source-page URLs or secrets.
+- Known own apps without a special edition show the complete general text directly, with selected app and discreet General version metadata. Published app-specific editions take precedence. Keep the selected app while changing document or language. Historical acceptance references remain pinned to their actual version; footer links may resolve the current published version. UI language and document language remain distinct: use existing verified DE/EN documents and an explicit supported fallback for other UI locales; never manufacture a translated legal text.
+- Privacy settings open the originating app's shared UCM settings, not bigler-consult's consent controls. Choices remain site/browser scoped. Necessary-only interactive apps keep the informative settings entry but show no first-choice banner. A failed settings API must not hide ordinary legal hyperlinks. The static YOP report gets legal links through its approved upstream/host authoring path, without a fake settings action, new backend or consent banner; its verbatim mirror prerequisite remains binding.
+- Keep collection-specific notices where needed. Central footer links do not replace tenant/study-authored research notices, requested AI disclosures or actual terms acceptance. Common text inheritance is not evidence that the app's actual processing inventory is complete.
+- Per app, verify the rendered footer links and destination content for a public and authenticated surface where present, keyboard/mobile reachability, selected app and document locale, general-version inheritance where applicable, and local settings reopening after refusal. Use the existing scoped harness and record target environment/version. Include one actual cross-app navigation check with Maana and one with an app inheriting the general text; do not add a browser harness or duplicate the full privacy test matrix for every link.
+
+Completion requires all 20 app orders to have evidence for their applicable entry points; name and track unresolved prerequisites as incomplete work. A shared-component release alone is not estate-wide adoption. Source work may proceed independently, but consumer production activation waits for the required central target routes and verified document mappings to be live. Production promotion retains its separate gate.
 
 ## Work orders
 
@@ -23,6 +39,7 @@ The static report follows the same privacy principles without acquiring a Django
 |---|---|---|---|
 | django-core-micha | [DCM-PRIV-1](../../django-core-micha/work-orders/DCM-PRIV-1.md) | Shared privacy information and purpose-specific consent | Prepared; publication recorded below |
 | ui-core-micha | [UCM-PRIV-1](../../ui-core-micha/work-orders/UCM-PRIV-1.md) | Shared privacy choices and notice surfaces | Prepared; publication recorded below |
+| bigler-consult | [BCO-LEGAL-5](../../bigler-consult/work-orders/BCO-LEGAL-5.md) | Branded app-aware legal reader and shared footer destination contract | Gate #1 approved 2026-11-06; approval recorded in its WO and register |
 | hram | [HRAM-PRIV-1](../../hram/work-orders/HRAM-PRIV-1.md) | Separate map preferences from requested mapping | Prepared; publication recorded below |
 | Gustav | [GUS-PRIV-1](../../Gustav/work-orders/GUS-PRIV-1.md) | Adopt privacy controls without losing local customer work | Prepared; publication recorded below |
 | Photogallery | [PG-PRIV-1](../../Photogallery/work-orders/PG-PRIV-1.md) | Separate gallery analytics from anonymous reactions | Prepared; publication recorded below |
@@ -144,10 +161,11 @@ The approval recorded above is binding for all 24 work orders, including the two
 Start the Orchestrator in `C:/Users/Micha Bigler/Documents/webapps`. Pull the target repositories, read the relevant work-order files and follow `orchestrate-codex`. Read current model routing and repository instructions. Complete Part B with the current context package, progress contract and mandatory preamble before any implementer dispatch. Do not treat an Envelope placeholder as a complete coder specification.
 
 Execution order:
-1. Implement and release DCM-PRIV-1 in django-core-micha on main.
+1. Verify the released DCM-PRIV-1 contract in django-core-micha on main; its register records completion as 3.22.0 at afab9b1. Reuse the released implementation rather than reimplementing it. Re-read current release state before selecting exact consumer pins.
 2. Implement and release UCM-PRIV-1 in ui-core-micha on main against that released contract. Shared visual reference: ui-core-micha@ced7a28; the operator approved the prototype and explanatory copy on 2026-11-06.
-3. Adopt the released shared contracts through each of the 20 listed app work orders on develop. Each app remains independently reviewable; different app repositories may proceed independently after their stated prerequisites. YOP-PRIV-1 keeps its upstream-authoring prerequisite and does not gain an artificial Django/React dependency.
-4. Only after all applicable consumer migrations and compatibility checks, implement UCM-PRIV-2, then DCM-PRIV-2, including the consumer pin/migration follow-through specified in their Envelopes.
+3. Deliver BCO-LEGAL-5 in bigler-consult on develop, independently of step 2 where files/contracts do not overlap. Complete its reader/registry interface before BCO-PRIV-1's overlapping document work. Use prototype 319cdd1 and the approved general-text inheritance. BCO-PRIV-1 then adopts the shared services and supplies verified processing disclosures using that interface.
+4. Adopt the released shared contracts through each of the 20 listed app work orders on develop, including the footer handoff above. Each app remains independently reviewable; different app repositories may proceed independently after their stated prerequisites. YOP-PRIV-1 keeps its upstream-authoring prerequisite and does not gain an artificial Django/React dependency.
+5. Only after all applicable consumer migrations and compatibility checks, implement UCM-PRIV-2, then DCM-PRIV-2, including the consumer pin/migration follow-through specified in their Envelopes.
 
 Use the scoped tests, independent reviews and applicable prototype comparison required by each Envelope and the current governance. Verify actual requests/storage before optional-service activation. Preserve necessary functional data and the separate study/AI/terms permissions. The standalone bottleneck-analysis-app remains excluded. The deferred EU representative issue and separate billing work are not expanded by this rollout. Production promotion and provider-console/operational changes retain their separate gates.
 
