@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.22.0] — 2026-11-06
+
+### Added
+
+An opt-in, app-scoped privacy manifest, browser choice API, server-side purpose grant guard, and bounded evidence pruning command.
+Hosts must install `django_core_micha.privacy`, define `DCM_PRIVACY`, and mount its URLs to adopt the module; apps that do not
+adopt it keep their existing behavior. Migration: `dcm_privacy 0001`. The new `prune_privacy_evidence` command is not scheduled
+by this release.
+
 ## [3.21.1] — 2026-11-05
 
 ### Fixed
