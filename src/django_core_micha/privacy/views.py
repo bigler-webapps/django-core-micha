@@ -88,9 +88,15 @@ def _error(code, status, retryable=False, **extra):
     return _response({"code": code, "retryable": retryable, **extra}, status)
 
 
-def _state(request, manifest):
+def _state(request, manifest, receipt=None):
+    """Describe the browser's stored choices.
+
+    ``receipt`` is passed by a write that has just created or updated the receipt: the request
+    cookie does not carry it yet, so resolving from the request would report ``unset``.
+    """
     public = public_manifest_from_config(manifest)
-    receipt = receipt_for_request(request)
+    if receipt is None:
+        receipt = receipt_for_request(request)
     now = timezone.now()
     stored = {}
     if receipt is not None:
@@ -301,8 +307,12 @@ def choices_view(request):
         except DatabaseError:
             return _error("unavailable", 503, True)
     try:
-        response = _response(_state(request, manifest))
-    except DatabaseError:
+        written_receipt = PrivacyReceipt.objects.get(
+            receipt_id=receipt_id, app=manifest["app"], site=manifest["site"]
+        )
+        response = _response(_state(request, manifest, written_receipt))
+    except (DatabaseError, PrivacyReceipt.DoesNotExist):
+        # A prune racing the write removed the row: retryable, never a 500.
         return _error("unavailable", 503, True)
     _set_receipt_cookie(response, manifest, receipt_id)
     return response

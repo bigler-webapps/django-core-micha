@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.22.1] — 2026-11-06
+
+### Fixed
+
+The privacy choice API's first write now answers with the receipt it just stored (`receipt_state: "present"`, `seq`, the stored
+choices). Before, the response was built from the request cookie, which does not exist yet on a browser's first write, so it
+reported `unset` and clients that trust the POST response (ui-core-micha 4.32.0+) showed a save failure although the choice was
+stored. No API shape or migration change.
+
 ## [3.22.0] — 2026-11-06
 
 ### Added

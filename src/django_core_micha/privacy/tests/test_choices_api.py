@@ -45,6 +45,22 @@ def test_first_successful_write_sets_signed_host_only_receipt_cookie(api_client)
     assert state["choices"]["analytics"]["state"] == "granted"
 
 
+def test_first_write_response_already_reports_the_stored_receipt(api_client):
+    # The client trusts the POST response: before the cookie exists it must still say "present".
+    response = post_choice(api_client, {"analytics": "granted"})
+    body = response.json()
+    assert body["receipt_state"] == "present"
+    assert body["seq"] == 1
+    assert body["choices"]["analytics"]["state"] == "granted"
+
+
+def test_first_refusal_response_already_reports_the_stored_receipt(api_client):
+    response = post_choice(api_client, {"analytics": "refused"})
+    body = response.json()
+    assert body["receipt_state"] == "present"
+    assert body["choices"]["analytics"]["state"] == "refused"
+
+
 def test_cookie_is_browser_scoped_and_not_account_synchronized(api_client):
     response = post_choice(api_client, {"analytics": "granted"})
     cookie = response.cookies[receipt_cookie_name("sample-site")].value
