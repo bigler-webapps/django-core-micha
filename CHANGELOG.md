@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.23.1] — 2026-11-08
+
+### Added
+
+Reimbursement workbook rows may include an exact template account category. Existing callers that
+omit it retain blank category cells; invalid values are rejected before workbook generation.
+
 ## [3.22.1] — 2026-11-06
 
 ### Fixed

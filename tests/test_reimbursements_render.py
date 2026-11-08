@@ -423,3 +423,29 @@ def test_xlsx_user_text_starting_with_equals_stays_literal(tmp_path):
     page_1 = workbook["Expenses  Page 1"]
     assert page_1["C28"].data_type == "s" and page_1["C28"].value.startswith(hostile)
     assert page_1["C9"].data_type == "s" and page_1["C9"].value == "=1+1"
+
+
+def test_xlsx_account_categories_map_to_both_expense_sheets(tmp_path):
+    from dataclasses import replace
+    from openpyxl import load_workbook
+    from django_core_micha.reimbursements import ExportRow, render_xlsx_part
+
+    path = _template_file(tmp_path)
+    rows = _rows(15)
+    rows[0] = replace(rows[0], account="422000 Travel costs")
+    rows[14] = replace(rows[14], account="Other expenses")
+    workbook = load_workbook(io.BytesIO(render_xlsx_part(path, _unit(), rows)))
+    assert workbook["Expenses  Page 1"]["K28"].value == "422000 Travel costs"
+    assert workbook["Expenses Page 2"]["K13"].value == "Other expenses"
+    assert workbook["Expenses  Page 1"]["K29"].value is None
+
+
+@pytest.mark.parametrize("account", ["unknown category", '=HYPERLINK("https://attacker.example","open")', [], {}])
+def test_xlsx_rejects_invalid_or_formula_like_account_categories(tmp_path, account):
+    from dataclasses import replace
+    from django_core_micha.reimbursements import ExportRow, TemplateExportError, render_xlsx_part
+
+    row = _rows(1)[0]
+    row = replace(row, account=account)
+    with pytest.raises(TemplateExportError, match="Invalid reimbursement account category"):
+        render_xlsx_part(_template_file(tmp_path), _unit(), [row])

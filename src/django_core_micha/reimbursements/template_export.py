@@ -13,6 +13,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, Literal, Sequence
 
+from .accounts import is_template_account
+
 
 TEMPLATE_FILE_NAME = "Reimbursement_Form_Template.xlsx"
 MAX_ROWS_PER_XLSX = 49
@@ -66,6 +68,7 @@ class ExportRow:
     original_currency: str
     original_amount: Decimal
     fx_rate: Decimal
+    account: str | None = None
 
 
 def split_beneficiary_name(full_name: str | None) -> tuple[str, str]:
@@ -124,6 +127,10 @@ def render_xlsx_part(template_path: str | Path, unit: ExportUnit, rows: Sequence
     from openpyxl import load_workbook
     from openpyxl.worksheet.datavalidation import DataValidation
 
+    for reimbursement in rows:
+        if reimbursement.account is not None and (not isinstance(reimbursement.account, str) or not is_template_account(reimbursement.account)):
+            raise TemplateExportError("Invalid reimbursement account category.")
+
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -179,6 +186,7 @@ def render_xlsx_part(template_path: str | Path, unit: ExportUnit, rows: Sequence
         worksheet[f"F{row}"] = reimbursement.original_currency or ""
         worksheet[f"G{row}"] = reimbursement.original_amount
         worksheet[f"H{row}"] = reimbursement.fx_rate
+        worksheet[f"K{row}"] = reimbursement.account
 
     # Every value written above is user data. openpyxl turns a string that starts with "=" into a formula,
     # so such a value would run when finance opens the file (for example a HYPERLINK in a merchant name).
@@ -187,7 +195,7 @@ def render_xlsx_part(template_path: str | Path, unit: ExportUnit, rows: Sequence
         "C6", "C7", "C8", "C9", "C10", "C11", "C12", "G12", "C13", "G13", "C14", "G14", "I7",
         "C53", "C54", "C55", "C56", "C57", "C58", "C59",
     )]
-    written.extend((worksheet, f"{column}{row}") for worksheet, row in slots for column in ("B", "C", "F", "G", "H"))
+    written.extend((worksheet, f"{column}{row}") for worksheet, row in slots for column in ("B", "C", "F", "G", "H", "K"))
     for worksheet, ref in written:
         cell = worksheet[ref]
         if isinstance(cell.value, str) and cell.data_type == "f":
