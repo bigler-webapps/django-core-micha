@@ -48,7 +48,7 @@ reimbursements = [
     "openpyxl>=3.1.5",
     "reportlab>=4.4",
     "pypdf>=6.21.3",
-    "Pillow>=12.3.0",
+    "Pillow>=13.0.0",
     "pypdfium2>=5.0",
 ]
 
