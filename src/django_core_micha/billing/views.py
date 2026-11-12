@@ -17,6 +17,31 @@ from .models import BillingCustomer, StripeEvent
 from .stripe_service import checkout_session_params, get_customer, process_stripe_event
 from .withdrawal import eligibility, refund_amount, withdraw as execute_withdrawal
 
+_CHECKOUT_LOCALES = ("de", "en", "fr")
+
+
+def _checkout_locale(data):
+    """Return the validated optional Stripe locale, or None when omitted."""
+    if "locale" not in data:
+        return None
+    locale = data["locale"]
+    if not isinstance(locale, str) or locale not in _CHECKOUT_LOCALES:
+        raise ValueError("invalid_locale")
+    return locale
+
+
+def _attempt_locale(reference):
+    """Read locale from versioned references; unversioned legacy references omit it."""
+    match = re.fullmatch(r"v1-([a-z]{2})-[A-Za-z0-9_-]{32}", reference)
+    if match and match.group(1) in _CHECKOUT_LOCALES:
+        return match.group(1)
+    return None
+
+
+def _new_attempt_reference(locale):
+    token = secrets.token_urlsafe(24)
+    return f"v1-{locale}-{token}" if locale is not None else token
+
 def _plans():
     config=load_billing_config()
     by_key={p.key:p for p in config.plans}
@@ -134,8 +159,12 @@ def checkout(request):
     import json
     try: data=json.loads(request.body or b"{}")
     except (ValueError,UnicodeDecodeError): data=None
+    locale = None
+    if isinstance(data, dict):
+        try: locale = _checkout_locale(data)
+        except ValueError: return JsonResponse({"detail":"invalid_locale"},status=400)
     if isinstance(data,dict) and data.get("context") is not None:
-        return _contextual_checkout(request,data)
+        return _contextual_checkout(request,data,locale)
     try:
         if data is None: data=json.loads(request.body or b"{}")
         key=data.get("plan_key") if isinstance(data,dict) else None
@@ -144,7 +173,7 @@ def checkout(request):
         from .stripe_service import _latest_price, _stripe
         price=_latest_price(plan.key)
         customer=get_customer(request.user)
-        session=_stripe().checkout.Session.create(**checkout_session_params(plan=plan,price=price,user=request.user,customer_id=customer.stripe_customer_id))
+        session=_stripe().checkout.Session.create(**checkout_session_params(plan=plan,price=price,user=request.user,customer_id=customer.stripe_customer_id,locale=locale))
     except (StopIteration,LookupError): return JsonResponse({"detail":"unknown_plan"},status=400)
     except Exception: return JsonResponse({"detail":"checkout_unavailable"},status=502)
     return JsonResponse(_checkout_body(session.url))
@@ -165,7 +194,7 @@ def _append_attempt(url, reference):
     query=parse_qsl(parts.query,keep_blank_values=True)+[("checkout_attempt",reference)]
     return urlunsplit((parts.scheme,parts.netloc,parts.path,urlencode(query),parts.fragment))
 
-def _contextual_checkout(request,data):
+def _contextual_checkout(request,data,locale):
     from django.db import IntegrityError
     from .config import load_checkout_contexts
     from .stripe_service import _latest_price, _stripe
@@ -178,21 +207,21 @@ def _contextual_checkout(request,data):
     if plan is None or plan.kind == "continuation" or not plan.available: return JsonResponse({"detail":"unknown_plan"},status=400)
     app=getattr(settings,"DCM_BILLING_APP","")
     attempt=CheckoutAttempt.objects.filter(user=request.user,app=app,idempotency_key=idem).first()
-    if attempt is not None:
-        if attempt.plan_key!=plan.key or attempt.context!=context: return JsonResponse({"detail":"idempotency_key_reused"},status=409)
-    else:
+    if attempt is None:
         # a replay repeats the stored price; only a new attempt resolves the current one
         try: price=_latest_price(plan.key)
         except LookupError: return JsonResponse({"detail":"unknown_plan"},status=400)
         try:
             with transaction.atomic():
-                attempt=CheckoutAttempt.objects.create(reference=secrets.token_urlsafe(24),user=request.user,app=app,plan_key=plan.key,
+                attempt=CheckoutAttempt.objects.create(reference=_new_attempt_reference(locale),user=request.user,app=app,plan_key=plan.key,
                     context=context,idempotency_key=idem,stripe_price_id=price.stripe_price_id)
         except IntegrityError:
             attempt=CheckoutAttempt.objects.get(user=request.user,app=app,idempotency_key=idem)
-            if attempt.plan_key!=plan.key or attempt.context!=context: return JsonResponse({"detail":"idempotency_key_reused"},status=409)
     with transaction.atomic():
         attempt=CheckoutAttempt.objects.select_for_update().get(pk=attempt.pk)
+        stored_locale = _attempt_locale(attempt.reference)
+        if attempt.plan_key != plan.key or attempt.context != context or stored_locale != locale:
+            return JsonResponse({"detail": "idempotency_key_reused"}, status=409)
         state=_attempt_data(attempt)
         if state["status"]!="open": return JsonResponse({"detail":"attempt_not_open","attempt":state},status=409)
         if attempt.stripe_session_id: return JsonResponse(_checkout_body(None,attempt))
@@ -201,7 +230,7 @@ def _contextual_checkout(request,data):
             customer=get_customer(request.user)
             params=checkout_session_params(plan=plan,price=type("StoredPrice",(),{"stripe_price_id":attempt.stripe_price_id})(),user=request.user,
                 customer_id=customer.stripe_customer_id,success_url=_append_attempt(destinations["success_url"],attempt.reference),
-                cancel_url=_append_attempt(destinations["cancel_url"],attempt.reference),attempt_reference=attempt.reference,context=context)
+                cancel_url=_append_attempt(destinations["cancel_url"],attempt.reference),attempt_reference=attempt.reference,context=context,locale=stored_locale)
             session=_stripe().checkout.Session.create(**params,idempotency_key=f"dcm-checkout:{app}:{attempt.reference}")
         except Exception: return JsonResponse({"detail":"checkout_unavailable"},status=502)
         attempt.stripe_session_id=session.id; attempt.stripe_checkout_url=session.url

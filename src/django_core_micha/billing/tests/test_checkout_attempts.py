@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -58,6 +59,7 @@ def test_context_attempt_replay_uses_same_stripe_session_and_allowlisted_destina
         assert urlsplit(calls[0]["success_url"]).fragment == "top"
         assert parse_qs(urlsplit(calls[0]["success_url"]).query) == {"from": ["wizard"], "checkout_attempt": [a["attempt"]["reference"]]}
         assert calls[0]["metadata"]["checkout_context"] == "setup"
+        assert "locale" not in calls[0]
         assert calls[0]["client_reference_id"] == a["attempt"]["reference"]
         attempt = CheckoutAttempt.objects.get()
         anonymous_request = RequestFactory().get("/")
@@ -180,9 +182,92 @@ def test_checkout_without_context_is_unchanged(monkeypatch, tmp_path, extra):
     assert response.status_code == 200 and json.loads(response.content) == {"url": "https://stripe.test/1"}
     sent = calls[0]
     assert "idempotency_key" not in sent and "client_reference_id" not in sent
+    assert "locale" not in sent
     assert (sent["success_url"], sent["cancel_url"]) == ("https://app.test/ok", "https://app.test/no")
     assert set(sent["metadata"]) == {"app", "plan_key", "user_id"}
     assert not CheckoutAttempt.objects.exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("locale", ["de", "en", "fr"])
+@pytest.mark.parametrize("contextual", [False, True])
+def test_checkout_locale_reaches_stripe_for_both_checkout_modes(monkeypatch, tmp_path, locale, contextual):
+    user = make_user(f"locale-{locale}-{contextual}")
+    path = plan_file(tmp_path)
+    calls = []
+    monkeypatch.setattr(stripe_service, "_stripe", lambda: counting_stripe(calls))
+    data = {"plan_key": "monthly", "locale": locale}
+    if contextual:
+        data.update(context="setup", idempotency_key="locale-key-0000001")
+    with override_settings(DCM_BILLING_APP=APP, DCM_BILLING_FILE=path, DCM_BILLING_CHECKOUT_CONTEXTS=CONTEXTS):
+        response = checkout(req(user, data))
+    assert response.status_code == 200
+    assert calls[0]["locale"] == locale
+    if contextual:
+        reference = json.loads(response.content)["attempt"]["reference"]
+        assert reference.startswith(f"v1-{locale}-") and len(reference) <= 64
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("contextual", [False, True])
+def test_omitted_locale_leaves_stripe_language_selection_unchanged(monkeypatch, tmp_path, contextual):
+    user = make_user(f"locale-default-{contextual}")
+    path = plan_file(tmp_path)
+    calls = []
+    monkeypatch.setattr(stripe_service, "_stripe", lambda: counting_stripe(calls))
+    data = {"plan_key": "monthly"}
+    if contextual:
+        data.update(context="setup", idempotency_key="locale-key-0000004")
+    with override_settings(DCM_BILLING_APP=APP, DCM_BILLING_FILE=path, DCM_BILLING_CHECKOUT_CONTEXTS=CONTEXTS):
+        assert checkout(req(user, data)).status_code == 200
+    assert "locale" not in calls[0]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("contextual", [False, True])
+@pytest.mark.parametrize("invalid_locale", ["es", None, "", ["de"]])
+def test_invalid_checkout_locale_fails_before_side_effects(monkeypatch, tmp_path, contextual, invalid_locale):
+    user = make_user(f"locale-invalid-{contextual}")
+    path = plan_file(tmp_path)
+    calls = []
+    monkeypatch.setattr(stripe_service, "_stripe", lambda: counting_stripe(calls))
+    get_customer = Mock()
+    monkeypatch.setattr("django_core_micha.billing.views.get_customer", get_customer)
+    data = {"plan_key": "monthly", "locale": invalid_locale}
+    if contextual:
+        data.update(context="setup", idempotency_key="locale-key-0000002")
+    with override_settings(DCM_BILLING_APP=APP, DCM_BILLING_FILE=path, DCM_BILLING_CHECKOUT_CONTEXTS=CONTEXTS):
+        response = checkout(req(user, data))
+    assert response.status_code == 400 and json.loads(response.content)["detail"] == "invalid_locale"
+    get_customer.assert_not_called()
+    assert calls == [] and not CheckoutAttempt.objects.exists()
+
+
+@pytest.mark.django_db
+def test_context_locale_is_stable_across_timeout_retry_and_rejects_changed_locale(monkeypatch, tmp_path):
+    user = make_user("locale-timeout")
+    path = plan_file(tmp_path)
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1: raise RuntimeError("network interruption")
+        return SimpleNamespace(id="cs_locale", url="https://stripe.test/locale", expires_at=None)
+    fake = SimpleNamespace(Customer=SimpleNamespace(create=lambda **kw: SimpleNamespace(id="cus_locale")),
+        checkout=SimpleNamespace(Session=SimpleNamespace(create=create)))
+    monkeypatch.setattr(stripe_service, "_stripe", lambda: fake)
+    data = {"plan_key": "monthly", "context": "setup", "idempotency_key": "locale-key-0000003", "locale": "fr"}
+    with override_settings(DCM_BILLING_APP=APP, DCM_BILLING_FILE=path, DCM_BILLING_CHECKOUT_CONTEXTS=CONTEXTS):
+        assert checkout(req(user, data)).status_code == 502
+        changed_before_retry = checkout(req(user, {**data, "locale": "de"}))
+        assert changed_before_retry.status_code == 409
+        assert len(calls) == 1
+        retry = checkout(req(user, data))
+        changed = checkout(req(user, {**data, "locale": "de"}))
+    assert retry.status_code == 200 and len(calls) == 2
+    assert calls[0] == calls[1]
+    assert calls[0]["locale"] == "fr"
+    assert changed.status_code == 409 and json.loads(changed.content)["detail"] == "idempotency_key_reused"
+    assert len(calls) == 2
 
 
 @pytest.mark.django_db

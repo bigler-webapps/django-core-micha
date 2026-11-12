@@ -120,7 +120,7 @@ def get_customer(user):
     return row
 
 
-def checkout_session_params(*, plan, price, user, customer_id, success_url=None, cancel_url=None, attempt_reference=None, context=None):
+def checkout_session_params(*, plan, price, user, customer_id, success_url=None, cancel_url=None, attempt_reference=None, context=None, locale=None):
     """Build only parameters supported by Stripe Checkout SessionCreateParams in Stripe 16."""
     if plan.kind == "continuation" or not getattr(plan, "available", True):
         raise LookupError("unknown_plan")
@@ -131,6 +131,8 @@ def checkout_session_params(*, plan, price, user, customer_id, success_url=None,
         "metadata": {"app": getattr(settings, "DCM_BILLING_APP", ""), "plan_key": plan.key, "user_id": str(user.pk)},
         "billing_address_collection": "required",
         "managed_payments": {"enabled": True}}
+    if locale is not None:
+        params["locale"] = locale
     policy=load_billing_config().contract
     if policy: params["metadata"]["terms_version"]=policy["terms_version"]
     if getattr(settings, "DCM_BILLING_AUTOMATIC_TAX", False) is True:  # a real boolean only: the string "False" must not switch it on
