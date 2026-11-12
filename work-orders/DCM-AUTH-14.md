@@ -28,10 +28,19 @@ Maana can enable the resend path after its exact dependency pin includes the sha
 
 ## Part B — Implementation map
 
-Pending operator approval and Orchestrator mapping.
+Target: `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`. Start from the workspace root. This scope owns auth throttle source and related tests only.
+
+- `src/django_core_micha/auth/throttles.py::_BodyKeyedScopedRateThrottle`: the inherited DRF request method replaces the explicitly assigned instance scope with the view's scope. Keep named configuration, cache key normalization, DRF rate/wait mechanics, and behavior when the identifier is absent. Check call sites in `auth/views.py::BaseUserViewSet.get_throttles`, `RecoveryRequestViewSet.get_throttles`, and `invitations/views.py::AccessCodeViewSet.get_throttles`.
+- `tests/test_auth_throttles.py` and a focused registration request test in `tests/`: use the existing test app settings and mock the delivery boundary. Exercise real dispatch and response behavior as well as the key. Preserve proof and confirmation behavior. Coordinate neither edits nor tests with the parallel billing lane.
+
+### Implementer preamble
+
+> This file supplies the complete spec. Run the workspace hook canary and use the parent-confirmed fresh main checkout. Read nearby governance and the backend skill for conventions. Edit the named source/test paths and run the tests you wrote once. Do not read secrets or .env, install dependencies, update MEMORY.md or WORK_ORDERS.md, self-review, or run git add, commit or push. Leave the diff for independent review and the authoritative Orchestrator test run.
+>
+> Start with `PLAN: <steps>`. Emit `PROGRESS: [n/total] <action>` within two minutes of relevant steps. End with exactly one `RESULT: DONE` or `RESULT: BLOCKED <reason>`.
 
 ## Part C — Orchestrator only
 
 STOP — this part is not an instruction to the implementer.
 
-Observed in Maana on 2026-11-12 with the local app stack and intercepted email delivery. The focused integration test set the email quota to one request and observed HTTP 201 twice. `BaseUserViewSet.get_throttles()` sets the registration throttle's scope on the instance. The installed DRF `ScopedRateThrottle.allow_request()` then replaces it with the view scope, which is unset for registration. Relevant owner files are `src/django_core_micha/auth/throttles.py`, `src/django_core_micha/auth/views.py`, and `tests/test_auth_throttles.py`. Gate #1 for shared implementation is pending.
+Observed in Maana on 2026-11-12 with intercepted email delivery. DRF replaced the named registration throttle scope with the unset view scope. Gate #1 was approved by the operator on 2026-11-12. Dispatch the configured implementer, then run the independent Tier 3 auth reviews and affected tests.

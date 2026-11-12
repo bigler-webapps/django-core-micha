@@ -28,10 +28,20 @@ A language option can change Stripe's Session parameter set during a retry. The 
 
 ## Part B — Implementation map
 
-Pending operator approval and Orchestrator mapping.
+Target: `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`. Start from the workspace root. This scope owns billing source/tests and its contract documentation.
+
+- `src/django_core_micha/billing/views.py::checkout, _contextual_checkout`: validate the optional locale once before Stripe calls or customer creation. Keep auth, CSRF and response envelopes. The simple and contextual branches share `stripe_service.py::checkout_session_params`. Existing omitted-locale requests must continue to omit the provider field.
+- A contextual attempt has a persisted Stripe price and a stable Stripe idempotency key derived from the opaque public attempt reference. Both existing-attempt and concurrent-create recovery must prevent a changed locale from reaching Stripe under that key, including retries after an ambiguous provider failure. Inspect `billing/models.py::CheckoutAttempt` and `billing/tests/test_checkout_attempts.py`. The work order authorizes the billing behavior; leave schema changes for explicit approval if needed. Assess a versioned opaque reference that persists the locale without schema changes, preserves entropy and fits the field. Preserve legacy reference interpretation, full-key uniqueness, and unchanged omitted-locale retries.
+- Extend the existing checkout attempt tests for both checkout modes, provider call arguments, unchanged retries after a timeout, incompatible locale, and input rejection before side effects. Document the contract in `docs/design/billing.md` and the repository API contract if present. Leave Stripe credentials, external test sessions and release work to the Orchestrator.
+
+### Implementer preamble
+
+> This file supplies the complete spec. Run the workspace hook canary and use the parent-confirmed fresh main checkout. Read nearby governance and the backend skill for conventions. Edit the named source/test/contract paths and run the tests you wrote once. Do not read secrets or .env, install dependencies, update MEMORY.md or WORK_ORDERS.md, self-review, or run git add, commit or push. Leave the diff for independent review and the authoritative Orchestrator test run.
+>
+> Start with `PLAN: <steps>`. Emit `PROGRESS: [n/total] <action>` within two minutes of relevant steps. End with exactly one `RESULT: DONE` or `RESULT: BLOCKED <reason>`.
 
 ## Part C — Orchestrator only
 
 STOP — this part is not an instruction to the implementer.
 
-Maana's checkout delegates to the shared session builder without a locale option. Stripe documents the `locale` Session parameter. Gate #1 for shared implementation is pending. [Stripe Checkout Sessions API](https://docs.stripe.com/api/checkout/sessions/create)
+Maana delegates checkout to the shared session builder. Stripe documents the `locale` Session parameter. Gate #1 was approved by the operator on 2026-11-12. Dispatch the configured implementer, then run the independent Tier 3 billing review and affected tests. [Stripe Checkout Sessions API](https://docs.stripe.com/api/checkout/sessions/create)
