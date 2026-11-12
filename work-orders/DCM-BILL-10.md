@@ -45,3 +45,5 @@ Target: `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`. Start from 
 STOP — this part is not an instruction to the implementer.
 
 Maana delegates checkout to the shared session builder. Stripe documents the `locale` Session parameter. Gate #1 was approved by the operator on 2026-11-12. Dispatch the configured implementer, then run the independent Tier 3 billing review and affected tests. [Stripe Checkout Sessions API](https://docs.stripe.com/api/checkout/sessions/create)
+
+The candidate is local in `billing/views.py`, `billing/stripe_service.py`, `billing/tests/test_checkout_attempts.py`, and `docs/design/billing.md`. The existing billing design document is this library's API contract. A versioned attempt reference retains the locale and the full random token without a schema change. Existing references represent omitted locale. The affected suite passed 204 tests with one skip. Independent review covered the five Tier 3 lenses. Stripe test mode still needs a sanctioned test route to verify the hosted language and visible contract phases. The runtime rejected an availability probe because it inspected a key prefix. The probe did not run.
