@@ -15,8 +15,11 @@ import hashlib
 from types import SimpleNamespace
 
 import pytest
+from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache
 
 from django_core_micha.auth.throttles import (
+    CoreAnonRateThrottle,
     PerAccessCodeScopedRateThrottle,
     PerEmailScopedRateThrottle,
 )
@@ -28,7 +31,7 @@ def _fake_request(body: dict | None) -> SimpleNamespace:
     The throttle classes only touch `request.data`. The DRF Request wrapper is
     intentionally avoided so these tests stay setting-free.
     """
-    return SimpleNamespace(data=body)
+    return SimpleNamespace(data=body, user=AnonymousUser(), META={"REMOTE_ADDR": "192.0.2.1"})
 
 
 def _sha256(value: str) -> str:
@@ -188,3 +191,55 @@ class TestPerAccessCodeScopedRateThrottle:
         assert throttle.get_cache_key(
             _fake_request({"access_code": ""}), view=None
         ) is None
+
+
+@pytest.mark.parametrize(
+    ("throttle_class", "scope", "body", "rate_key"),
+    [
+        (
+            PerAccessCodeScopedRateThrottle,
+            "access_code_probe",
+            {"code": "Shared-Code"},
+            "access_code_probe",
+        ),
+        (
+            PerEmailScopedRateThrottle,
+            "email_recovery_login",
+            {"email": "Recovery@Example.com"},
+            "email_recovery_login",
+        ),
+    ],
+)
+def test_assigned_scope_enforces_rate_and_missing_identifier_falls_back_to_ip(
+    monkeypatch, throttle_class, scope, body, rate_key
+):
+    """The explicit target scope survives DRF dispatch and complements IP limits."""
+    cache.clear()
+    rates = {rate_key: "2/hour", "anon": "2/hour"}
+    monkeypatch.setattr(throttle_class, "THROTTLE_RATES", rates)
+    monkeypatch.setattr(CoreAnonRateThrottle, "THROTTLE_RATES", rates)
+
+    target = throttle_class()
+    target.scope = scope
+    assert target.allow_request(_fake_request(body), view=SimpleNamespace(throttle_scope=None))
+    assert target.allow_request(_fake_request(body), view=SimpleNamespace(throttle_scope=None))
+    assert not target.allow_request(_fake_request(body), view=SimpleNamespace(throttle_scope=None))
+
+    # A missing body key remains a no-op for the target throttle, while the
+    # independently configured client/IP throttle still enforces its budget.
+    cache.clear()
+    missing = _fake_request({})
+    assert target.allow_request(missing, view=SimpleNamespace(throttle_scope=None))
+    assert target.allow_request(missing, view=SimpleNamespace(throttle_scope=None))
+    client_ip = CoreAnonRateThrottle()
+    assert client_ip.allow_request(missing, view=None)
+    assert client_ip.allow_request(missing, view=None)
+    assert not client_ip.allow_request(missing, view=None)
+
+
+def test_target_throttle_is_optional_for_hosts_without_a_configured_rate(monkeypatch):
+    monkeypatch.setattr(PerEmailScopedRateThrottle, "THROTTLE_RATES", {"anon": "2/hour"})
+    target = PerEmailScopedRateThrottle()
+    target.scope = "email_register_request"
+
+    assert target.allow_request(_fake_request({"email": "new@example.com"}), view=None)

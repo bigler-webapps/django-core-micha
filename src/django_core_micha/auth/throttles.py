@@ -19,6 +19,7 @@ import hashlib
 from rest_framework.throttling import (
     AnonRateThrottle,
     ScopedRateThrottle,
+    SimpleRateThrottle,
     UserRateThrottle,
 )
 
@@ -48,8 +49,25 @@ class _BodyKeyedScopedRateThrottle(ScopedRateThrottle):
 
     BODY_FIELD: str = ""  # subclass override
 
+    def allow_request(self, request, view):
+        """Use this instance's named scope instead of the view's IP scope.
+
+        DRF's ScopedRateThrottle resolves its scope from ``view.throttle_scope``
+        on every request. Body-keyed throttles are added alongside the view's
+        client/IP throttles with their own scope, so that lookup would replace
+        the configured target scope (often with ``None``). Resolve the rate
+        from the assigned scope, then delegate the ordinary cache, history,
+        and wait handling to SimpleRateThrottle.
+        """
+        # Hosts may supply their own DRF rates and omit the optional target scope.
+        if not self.scope or self.scope not in self.THROTTLE_RATES:
+            return True
+
+        self.rate = self.get_rate()
+        self.num_requests, self.duration = self.parse_rate(self.rate)
+        return SimpleRateThrottle.allow_request(self, request, view)
+
     def get_cache_key(self, request, view):
-        # Resolve the scope the same way ScopedRateThrottle does.
         if not self.scope:
             return None
 
