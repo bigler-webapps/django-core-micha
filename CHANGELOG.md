@@ -1,5 +1,27 @@
 # Changelog
 
+## [3.25.0] — 2026-11-14
+
+### Added
+
+Two changes of `sync-secrets` ship together (the operator must upgrade the globally installed package BEFORE any bare sync:
+an older release ignores `only_environments` and would push a restricted secret to every environment).
+
+WM-SEC-10: a per-secret `only_environments: [<GitHub environment names>]` in `secrets.yaml` restricts a secret to the named
+GitHub Environments when `sync-secrets` pushes. A secret without the key is pushed everywhere as before; a value that is not a
+non-empty list of non-empty strings, or the combination with `target_scope: repo`, is a fatal error before any write.
+
+WM-SEC-30: `sync-secrets` delivers the runtime environment of an app to the servers that ops deploys. An environment is
+ops-managed when `webapp-management/ansible/credentials.yml` names the app and the environment (the app checkout sits beside
+a `webapp-management` checkout; `WEBAPP_MANAGEMENT_DIR` overrides). For such an environment `sync-secrets` no longer pushes
+the runtime secrets to its GitHub Environment (only secrets marked `exclude_from_env` and repository-scoped ones, which CI
+still needs, are pushed) and instead runs `webapp-management/ansible/deliver_secrets.py deliver` once per call for all
+ops-managed environments of that call: the controller reads Proton, runs `generate-env` with the real values and writes the
+file on the server through Ansible (WSL). No restart: the file takes effect when the next deploy recreates the containers.
+Environments without an entry in `credentials.yml` behave exactly as before. An ops-managed environment refuses a
+`--secret-source` other than Proton, and when the controller configuration cannot be read nothing is pushed.
+Migration: none for apps; the operator upgrades the globally installed `django-core-micha` to get the new `sync-secrets`.
+
 ## [3.23.1] — 2026-11-08
 
 ### Added

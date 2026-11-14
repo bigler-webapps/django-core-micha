@@ -10,6 +10,8 @@ from pathlib import Path
 
 import yaml
 
+from django_core_micha.scripts import ops_delivery
+
 # --- Configuration ---
 SECRETS_YAML_PATH = "secrets.yaml"
 PROJECT_CONFIG_PATH = "project.yaml"
@@ -207,6 +209,15 @@ def is_excluded_from_env(definition):
 def is_excluded_from_github(definition):
     """Return whether a secret must not be synced to GitHub secrets."""
     return bool(definition.get("exclude_from_github", False))
+
+
+def skipped_for_ops_managed(definition, key=None):
+    """Return whether a secret stays out of the GitHub Environment of an ops-managed environment (WM-SEC-30).
+
+    An ops-managed environment gets its runtime environment delivered to the server by the operations controller, so its
+    runtime secrets are not pushed to GitHub any more. What CI still needs there stays as before: secrets marked
+    ``exclude_from_env: true`` (they are not part of the runtime environment) and repository-scoped secrets."""
+    return not is_excluded_from_env(definition) and get_target_scope(definition, key=key) == "env"
 
 
 VALID_TARGET_SCOPES = ("env", "repo")
@@ -542,7 +553,7 @@ def validate_effective_settings(target, settings):
         sys.exit(1)
 
 
-def collect_github_secret_values(config, secrets_def, has_proton, secret_target, secret_source, values_data, environment_name=None, project_config=None):
+def collect_github_secret_values(config, secrets_def, has_proton, secret_target, secret_source, values_data, environment_name=None, project_config=None, ops_managed=False):
     """Resolve all GitHub secret values before any write when yaml input is active."""
     planned = []
     missing = []
@@ -553,6 +564,9 @@ def collect_github_secret_values(config, secrets_def, has_proton, secret_target,
             continue
         if not secret_applies_to_environment(definition, environment_name, key=key):
             print(f"    Skipping {key}: only_environments {definition['only_environments']} does not include {environment_name}.")
+            continue
+        if ops_managed and skipped_for_ops_managed(definition, key=key):
+            print(f"    Skipping {key}: delivered to the ops-managed server by sync-secrets, not pushed to GitHub.")
             continue
 
         source = resolve_source(definition, config, secret_target=secret_target, project_config=project_config)
@@ -591,6 +605,7 @@ def sync_github(
     secret_source="proton",
     values_data=None,
     project_config=None,
+    ops_managed=False,
 ):
     target_repo = config.get("target_repo")
     if not target_repo:
@@ -628,6 +643,7 @@ def sync_github(
             values_data,
             environment_name=environment_name,
             project_config=project_config,
+            ops_managed=ops_managed,
         )
         if missing_keys:
             print("")
@@ -644,6 +660,9 @@ def sync_github(
                 continue
             if not secret_applies_to_environment(definition, environment_name, key=key):
                 print(f"    Skipping {key}: only_environments {definition['only_environments']} does not include {environment_name}.")
+                continue
+            if ops_managed and skipped_for_ops_managed(definition, key=key):
+                print(f"    Skipping {key}: delivered to the ops-managed server by sync-secrets, not pushed to GitHub.")
                 continue
 
             source = resolve_source(definition, config, secret_target=secret_target, project_config=project_config)
@@ -837,8 +856,14 @@ def _do_server_sync(
     cli_secret_source=None,
     cli_values_file=None,
     github_environment=None,
+    ops_managed_environments=None,
 ):
     """Run one GitHub-secrets sync pass for *secret_target_name*.
+
+    *ops_managed_environments* ({environment: server}, WM-SEC-30) names the environments the operations controller delivers
+    to the server. The target is the one RESOLVED here (``--server`` without ``--secret-target`` falls back to the default
+    target), and when it is ops-managed its runtime secrets are not pushed (see skipped_for_ops_managed). Returns that
+    resolved target name when it is ops-managed (the caller then delivers once per call), else None.
 
     Raises SystemExit on validation or write errors — bare-mode callers catch it
     to abort the sequence and propagate the exit code.
@@ -852,6 +877,13 @@ def _do_server_sync(
         project_config_path=project_config_path,
     )
     validate_effective_settings("github", effective)
+    ops_managed = effective["secret_target"] in (ops_managed_environments or {})
+    if ops_managed and effective["secret_source"] != "proton":
+        print(
+            f"Error: environment '{effective['secret_target']}' is ops-managed: its runtime secrets are delivered from Proton only, "
+            f"not from secret source '{effective['secret_source']}'. Nothing was pushed or delivered."
+        )
+        sys.exit(1)
     has_proton = check_dependencies("github", secret_source=effective["secret_source"])
     values_data = None
     if effective["values_file"] and effective["secret_source"] in ("yaml", "auto"):
@@ -865,7 +897,40 @@ def _do_server_sync(
         secret_source=effective["secret_source"],
         values_data=values_data,
         project_config=project_config,
+        ops_managed=ops_managed,
     )
+    return effective["secret_target"] if ops_managed else None
+
+
+def _ops_managed_environments():
+    """{environment: server} that the operations controller delivers for the app in the current directory (WM-SEC-30).
+
+    Empty for an app outside the estate layout (a note says so). When the controller's configuration cannot be read the call
+    stops before any push: without it sync-secrets cannot tell which GitHub Environments must no longer receive the runtime
+    secrets."""
+    try:
+        if ops_delivery.cli_path() is None:
+            print("   (No webapp-management checkout beside this app: every environment is treated as deployed the legacy way.)")
+        return ops_delivery.managed_environments()
+    except ops_delivery.OpsDeliveryError as exc:
+        print(f"Error: cannot tell which environments are ops-managed ({exc.code}). Nothing was pushed or delivered.")
+        sys.exit(1)
+
+
+def _deliver_to_ops(environments):
+    """Deliver the runtime environment to the ops-managed servers of *environments*, once per call."""
+    if not environments:
+        return
+    print(f"\n{'-' * 60}\n  sync-secrets — delivery to the ops-managed server(s): {', '.join(environments)}\n{'-' * 60}\n")
+    try:
+        code = ops_delivery.deliver(environments)
+    except ops_delivery.OpsDeliveryError as exc:
+        print(f"Error: the delivery did not run ({exc.code}).")
+        sys.exit(1)
+    if code != 0:
+        print("Error: the delivery to the ops-managed server(s) failed (see above). Run it again after fixing the cause; "
+              "the GitHub side of this call is already synced.")
+        sys.exit(code)
 
 
 def _write_local_env(secret_target, secret_source, values_file, project_config):
@@ -904,12 +969,14 @@ def _sync_all_github_targets(parser, config, secrets_def, project_config, projec
             parser, bare_targets, target_repo, fatal=derived_from_infra_servers
         )
 
+    managed = _ops_managed_environments()
+    delivered = []
     for target_name in bare_targets:
         print(f"\n{'-' * 60}")
         print(f"  sync-secrets — target: {target_name}")
         print(f"{'-' * 60}\n")
         try:
-            _do_server_sync(
+            managed_target = _do_server_sync(
                 target_name,
                 config,
                 secrets_def,
@@ -918,11 +985,18 @@ def _sync_all_github_targets(parser, config, secrets_def, project_config, projec
                 cli_secret_source=args.secret_source,
                 cli_values_file=args.values_file,
                 github_environment=args.github_environment,
+                ops_managed_environments=managed,
             )
         except SystemExit as exc:
             code = exc.code if isinstance(exc.code, int) else 1
             print(f"\nError: {target_name} sync failed (exit {code}). Aborting remaining targets.")
+            if delivered:
+                print(f"Not delivered to the ops-managed server(s) {', '.join(delivered)} (their runtime secrets are no longer pushed to "
+                      "GitHub): run sync-secrets again after fixing the cause.")
             sys.exit(code)
+        if managed_target in managed:
+            delivered.append(managed_target)
+    _deliver_to_ops(delivered)
 
 
 def main(argv=None):
@@ -931,6 +1005,10 @@ def main(argv=None):
         " With no arguments, writes local .env when configured and syncs GitHub secrets"
         " for each bare-mode target in sequence (default staging then production;"
         " override with config.bare_server_targets in secrets.yaml)."
+        " An environment that ops deploys (webapp-management ansible/credentials.yml names the app and"
+        " environment) does not get its runtime secrets pushed to GitHub: they are delivered to its"
+        " server instead (once per call, through WSL), and only CI-only secrets"
+        " (exclude_from_env, repository-scoped) are pushed there. No restart: the file takes effect at the next deploy."
     )
     destination_group = parser.add_mutually_exclusive_group(required=False)
     destination_group.add_argument(
@@ -1031,7 +1109,8 @@ def main(argv=None):
         return
 
     if destination == "github":
-        _do_server_sync(
+        managed = _ops_managed_environments()
+        managed_target = _do_server_sync(
             effective_cli_target,
             config,
             secrets_def,
@@ -1040,7 +1119,10 @@ def main(argv=None):
             cli_secret_source=args.secret_source,
             cli_values_file=args.values_file,
             github_environment=args.github_environment,
+            ops_managed_environments=managed,
         )
+        if managed_target in managed:
+            _deliver_to_ops([managed_target])
         return
 
     wrote = _write_local_env(effective_cli_target, args.secret_source, args.values_file, project_config)
