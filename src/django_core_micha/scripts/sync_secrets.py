@@ -228,6 +228,34 @@ def get_target_scope(definition, key=None):
     return scope
 
 
+def secret_applies_to_environment(definition, environment_name, key=None):
+    """Return whether a secret is allowed in the resolved GitHub environment."""
+    if "only_environments" not in definition:
+        return True
+
+    environments = definition["only_environments"]
+    valid = (
+        isinstance(environments, list)
+        and bool(environments)
+        and all(isinstance(name, str) and bool(name.strip()) for name in environments)
+    )
+    if not valid:
+        label = f" for secret '{key}'" if key else ""
+        print(
+            f"Error: invalid only_environments{label} "
+            "(expected a non-empty list of non-empty strings)."
+        )
+        sys.exit(1)
+
+    scope = get_target_scope(definition, key=key)
+    if scope == "repo":
+        label = f" for secret '{key}'" if key else ""
+        print(f"Error: only_environments cannot be combined with target_scope: repo{label}.")
+        sys.exit(1)
+
+    return bool(environment_name) and environment_name in environments
+
+
 def get_inventory_target_data(config, secret_target=None):
     """Load target metadata from the configured inventory file."""
     inventory_path = config.get("inventory_path")
@@ -514,7 +542,7 @@ def validate_effective_settings(target, settings):
         sys.exit(1)
 
 
-def collect_github_secret_values(config, secrets_def, has_proton, secret_target, secret_source, values_data, project_config=None):
+def collect_github_secret_values(config, secrets_def, has_proton, secret_target, secret_source, values_data, environment_name=None, project_config=None):
     """Resolve all GitHub secret values before any write when yaml input is active."""
     planned = []
     missing = []
@@ -522,6 +550,9 @@ def collect_github_secret_values(config, secrets_def, has_proton, secret_target,
     for key, definition in secrets_def.items():
         if is_excluded_from_github(definition):
             print(f"    Skipping {key}: exclude_from_github is set.")
+            continue
+        if not secret_applies_to_environment(definition, environment_name, key=key):
+            print(f"    Skipping {key}: only_environments {definition['only_environments']} does not include {environment_name}.")
             continue
 
         source = resolve_source(definition, config, secret_target=secret_target, project_config=project_config)
@@ -595,6 +626,7 @@ def sync_github(
             secret_target,
             secret_source,
             values_data,
+            environment_name=environment_name,
             project_config=project_config,
         )
         if missing_keys:
@@ -609,6 +641,9 @@ def sync_github(
         for key, definition in secrets_def.items():
             if is_excluded_from_github(definition):
                 print(f"    Skipping {key}: exclude_from_github is set.")
+                continue
+            if not secret_applies_to_environment(definition, environment_name, key=key):
+                print(f"    Skipping {key}: only_environments {definition['only_environments']} does not include {environment_name}.")
                 continue
 
             source = resolve_source(definition, config, secret_target=secret_target, project_config=project_config)

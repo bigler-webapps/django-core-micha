@@ -11,6 +11,7 @@ from django_core_micha.scripts.sync_secrets import (
     _resolve_bare_targets,
     get_proton_secret,
     get_target_scope,
+    secret_applies_to_environment,
     main,
     resolve_github_environment,
     resolve_server_from_project,
@@ -903,3 +904,77 @@ def test_bare_mode_separator_no_unicode_crash(secrets_dir, capsys):
         main([])
     captured = capsys.readouterr()
     assert "─" not in captured.out  # ─ was the cp1252 crasher
+
+
+# ---------------------------------------------------------------------------
+# only_environments — per-secret GitHub environment restriction
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("secret_source", ["yaml", "proton"])
+def test_only_environments_pushes_only_to_listed_environment(secret_source, capsys):
+    from django_core_micha.scripts.sync_secrets import sync_github
+
+    config = {"target_repo": "org/repo"}
+    secrets_def = {"RUNNER_SECRET": {"source": "proton://Vault/Runner/key", "only_environments": ["runners"]}}
+    values_data = {"targets": {"runners": {"RUNNER_SECRET": "yaml-value"}}}
+    with (
+        patch("django_core_micha.scripts.sync_secrets.get_proton_secret", return_value="proton-value") as proton,
+        patch("django_core_micha.scripts.sync_secrets.subprocess.run", return_value=_OK) as gh,
+    ):
+        sync_github(config, secrets_def, has_proton=True, secret_target="runners", github_environment="runners",
+                    secret_source=secret_source, values_data=values_data)
+    assert gh.call_count == 1
+    pushed = gh.call_args.args[0]
+    assert pushed[3] == "RUNNER_SECRET"
+    assert "--env" in pushed and pushed[pushed.index("--env") + 1] == "runners"
+    if secret_source == "proton":
+        proton.assert_called_once()
+    else:
+        proton.assert_not_called()
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("secret_source", ["yaml", "proton"])
+@pytest.mark.parametrize("environment_name", ["staging", None])
+def test_only_environments_skips_other_and_repo_targets_without_resolving(secret_source, environment_name, capsys):
+    from django_core_micha.scripts.sync_secrets import sync_github
+
+    config = {"target_repo": "org/repo"}
+    secrets_def = {"RUNNER_SECRET": {"source": "proton://Vault/Runner/key", "only_environments": ["runners"]}}
+    values_data = {"targets": {"staging": {"RUNNER_SECRET": "yaml-value"}}}
+    with (
+        patch("django_core_micha.scripts.sync_secrets.get_proton_secret") as proton,
+        patch("django_core_micha.scripts.sync_secrets.subprocess.run") as gh,
+    ):
+        sync_github(config, secrets_def, has_proton=True, github_environment=environment_name,
+                    secret_source=secret_source, values_data=values_data)
+    proton.assert_not_called()
+    gh.assert_not_called()
+    assert "Skipping RUNNER_SECRET: only_environments ['runners'] does not include" in capsys.readouterr().out
+
+
+def test_secret_without_only_environments_is_unchanged():
+    assert secret_applies_to_environment({}, None) is True
+    assert secret_applies_to_environment({}, "staging") is True
+
+
+@pytest.mark.parametrize("invalid", ["runners", [], ["runners", ""], ["runners", 1], [None]])
+def test_only_environments_rejects_invalid_values(invalid, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        secret_applies_to_environment({"only_environments": invalid}, "runners", key="RUNNER_SECRET")
+    assert exc_info.value.code == 1
+    output = capsys.readouterr().out
+    assert "only_environments" in output
+    assert "RUNNER_SECRET" in output
+
+
+def test_only_environments_rejects_repo_scope(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        secret_applies_to_environment(
+            {"only_environments": ["runners"], "target_scope": "repo"}, "runners", key="RUNNER_SECRET"
+        )
+    assert exc_info.value.code == 1
+    output = capsys.readouterr().out
+    assert "target_scope: repo" in output
+    assert "RUNNER_SECRET" in output
