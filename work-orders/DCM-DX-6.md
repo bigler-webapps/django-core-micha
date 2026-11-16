@@ -204,10 +204,68 @@ outcomes of this feature, not optional hardening.
 
 ## Part B — Implementation map
 
-**Not dispatch-ready.** The Orchestrator fills the named source/test paths, context
-package, exact API schemas and implementation seams after Gate #1 and current
-repository orientation. The Envelope is complete; this placeholder is a dispatch
-blocker until replaced. Do not infer implementation approval from WO publication.
+### Context package and implementation seams
+
+- In dcm, add an opt-in `src/django_core_micha/test_management/` Django app,
+  including its adapter protocol, isolated-instance and controller checks,
+  ownership persistence/migrations, lifecycle service and API routes/serializers.
+  Keep it outside default application registration and `api_urls.py`. Add focused
+  tests under `tests/test_test_management*.py` and the app's test configuration.
+- Extend `src/django_core_micha/scripts/run_dev.py` (`main`, compose selection and
+  readiness) and `tests/test_run_dev.py` for the isolated local startup entry point.
+  Document its contract and controller/client usage in a new dcm documentation
+  file. The Orchestrator owns compose/infra-lane edits, dependencies and release.
+- In Innoservice, add the adapter under `backend/core/` and dedicated local-test
+  settings under `backend/backend/`; register the dcm routes only there via
+  `backend/backend/urls.py`. Add focused tests under `backend/core/`. Existing
+  `e2e_settings.py` records original environment before overriding it; do not
+  treat its override as proof of isolation. `seed_e2e.py` has useful examples of
+  role and fixture construction but its global reset must never be called here.
+- Domain seams: `core/access_control.py` resolves the singleton organisation and
+  effective grants; `core/capability_registry.py` defines supported capabilities;
+  `people/models.py` defines collaborator, company, organisation, role and
+  membership relationships; `users/models.py` creates a profile on user creation.
+  Keep exactly one organisation and use real permission checks.
+- Add a private local client and Playwright scenarios in `frontend/tests/` using
+  `e2e-helpers.js` as the regular CSRF/login pattern, and update
+  `docs/api-contract.md`. The client must keep credentials and authentication state
+  out of model-visible output and separate controller requests from app sessions.
+  Existing `admin-role-tool-right.spec.js` and `delivery-note-layout.spec.js` show
+  relevant rights and PDF workflows. No product frontend changes are in scope.
+- Contract: expose discovery, exclusive run creation/inspection/recovery, owned
+  accounts CRUD, named fixtures, reset and closure through structured JSON and
+  opaque instance/run/account/session handles. Use explicit idempotency keys on
+  logical creation and clear conflict/validation/authorization errors. Adapter
+  input is a validated template plus advertised role/capability fields, never
+  model names, arbitrary imports or expressions. Return requested and effective
+  grants and relationships without returning credentials. The client supplies
+  passwords privately and performs ordinary CSRF-protected login.
+- API schema (all endpoints below `/api/test-management/`, only in dedicated
+  settings): `GET discovery/` returns instance ID, templates, supported account
+  fields/capabilities and fixture names; `POST runs/` accepts `idempotency_key`
+  and baseline declaration and returns a run handle/status; `GET runs/{run}/`
+  inspects it; `POST runs/{run}/recover/`, `/reset/` and `/close/` take explicit
+  intent and return truthful lifecycle/cleanup status. `GET`/`POST
+  runs/{run}/accounts/` list/create; `GET`/`PATCH`/`DELETE
+  runs/{run}/accounts/{account}/` inspect/change/remove. Create accepts
+  `idempotency_key`, template, synthetic identity, password and advertised
+  configuration; reads return handle, requested configuration and effective
+  grants/relationships, never password. `POST runs/{run}/fixtures/` accepts an
+  idempotency key, advertised fixture name and validated parameters, and returns
+  a run-owned opaque fixture handle. All errors carry stable `code` and `detail`;
+  conflicting keys or active runs return 409, invalid payloads 400, unauthorized
+  controllers 401/403, and unowned or cross-run handles 404. No credentials in
+  URLs, logs, error details or persisted plaintext. Final field-level validation,
+  fixture parameters and response schemas must be documented from the adapter's
+  advertised contract alongside the implementation.
+- Verify every activation and operation against original environment, disposable
+  instance and isolated database/media/cache/session/background configuration;
+  do not rely on DEBUG or a flag alone. Controller authority is ephemeral,
+  instance-bound, non-cookie, unavailable to browsers and restricted to local
+  reachability. Tests must exercise refusal before mutation, ownership and recovery.
+- Work from these seams; open the named files to verify details. Preserve unrelated
+  existing files and foreign untracked data. The Envelope governs all acceptance
+  outcomes and is the authority for scope.
 
 Absolute targets:
 
@@ -228,8 +286,7 @@ All writing implementers start from
 > the Orchestrator's independent reviews and authoritative tests. Report blockers
 > rather than expanding scope. Start with PLAN, emit PROGRESS at relevant steps
 > with no gap longer than approximately two minutes, and finish with exactly one
-> RESULT: DONE or RESULT: BLOCKED line. The Part B placeholder above forbids dispatch
-> until the Orchestrator replaces it with the complete map.
+> RESULT: DONE or RESULT: BLOCKED line.
 
 ## Part C — Orchestrator only
 
@@ -311,6 +368,9 @@ mark done with only the shared API landed and the Innoservice adapter still pend
 2026-11-16: The operator requested creation of this WO for dcm with Innoservice as
 first consumer, initially limited to an isolated local test environment. This
 authorizes WO authoring/publication only. Gate #1 implementation approval is pending.
+
+2026-11-16: Gate #1 approved by the operator by requesting implementation of this
+WO; the request was reaffirmed after the GitHub access interruption.
 
 ## Completion
 
