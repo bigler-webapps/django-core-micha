@@ -1,4 +1,5 @@
 # src/django_core_micha/auth/views.py
+import secrets
 import time
 
 from django.shortcuts import get_object_or_404, redirect
@@ -282,6 +283,33 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         """
         return None
 
+    def get_registration_request_serializer(self, *, data):
+        """Return the request serializer; consumers may subclass it to add
+        optional, write-only application registration fields.
+        """
+        return RegistrationRequestSerializer(data=data)
+
+    def prepare_registration_binding(
+        self, *, email: str, mode: str, binding_ref: str, input_data: dict
+    ) -> None:
+        """Persist a pending application binding keyed by the opaque ref.
+
+        Called only after the shared anti-abuse and signup-policy checks pass.
+        The default implementation leaves registration behavior unchanged.
+        """
+        return None
+
+    def apply_registration_binding(
+        self, user, *, binding_ref: str
+    ):
+        """Consume a consumer binding inside register_confirm's transaction.
+
+        Consumers must verify registration/email binding, expiry and replay
+        under a database lock, and raise on failure so the transaction rolls
+        back user creation and other registration effects.
+        """
+        return None
+
     def get_role_policy(self):
         return self.role_policy_class()
 
@@ -449,7 +477,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         The actual side effects happen in ``register_confirm`` after the user
         clicks the confirm-link from their email (= email-ownership proof).
         """
-        serializer = RegistrationRequestSerializer(data=request.data)
+        serializer = self.get_registration_request_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         data = serializer.validated_data
@@ -522,6 +550,23 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        standard_fields = {
+            "email", "mode", "access_code", "registration_context_token",
+            "turnstile_token",
+        }
+        extension_input = {
+            key: value for key, value in data.items() if key not in standard_fields
+        }
+        registration_binding_ref = None
+        if extension_input:
+            registration_binding_ref = secrets.token_urlsafe(32)
+            self.prepare_registration_binding(
+                email=email,
+                mode=mode,
+                binding_ref=registration_binding_ref,
+                input_data=extension_input,
+            )
+
         # Sign the pending-registration token (no DB writes, no consumption).
         pending_token = create_pending_registration_token(
             email=email,
@@ -529,6 +574,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
             registration_context=registration_context,
             access_code=data.get("access_code") or None,
             qr_signup_token=qr_signup_token,
+            registration_binding_ref=registration_binding_ref,
         )
 
         base = request.build_absolute_uri("/").rstrip("/")
@@ -564,7 +610,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         """
         from django.contrib.auth.password_validation import validate_password
         from django.core.exceptions import ValidationError as DjangoValidationError
-        from django.db import transaction
+        from django.db import IntegrityError, transaction
 
         serializer = RegistrationConfirmSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -589,6 +635,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
         registration_context = payload.get("registration_context") or {}
         access_code = payload.get("access_code")
         qr_signup_token = payload.get("qr_signup_token")
+        registration_binding_ref = payload.get("registration_binding_ref")
 
         if not email or not mode:
             return Response(
@@ -658,6 +705,7 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
 
         policy_state = get_policy_state(self.get_auth_policy())
 
+        user_creation_conflict = False
         try:
             with transaction.atomic():
                 # Atomically consume the access-code if single-use is enabled.
@@ -669,9 +717,13 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
                 if qr_signup_token:
                     consume_signup_context_token(qr_signup_token)
 
-                user_obj = User.objects.create_user(
-                    username=email, email=email, password=password
-                )
+                try:
+                    user_obj = User.objects.create_user(
+                        username=email, email=email, password=password
+                    )
+                except IntegrityError:
+                    user_creation_conflict = True
+                    raise
                 # R2: mark EmailAddress verified — the click on the confirm-link is
                 # the email-ownership proof. Without this row, social-login
                 # auto-connect would be blocked by InvitationOnlySocialAdapter.
@@ -683,11 +735,26 @@ class BaseUserViewSet(InviteActionsMixin, viewsets.ModelViewSet):
 
                 self._mark_invited_profile(user_obj, created=True)
                 self.apply_registration_context(user_obj, registration_context)
+                if registration_binding_ref:
+                    self.apply_registration_binding(
+                        user_obj,
+                        binding_ref=registration_binding_ref,
+                    )
         except signing.SignatureExpired:
             return Response(
                 {"code": "Auth.QR_TOKEN_EXHAUSTED"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        except IntegrityError:
+            # A concurrent confirmation may create this user after the early
+            # existence check. The enclosing transaction has rolled back all
+            # code, QR and extension effects before returning the replay shape.
+            if user_creation_conflict and User.objects.filter(email__iexact=email).exists():
+                return Response(
+                    {"code": "Auth.REGISTRATION_CONFIRMED", "email": email},
+                    status=status.HTTP_201_CREATED,
+                )
+            raise
 
         # Intentionally NO auto-login here. Aligns with the existing
         # invite/password-reset pattern (PasswordInvitePage /login) and

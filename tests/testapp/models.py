@@ -24,6 +24,30 @@ class Gadget(models.Model):
         app_label = "testapp"
 
 
+from django_core_micha.auth.models import AbstractSignupQrToken
+
+
+class SignupQrTokenStub(AbstractSignupQrToken):
+    class Meta:
+        app_label = "testapp"
+
+
+class RegistrationBindingStub(models.Model):
+    reference_hash = models.CharField(max_length=64, unique=True)
+    email = models.EmailField()
+    consumed = models.BooleanField(default=False)
+
+    class Meta:
+        app_label = "testapp"
+
+
+class RegistrationGrantStub(models.Model):
+    user = models.OneToOneField(get_user_model(), on_delete=models.CASCADE)
+
+    class Meta:
+        app_label = "testapp"
+
+
 class AuthPolicyStub(models.Model):
     """Minimal stand-in for a consuming app's concrete AUTH_POLICY_MODEL."""
 

@@ -555,6 +555,7 @@ def create_pending_registration_token(
     registration_context: dict[str, Any] | None = None,
     access_code: str | None = None,
     qr_signup_token: str | None = None,
+    registration_binding_ref: str | None = None,
 ) -> str:
     """S13: sign a pending-registration payload (no DB user yet).
 
@@ -574,6 +575,10 @@ def create_pending_registration_token(
         "qr_signup_token": qr_signup_token or None,
         "expires_at": expires_at.isoformat(),
     }
+    # These fields are present only when a consumer opted into the extension.
+    # The raw application value must never be passed to this function.
+    if registration_binding_ref:
+        payload["registration_binding_ref"] = registration_binding_ref
     return signing.dumps(payload, salt=PENDING_REGISTRATION_SALT)
 
 

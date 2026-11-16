@@ -39,3 +39,7 @@ Operator explicitly approved this auth dependency on 2026-11-16 in the MAANA-APP
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-16: "Ja, freigeben" to the separately scoped secure registration binding including replay protection and existing-registration parity.
+
+## Progress — 2026-11-16
+
+Implementation and two independent review rounds completed. Round 1 raised five test findings, accepted; fixes include real QR quota rollback and persisted write rollback, policy ordering and extension-value checks, plus a PostgreSQL concurrency test. Round 2 raised one test finding; router-equivalent permissions, authenticated-session CSRF and configured anonymous throttle tests for both endpoints were added afterwards. No third review. Scoped SQLite test run: 53 passed, one PostgreSQL-only test skipped. The concurrent confirmation test then ran in an isolated local PostgreSQL test database and exposed a username uniqueness race. The orchestrator corrected the race after the closing review: the failed transaction rolls back first and returns the existing privacy-preserving replay response only if user creation conflicted and that email now exists. PostgreSQL recheck: one passed; the 53-test SQLite regression set remained green. The review snapshot predates this post-review fix.
