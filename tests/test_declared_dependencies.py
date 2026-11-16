@@ -30,6 +30,7 @@ MODULE_TO_DISTRIBUTION = {
     "openpyxl": "openpyxl",
     "reportlab": "reportlab",
     "openai": "openai",
+    "psycopg": "psycopg",
     "rest_framework": "djangorestframework",
     "whitenoise": "whitenoise",
     "yaml": "PyYAML",
