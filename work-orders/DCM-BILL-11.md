@@ -1,8 +1,11 @@
 # DCM-BILL-11 — Reconcile plan prices in the active Stripe account
 
+**ROLE: IMPLEMENTER.** You are the already-dispatched coding instance, not the orchestrator. Implement Parts A and B yourself. Do not invoke orchestration, orient, dispatch, reviewers, or another implementer. Part C is not addressed to you.
+
 ## Part A — Envelope (everyone)
 
-**Repository:** django-core-micha, `main`. **Tier:** 3, shared billing.
+**Repository:** django-core-micha, `main`.
+**Tier 3:** shared billing.
 **Consumer:** Maana, MAANA-UX-1. No schema change.
 
 ### Outcome
@@ -31,17 +34,28 @@ The shared release and Maana's exact pin are prerequisites for the staging accep
 
 ## Part B — Implementation map (implementer)
 
-NOT READY FOR DISPATCH. The Orchestrator must map the current sources, add the canonical implementer preamble and progress contract, and identify the exact affected tests and billing contract before dispatch.
-
 Target workspace: `C:/Users/Micha Bigler/Documents/webapps`; target repository: `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`.
 
-Context anchors: `src/django_core_micha/billing/stripe_service.py` (`sync_plans`, `stripe_fingerprint`, `_latest_price`); `billing/models.py` (`StripePrice`, unique lookup key and version); `billing/management/commands/billing_sync_plans.py`; `billing/tests/test_stripe_chunk_b.py` and the existing checkout, subscription and lifecycle tests. MAANA-UX-1 Part C records the staging observation. The Orchestrator must check the installed Stripe SDK's current error and object contracts and the consumers of sync results without reading secrets.
+### Context package
+
+- Change `src/django_core_micha/billing/stripe_service.py` (`sync_plans`, `stripe_fingerprint`, `_latest_price`), `billing/management/commands/billing_sync_plans.py` as needed, and billing tests including `billing/tests/test_stripe_chunk_b.py` and a focused reconciliation test module. Work from these seams; inspect named files and relevant billing tests as needed.
+- `StripePrice` in `billing/models.py` has a globally unique lookup key, app, plan key, version, fingerprint, product ID and price ID. `_latest_price` selects the greatest version for the configured app and plan; checkout consumes that row's price ID. Preserve old rows and subscriptions; no migration.
+- The existing sync skips matching fingerprints, otherwise locates a product by exact app/plan metadata, versions the lookup key as `app:plan:vN`, creates an exclusive-tax price, and returns `(plan_key, result)` pairs. The command prints these and converts exceptions to a sanitized `CommandError`. Existing fake Stripe objects in `test_stripe_chunk_b.py` will need the full fields and retrieve/error behavior needed by the new verification. Preserve caller compatibility where possible.
+- Stripe is an optional billing dependency (`stripe>=16.0.1`); the host has 16.0.0, so use the installed SDK's error and object interfaces without changing dependencies. Do not inspect secrets or contact live Stripe. Review the SDK classes locally where necessary. Existing checkout, subscription, authorization and lifecycle tests are in `src/django_core_micha/billing/tests/`.
+
+### Preamble and progress contract
+
+Your first tool action is the hook canary: run the shell command `codex-hook-canary-ws-gov-60` exactly. The expected result is a denial, `WS-GOV-60 canary: workspace hooks are active`; continue after it. If it is not denied, report unverified hook coverage once and continue.
+
+Part A and this map are the complete specification. Read the nearest `AGENTS.md`, `.codex/skills/backend-engineering/SKILL.md`, and app `MEMORY.md` only for conventions. Stay in scope; do not touch auth, permissions, dependencies, schema or CI, and do not update `MEMORY.md` or the register. Your tools are for editing source and test files and running only the tests you wrote, once; no installs, lockfiles, package managers, cleanup, git operations or self-review. If blocked, report `RESULT: BLOCKED <reason>`. Leave changes uncommitted. The orchestrator runs the authoritative tests and independent reviews.
+
+Narrate continuously: `PLAN: <steps>` first, then `PROGRESS: [n/total] <action>` before each relevant action and on completion, with gaps under about two minutes; finish with exactly one `RESULT: DONE` or `RESULT: BLOCKED <reason>`.
 
 ## Part C — Orchestrator only
 
-STOP — this part is not an instruction to the implementer.
+STOP — implementer: do not perform anything below, launch another implementer, review, update the register, commit or push.
 
-Authoring requested 2026-11-16. Gate #1 for implementation is pending. The register entry predates this document; it remains planned. After approval, map Part B and perform the canonical Tier-3 implementation and independent security/review checks.
+Authoring requested 2026-11-16. The register entry predates this document. Perform canonical Tier-3 implementation and independent security/review checks.
 
 ### Staging acceptance after shared release
 
@@ -51,4 +65,10 @@ Using the established Stripe test environment and an authorized staging test acc
 
 ## Gate record
 
-Gate #1 pending.
+Gate #1 approved by the operator in chat on 2026-11-16 for DCM-BILL-11.
+
+## Implementation and outstanding acceptance
+
+The implementation verifies Stripe price and product semantics, repairs confirmed missing current prices and preserves historic versions. Independent review: envelope `codex/gpt-6.1-terra`, regression, duplication, tests and security `codex/gpt-6-luna`; five findings in round one and three in round two accepted and fixed. Billing tests: 225 passed, one skipped before review fixes; 41 directly affected tests passed after fixes. Release target: 3.26.2.
+
+Staging acceptance remains open: Maana's exact pin and staging deployment require their own approved scope and deployment gate. Hosted checkout and test-mode schedule evidence have not been checked. No live Stripe operation was performed.

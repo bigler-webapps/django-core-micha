@@ -47,16 +47,22 @@ class _Stripe:
         self.modified_products = []
         self.Product = SimpleNamespace(list=lambda **kw: _Page(self.products), create=self.create_product,
             modify=lambda pid, **kw: self.modified_products.append((pid, kw)), retrieve=self.retrieve_product)
-        self.Price = SimpleNamespace(list=self.list_prices, create=self.create_price)
+        self.Price = SimpleNamespace(list=self.list_prices, create=self.create_price, retrieve=self.retrieve_price)
     def retrieve_product(self, pid):
         return next(p for p in self.products if p.id == pid)
     def create_product(self, **kwargs):
-        row = SimpleNamespace(id=f"prod_{len(self.created_products)+1}", metadata=kwargs["metadata"], tax_code=kwargs.get("tax_code"))
+        row = SimpleNamespace(id=f"prod_{len(self.created_products)+1}", metadata=kwargs["metadata"], tax_code=kwargs.get("tax_code"), active=True)
         self.created_products.append((kwargs, row)); self.products.append(row); return row
     def list_prices(self, **kwargs): return _Page([p for p in self.prices if p.lookup_key in kwargs["lookup_keys"]])
     def create_price(self, **kwargs):
-        row = SimpleNamespace(id=f"price_{len(self.created_prices)+1}", lookup_key=kwargs["lookup_key"])
+        row = SimpleNamespace(id=f"price_{len(self.prices)+1}", product=kwargs["product"], lookup_key=kwargs["lookup_key"],
+            unit_amount=kwargs["unit_amount"], currency=kwargs["currency"], recurring=kwargs.get("recurring"),
+            tax_behavior=kwargs["tax_behavior"], metadata=kwargs["metadata"], active=True)
         self.created_prices.append((kwargs, row)); self.prices.append(row); return row
+    def retrieve_price(self, pid):
+        import stripe
+        try: return next(p for p in self.prices if p.id == pid)
+        except StopIteration: raise stripe.error.InvalidRequestError("missing", None, code="resource_missing", http_status=404)
 
 
 def test_sync_is_idempotent_and_changed_price_creates_new_version(tmp_path, monkeypatch):
@@ -64,7 +70,7 @@ def test_sync_is_idempotent_and_changed_price_creates_new_version(tmp_path, monk
     fake = _Stripe()
     monkeypatch.setattr(stripe_service, "_stripe", lambda: fake)
     with override_settings(DCM_BILLING_APP="maana", DCM_BILLING_FILE=path):
-        assert stripe_service.sync_plans() == [("monthly", "v1")]
+        assert stripe_service.sync_plans() == [("monthly", "created:v1")]
         assert stripe_service.sync_plans() == [("monthly", "unchanged")]
         assert len(fake.created_prices) == 1
         import yaml
@@ -72,7 +78,7 @@ def test_sync_is_idempotent_and_changed_price_creates_new_version(tmp_path, monk
         data["plans"][0]["amount_cents"] = 1800
         data["plans"][0]["tax_code"] = "txcd_20090000"
         path.write_text(yaml.safe_dump(data), encoding="utf-8")
-        assert stripe_service.sync_plans() == [("monthly", "v2")]
+        assert stripe_service.sync_plans() == [("monthly", "created:v2")]
     assert [p.lookup_key for p in StripePrice.objects.order_by("version")] == ["maana:monthly:v1", "maana:monthly:v2"]
     assert len(fake.created_prices) == 2
     assert len(fake.created_products) == 2  # the changed tax code opened a new Product

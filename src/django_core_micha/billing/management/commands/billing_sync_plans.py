@@ -8,9 +8,13 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true")
 
     def handle(self, *args, **options):
-        from django_core_micha.billing.stripe_service import sync_plans
+        from django_core_micha.billing.stripe_service import PlanSyncError, sync_plans
         try:
             for key, result in sync_plans(dry_run=options["dry_run"]):
                 self.stdout.write(f"{key}: {result}")
         except Exception as exc:
+            if isinstance(exc, PlanSyncError):
+                for key, result in getattr(exc, "completed", []):
+                    self.stdout.write(f"{key}: {result}")
+                raise CommandError(f"billing sync failed: {exc}") from None
             raise CommandError(f"billing sync failed ({type(exc).__name__})") from None

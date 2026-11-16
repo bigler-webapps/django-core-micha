@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
 
@@ -37,6 +37,130 @@ def stripe_fingerprint(plan, currency="usd"):
     return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+class PlanSyncError(RuntimeError):
+    """A plan could not be mapped to a verified, usable Stripe price."""
+
+
+def _stripe_missing_resource(exc):
+    """Only Stripe's explicit 404 resource_missing response permits reconciliation."""
+    try:
+        import stripe
+        error_types = (stripe.error.InvalidRequestError,)
+    except (ImportError, AttributeError):
+        error_types = ()
+    return (isinstance(exc, error_types) and getattr(exc, "code", None) == "resource_missing"
+            and getattr(exc, "http_status", getattr(exc, "status_code", None)) == 404)
+
+
+def _object(value):
+    value = _dict(value)
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "__dict__"):
+        return _dict(vars(value))
+    return value
+
+
+def _plan_product(stripe, product_id, *, app, plan, required=True):
+    try:
+        product = _object(stripe.Product.retrieve(product_id))
+    except Exception as exc:
+        if _stripe_missing_resource(exc):
+            if required:
+                raise PlanSyncError("stored product is missing") from None
+            return None
+        raise
+    if not isinstance(product, dict) or product.get("deleted") or product.get("active") is not True:
+        raise PlanSyncError("product is inactive or deleted")
+    metadata = _dict(product.get("metadata") or {})
+    if metadata.get("app") != app or metadata.get("plan_key") != plan.key:
+        raise PlanSyncError("product metadata does not match app and plan")
+    if product.get("tax_code") != plan.tax_code:
+        raise PlanSyncError("product tax code does not match plan")
+    return product
+
+
+def _verify_plan_price(stripe, price, *, app, plan, currency, lookup_key, product_id=None):
+    price = _object(price)
+    if not isinstance(price, dict):
+        raise PlanSyncError("Stripe returned an unreadable price")
+    if price.get("active") is not True:
+        raise PlanSyncError("price is inactive")
+    if price.get("lookup_key") != lookup_key:
+        raise PlanSyncError("price lookup key does not match plan version")
+    expected_product = price.get("product")
+    if isinstance(expected_product, dict):
+        expected_product = expected_product.get("id")
+    if not expected_product or (product_id and expected_product != product_id):
+        raise PlanSyncError("price product does not match stored mapping")
+    if str(price.get("currency", "")).lower() != currency.lower():
+        raise PlanSyncError("price currency does not match plan")
+    if price.get("unit_amount") != plan.amount_cents:
+        raise PlanSyncError("price amount does not match plan")
+    recurring = price.get("recurring")
+    if plan.kind in ("subscription", "continuation"):
+        if (not isinstance(recurring, dict) or recurring.get("interval") != plan.interval
+                or recurring.get("interval_count", 1) != 1
+                or recurring.get("usage_type", "licensed") != "licensed"):
+            raise PlanSyncError("price recurrence does not match plan")
+    elif recurring not in (None, {}):
+        raise PlanSyncError("one-time plan has a recurring price")
+    if price.get("tax_behavior") != "exclusive":
+        raise PlanSyncError("price tax behavior does not match plan")
+    metadata = _dict(price.get("metadata") or {})
+    expected_version = lookup_key.rsplit(":v", 1)[-1]
+    if (metadata.get("app") != app or metadata.get("plan_key") != plan.key
+            or metadata.get("version") != expected_version):
+        raise PlanSyncError("price metadata does not match app, plan and version")
+    _plan_product(stripe, expected_product, app=app, plan=plan)
+    return price
+
+
+def _lookup_plan_price(stripe, *, app, plan, currency, lookup_key):
+    rows = list(stripe.Price.list(lookup_keys=[lookup_key], limit=100).auto_paging_iter())
+    if len(rows) > 1:
+        raise PlanSyncError("lookup key returned multiple prices")
+    if not rows:
+        return None
+    return _verify_plan_price(stripe, rows[0], app=app, plan=plan, currency=currency,
+                              lookup_key=lookup_key)
+
+
+def _find_plan_product(stripe, *, app, plan, historical_product_ids=()):
+    matches = []
+    for product in stripe.Product.list(limit=100).auto_paging_iter():
+        data = _object(product)
+        metadata = _dict(data.get("metadata") or {}) if isinstance(data, dict) else {}
+        if metadata.get("app") == app and metadata.get("plan_key") == plan.key:
+            matches.append(data)
+    usable = [p for p in matches if not p.get("deleted") and p.get("active") is True
+              and p.get("tax_code") == plan.tax_code]
+    if any(p.get("deleted") or p.get("active") is not True for p in matches):
+        raise PlanSyncError("matching product is inactive or deleted")
+    if any(p.get("tax_code") != plan.tax_code and p.get("id") not in historical_product_ids
+           for p in matches):
+        raise PlanSyncError("matching product tax code does not match plan")
+    if len(usable) > 1:
+        raise PlanSyncError("multiple usable products match app and plan metadata")
+    return usable[0] if usable else None
+
+
+def _create_plan_product(stripe, *, app, plan, version):
+    return stripe.Product.create(name=plan.name, tax_code=plan.tax_code,
+        metadata={"app": app, "plan_key": plan.key},
+        idempotency_key=f"dcm-plan-product:{app}:{plan.key}:v{version}")
+
+
+def _create_plan_price(stripe, *, app, plan, currency, lookup_key, product_id, version):
+    args = {"product": product_id, "unit_amount": plan.amount_cents, "currency": currency,
+            "lookup_key": lookup_key, "tax_behavior": "exclusive",
+            "metadata": {"app": app, "plan_key": plan.key, "version": str(version)},
+            "idempotency_key": f"dcm-plan-price:{app}:{plan.key}:v{version}"}
+    if plan.kind in ("subscription", "continuation"):
+        args["recurring"] = {"interval": plan.interval}
+    return stripe.Price.create(**args)
+
+
 def sync_plans(*, dry_run=False):
     """Ensure product and immutable versioned prices exist for every declared plan."""
     cfg = load_billing_config()
@@ -46,46 +170,100 @@ def sync_plans(*, dry_run=False):
     app = cfg.app
     result = []
     for plan in cfg.plans:
-        fp = stripe_fingerprint(plan, cfg.currency)
-        current = StripePrice.objects.filter(app=app, plan_key=plan.key).order_by("-version").first()
-        if current and current.fingerprint == fp:
-            result.append((plan.key, "unchanged"))
-            continue
-        product_id = current.stripe_product_id if current else ""
-        if not product_id:
-            products = stripe.Product.list(limit=100)
-            for product in products.auto_paging_iter():
-                metadata = _dict(getattr(product, "metadata", {}))
-                if metadata.get("app") == app and metadata.get("plan_key") == plan.key:
-                    product_id = product.id
-                    break
-        if not product_id:
-            product = stripe.Product.create(name=plan.name, tax_code=plan.tax_code,
-                metadata={"app": app, "plan_key": plan.key})
-            product_id = product.id
-        if current and product_id:
-            remote_product = _dict(stripe.Product.retrieve(product_id))
-            existing_tax_code = remote_product.get("tax_code") if isinstance(remote_product, dict) else getattr(remote_product, "tax_code", None)
-            if existing_tax_code and existing_tax_code != plan.tax_code:
-                product_id = stripe.Product.create(name=plan.name, tax_code=plan.tax_code,
-                    metadata={"app": app, "plan_key": plan.key}).id
+        try:
+            with transaction.atomic():
+                current = (StripePrice.objects.select_for_update().filter(app=app, plan_key=plan.key)
+                           .order_by("-version").first())
+                historical_product_ids = set(StripePrice.objects.filter(app=app, plan_key=plan.key)
+                                             .exclude(pk=current.pk if current else None)
+                                             .values_list("stripe_product_id", flat=True))
+                fp = stripe_fingerprint(plan, cfg.currency)
+                if current and current.fingerprint == fp:
+                    try:
+                        remote_price = stripe.Price.retrieve(current.stripe_price_id)
+                    except Exception as exc:
+                        if not _stripe_missing_resource(exc):
+                            raise
+                    else:
+                        _verify_plan_price(stripe, remote_price, app=app, plan=plan,
+                            currency=cfg.currency, lookup_key=current.lookup_key,
+                            product_id=current.stripe_product_id)
+                        result.append((plan.key, "unchanged"))
+                        continue
+                    # The current price is confirmed missing in this account. Reconcile its same version.
+                    replacement = _lookup_plan_price(stripe, app=app, plan=plan, currency=cfg.currency,
+                                                     lookup_key=current.lookup_key)
+                    if replacement is None:
+                        product = _find_plan_product(stripe, app=app, plan=plan,
+                                                     historical_product_ids=historical_product_ids)
+                        if product is None:
+                            product = _create_plan_product(stripe, app=app, plan=plan, version=current.version)
+                        product_id = _object(product)["id"]
+                        price = _create_plan_price(stripe, app=app, plan=plan, currency=cfg.currency,
+                            lookup_key=current.lookup_key, product_id=product_id, version=current.version)
+                        replacement = _verify_plan_price(stripe, price, app=app, plan=plan,
+                            currency=cfg.currency, lookup_key=current.lookup_key, product_id=product_id)
+                    product_id = replacement["product"]
+                    if isinstance(product_id, dict):
+                        product_id = product_id["id"]
+                    current.stripe_price_id = replacement["id"]
+                    current.stripe_product_id = product_id
+                    current.save(update_fields=("stripe_price_id", "stripe_product_id"))
+                    result.append((plan.key, f"repaired:v{current.version}"))
+                    continue
+
+                version = (current.version + 1) if current else 1
+                lookup_key = f"{app}:{plan.key}:v{version}"
+                existing = _lookup_plan_price(stripe, app=app, plan=plan, currency=cfg.currency,
+                                              lookup_key=lookup_key)
+                if existing is not None:
+                    product_id = existing.get("product")
+                    if isinstance(product_id, dict):
+                        product_id = product_id.get("id")
+                    price = existing
+                else:
+                    product = None
+                    if current:
+                        try:
+                            product = _plan_product(stripe, current.stripe_product_id, app=app, plan=plan,
+                                                    required=False)
+                        except PlanSyncError as exc:
+                            if str(exc) != "product tax code does not match plan":
+                                raise
+                    if product is None:
+                        prior_ids = historical_product_ids | ({current.stripe_product_id} if current else set())
+                        product = _find_plan_product(stripe, app=app, plan=plan, historical_product_ids=prior_ids)
+                    if product is None:
+                        product = _create_plan_product(stripe, app=app, plan=plan, version=version)
+                    product_id = _object(product)["id"]
+                    price = _create_plan_price(stripe, app=app, plan=plan, currency=cfg.currency,
+                        lookup_key=lookup_key, product_id=product_id, version=version)
+                    price = _verify_plan_price(stripe, price, app=app, plan=plan,
+                        currency=cfg.currency, lookup_key=lookup_key, product_id=product_id)
+                try:
+                    # Every fingerprint version is a new immutable local row; older subscriptions keep
+                    # their original lookup and mapping for audit and lifecycle processing.
+                    with transaction.atomic():
+                        StripePrice.objects.create(app=app, plan_key=plan.key, version=version,
+                            lookup_key=lookup_key, fingerprint=fp, stripe_product_id=product_id,
+                            stripe_price_id=price["id"])
+                except IntegrityError:
+                    # A concurrent sync may have committed this version. Never bind without verifying it.
+                    winner = StripePrice.objects.filter(app=app, plan_key=plan.key, version=version).first()
+                    if not winner or winner.lookup_key != lookup_key or winner.fingerprint != fp:
+                        raise PlanSyncError("concurrent plan mapping conflicts with this plan") from None
+                    check = stripe.Price.retrieve(winner.stripe_price_id)
+                    _verify_plan_price(stripe, check, app=app, plan=plan, currency=cfg.currency,
+                        lookup_key=lookup_key, product_id=winner.stripe_product_id)
+                result.append((plan.key, f"created:v{version}"))
+        except Exception as exc:
+            if isinstance(exc, PlanSyncError):
+                reason = str(exc)
             else:
-                stripe.Product.modify(product_id, name=plan.name)
-        version = (current.version + 1) if current else 1
-        lookup_key = f"{app}:{plan.key}:v{version}"
-        remote = list(stripe.Price.list(lookup_keys=[lookup_key], limit=1).data)
-        if remote:
-            price = remote[0]
-        else:
-            args = {"product": product_id, "unit_amount": plan.amount_cents, "currency": cfg.currency,
-                    "lookup_key": lookup_key, "tax_behavior": "exclusive",
-                    "metadata": {"app": app, "plan_key": plan.key, "version": str(version)}}
-            if plan.kind in ("subscription", "continuation"):
-                args["recurring"] = {"interval": plan.interval}
-            price = stripe.Price.create(**args)
-        StripePrice.objects.create(app=app, plan_key=plan.key, version=version, lookup_key=lookup_key,
-            fingerprint=fp, stripe_product_id=product_id, stripe_price_id=price.id)
-        result.append((plan.key, f"v{version}"))
+                reason = type(exc).__name__
+            error = PlanSyncError(f"{plan.key}: {reason}")
+            error.completed = result
+            raise error from None
     return result
 
 
