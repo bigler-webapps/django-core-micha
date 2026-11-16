@@ -2,7 +2,9 @@
 
 ## Part A — Envelope
 
-**Target:** django-core-micha, `main`. **Tier:** 3 — shared billing core.
+**Target:** django-core-micha, `main`.
+
+Tier 3 — shared billing core.
 
 ### Goal and scope
 
@@ -37,3 +39,7 @@ Operator approved drafting and implementation of the separately scoped shared-le
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-16: "Ich gebe die Ausarbeitung und Umsetzung des separaten Shared-Core-Work-Orders frei. Bitte fahre danach mit MAANA-APP-23 fort."
+
+## Completion
+
+Configured implementer: codex/gpt-6-luna, OpenAI, workspace-write. Independent review round 1: envelope gpt-6.1-terra, regression/duplication/tests/security gpt-6-luna; one test defect accepted and fixed. Round 2: same models; two test defects accepted and fixed after the closing review, with no third review. Post-fix tests: 41 passed using source on PYTHONPATH (test_domain, test_access_and_retention, test_review_fixes). SQLite does not establish concurrent row-lock behavior; production PostgreSQL concurrency remains unverified. The implementer's initial pytest invocation failed before collection; an initial parent invocation loaded the installed package and was superseded by the source-path run.

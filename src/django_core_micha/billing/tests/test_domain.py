@@ -55,6 +55,87 @@ def test_token_grant_expiry_purchase_and_idempotent_debits():
     assert token_balance(u)==7
     assert TokenEntry.objects.filter(kind="expiry").count()==1
 
+def test_trial_first_debits_trial_before_expiring_code_grants_and_handles_partial_debits():
+    u=user("trial-first@example.com"); now=timezone.now()
+    code=grant_tokens(u,4,expires_at=now+timedelta(days=1),reference="code-grant",purpose="benefit_code")
+    trial=grant_tokens(u,3,expires_at=None,reference="trial-grant",purpose="trial")
+
+    debit_tokens(u,2,purpose="chat",reference="trial-first-1",precedence="trial_first")
+    trial.refresh_from_db(); code.refresh_from_db()
+    assert trial.remaining==1 and code.remaining==4
+
+    debit_tokens(u,3,purpose="chat",reference="trial-first-2",precedence="trial_first")
+    trial.refresh_from_db(); code.refresh_from_db()
+    assert trial.remaining==0 and code.remaining==2
+
+@pytest.mark.parametrize("kind", ["purchase", "adjustment"])
+def test_trial_first_precedes_other_expiring_credit_kinds(kind):
+    u=user(f"trial-before-{kind}@example.com")
+    trial=grant_tokens(u,2,reference="trial",purpose="trial")
+    other=TokenEntry.objects.create(account=trial.account,kind=kind,amount=2,remaining=2,expires_at=timezone.now()+timedelta(days=1),reference=f"other-{kind}")
+    debit_tokens(u,1,purpose="chat",reference="trial-before-other",precedence="trial_first")
+    trial.refresh_from_db(); other.refresh_from_db()
+    assert (trial.remaining,other.remaining)==(1,2)
+
+def test_default_debit_precedence_stays_expiration_first_for_all_credit_kinds():
+    u=user("default-order@example.com"); now=timezone.now()
+    code=grant_tokens(u,2,expires_at=now+timedelta(days=1),reference="default-code",purpose="benefit_code")
+    trial=grant_tokens(u,2,reference="default-trial",purpose="trial")
+    purchase=TokenEntry.objects.create(account=trial.account,kind="purchase",amount=2,remaining=2,expires_at=now+timedelta(days=2),reference="default-purchase")
+    adjustment=TokenEntry.objects.create(account=trial.account,kind="adjustment",amount=2,remaining=2,expires_at=now+timedelta(days=3),reference="default-adjustment")
+
+    debit_tokens(u,2,purpose="chat",reference="default-expiry-first")
+    for entry in (code,trial,purchase,adjustment): entry.refresh_from_db()
+    assert code.remaining==0
+    assert (trial.remaining,purchase.remaining,adjustment.remaining)==(2,2,2)
+    debit_tokens(u,3,purpose="chat",reference="default-next-credits")
+    for entry in (trial,purchase,adjustment): entry.refresh_from_db()
+    assert (trial.remaining,purchase.remaining,adjustment.remaining)==(2,0,1)
+
+def test_trial_first_excludes_expired_credits_and_insufficient_debit_is_atomic():
+    u=user("trial-expiry@example.com"); now=timezone.now()
+    expired=grant_tokens(u,5,expires_at=now-timedelta(seconds=1),reference="expired-trial",purpose="trial")
+    code=grant_tokens(u,3,expires_at=now+timedelta(days=1),reference="live-code",purpose="benefit_code")
+
+    with pytest.raises(InsufficientTokens):
+        debit_tokens(u,4,purpose="chat",reference="too-large",precedence="trial_first")
+    expired.refresh_from_db(); code.refresh_from_db()
+    assert expired.remaining==5 and code.remaining==3
+    assert not TokenEntry.objects.filter(account=code.account,kind="debit",reference="too-large").exists()
+
+    debit_tokens(u,3,purpose="chat",reference="live-only",precedence="trial_first")
+    expired.refresh_from_db(); code.refresh_from_db()
+    assert expired.remaining==5 and code.remaining==0
+
+def test_debit_precedence_rejects_invalid_values_before_creating_an_account():
+    from django_core_micha.billing.models import TokenAccount
+    u=user("invalid-order@example.com")
+    with pytest.raises(ValueError,match="unsupported_debit_precedence"):
+        debit_tokens(u,1,purpose="chat",reference="invalid-order",precedence="trialfirst")
+    assert not TokenAccount.objects.filter(user=u).exists()
+
+def test_trial_first_preserves_debit_retry_and_reference_conflict_semantics():
+    u=user("trial-retry@example.com")
+    trial=grant_tokens(u,5,reference="retry-trial",purpose="trial")
+    debit=debit_tokens(u,3,purpose="chat",reference="retry-debit",precedence="trial_first")
+    assert debit_tokens(u,3,purpose="ignored-on-retry",reference="retry-debit",precedence="trial_first").pk==debit.pk
+    trial.refresh_from_db(); assert trial.remaining==2
+    with pytest.raises(ValueError,match="debit_reference_reused"):
+        debit_tokens(u,2,purpose="chat",reference="retry-debit",precedence="trial_first")
+    trial.refresh_from_db(); assert trial.remaining==2
+
+def test_trial_first_keeps_personal_accounts_and_team_pools_isolated():
+    owner=user("pool-owner@example.com"); other=user("pool-other@example.com"); now=timezone.now()
+    package=TeamPackage.objects.create(owner=owner,plan_key="team",seats=1,starts_at=now,ends_at=now+timedelta(days=30),stripe_ref="trial-first-team")
+    owner_trial=grant_tokens(owner,2,reference="owner-trial",purpose="trial")
+    other_trial=grant_tokens(other,3,reference="other-trial",purpose="trial")
+    pool_trial=grant_tokens(package,4,reference="pool-trial",purpose="trial")
+
+    debit_tokens(owner,2,purpose="chat",reference="owner-only",precedence="trial_first")
+    debit_tokens(package,3,purpose="team-chat",reference="pool-only",precedence="trial_first")
+    owner_trial.refresh_from_db(); other_trial.refresh_from_db(); pool_trial.refresh_from_db()
+    assert (owner_trial.remaining,other_trial.remaining,pool_trial.remaining)==(0,3,1)
+
 def test_cost_record_and_report_has_only_aggregates():
     from django.test import RequestFactory
     u=user("private@example.com")

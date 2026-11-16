@@ -72,9 +72,10 @@ def credit_purchase(owner,amount,*,reference):
         row,created=TokenEntry.objects.get_or_create(account=account,kind="purchase",reference=reference,defaults={"amount":amount,"remaining":amount})
         return row
 
-def debit_tokens(owner,amount,*,purpose,reference):
+def debit_tokens(owner,amount,*,purpose,reference,precedence="expiration_first"):
     if type(amount) is not int or amount<=0: raise ValueError("amount must be positive")
     if not reference: raise ValueError("a debit needs a reference")
+    if precedence not in ("expiration_first","trial_first"): raise ValueError("unsupported_debit_precedence")
     account=_account(owner)
     with transaction.atomic():
         account=TokenAccount.objects.select_for_update().get(pk=account.pk)
@@ -84,7 +85,16 @@ def debit_tokens(owner,amount,*,purpose,reference):
             return old
         now=timezone.now()
         from django.db.models import F
-        credits=list(TokenEntry.objects.select_for_update().filter(account=account,kind__in=("grant","purchase","adjustment"),remaining__gt=0).filter(models_q_expiry(now)).order_by(F("expires_at").asc(nulls_last=True),"created_at","pk"))
+        credits_query=TokenEntry.objects.select_for_update().filter(account=account,kind__in=("grant","purchase","adjustment"),remaining__gt=0).filter(models_q_expiry(now))
+        if precedence=="trial_first":
+            from django.db.models import Case, IntegerField, Value, When
+            credits_query=credits_query.annotate(_trial_priority=Case(
+                When(kind="grant",purpose="trial",then=Value(0)),
+                default=Value(1),output_field=IntegerField(),
+            )).order_by("_trial_priority",F("expires_at").asc(nulls_last=True),"created_at","pk")
+        else:
+            credits_query=credits_query.order_by(F("expires_at").asc(nulls_last=True),"created_at","pk")
+        credits=list(credits_query)
         if sum(x.remaining for x in credits)<amount: raise InsufficientTokens("insufficient_tokens")
         left=amount
         for grant in credits:
