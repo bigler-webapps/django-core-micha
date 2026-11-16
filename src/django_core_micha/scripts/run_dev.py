@@ -1,7 +1,9 @@
 # webapp-management/src/django_core_micha/scripts/run_dev.py
 import argparse
 import builtins
+import contextlib
 import functools
+import re
 import subprocess
 import sys
 import shutil
@@ -36,6 +38,158 @@ OPTIONAL_LOCAL_SERVICE_PROFILES = {
     "java": ["java_backend"],
 }
 
+_COMPOSE_MISSING_VARIABLE_RE = re.compile(
+    r"(?:\bvariables?\s+(?:is|are)\s+not\s+set\b|"
+    r"\b(?:required|missing|unset)\s+variables?\b|"
+    r"\bvariables?\b[^\n]{0,160}\b(?:missing|not set|not been set|unset|required)\b|"
+    r"\b(?:invalid|failed|error)\b[^\n]{0,160}\binterpolat(?:ion|ing)\b|"
+    r"(?:^|[\\/])\.env(?:\.[\w-]+)?(?:\s+line\s+\d+|:).*(?:error|invalid|unexpected))",
+    re.IGNORECASE,
+)
+_ENV_DRIFT_WARNING_RE = re.compile(
+    r"^\.env (?:is missing key\(s\)|disagrees with project\.yaml)"
+)
+_COMPOSE_SERVICE_LOG_RE = re.compile(r"^\s*\S+\s+\|\s")
+
+
+def _is_compose_command(command):
+    if not isinstance(command, (list, tuple)) or not command:
+        return False
+    executable = str(command[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if executable in {"docker-compose", "docker-compose.exe"}:
+        return True
+    return executable in {"docker", "docker.exe"} and len(command) > 1 and command[1] == "compose"
+
+
+def _redacted_compose_line(line, warning_number):
+    if line.endswith("\r\n"):
+        ending = "\r\n"
+    elif line.endswith("\n"):
+        ending = "\n"
+    else:
+        ending = ""
+    level = "ERROR" if re.search(r"\b(?:error|invalid|required|unexpected)\b", line, re.I) and not re.search(r"\bwarn(?:ing)?\b", line, re.I) else "WARN"
+    return f"[{level}] {warning_number} Compose variable diagnostic(s) redacted; see the app's secrets.yaml.{ending}"
+
+
+def _forward_compose_output(stream, target, counts):
+    for line in iter(stream.readline, ""):
+        if not _COMPOSE_SERVICE_LOG_RE.match(line) and _COMPOSE_MISSING_VARIABLE_RE.search(line):
+            counts["compose"] += 1
+            line = _redacted_compose_line(line, counts["compose"])
+        target.write(line)
+        target.flush()
+
+
+def _run_compose_command(command, *, cwd=None, check=True):
+    """Run Compose while forwarding output and redacting missing-variable diagnostics."""
+    # Django's interactive prompts do not end in a newline. They are application
+    # output, so keep stdout attached to the terminal while filtering diagnostics.
+    interactive_migrations = "exec" in command and "makemigrations" in command
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        shell=(sys.platform == "win32"),
+        stdout=None if interactive_migrations else subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    counts = {"compose": 0}
+    readers = [threading.Thread(target=_forward_compose_output, args=(process.stderr, sys.stderr, counts), daemon=True)]
+    if not interactive_migrations:
+        readers.append(threading.Thread(target=_forward_compose_output, args=(process.stdout, sys.stdout, counts), daemon=True))
+    for reader in readers:
+        reader.start()
+    try:
+        returncode = process.wait()
+    except BaseException:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
+    finally:
+        for reader in readers:
+            reader.join(timeout=5)
+    if check and returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+    return returncode
+
+
+def emit_drift_warnings(warnings):
+    """Keep environment-file drift useful without exposing declared variable names."""
+    redacted_count = 0
+    for warning in warnings:
+        if _ENV_DRIFT_WARNING_RE.match(warning):
+            redacted_count += 1
+        elif warning.startswith("fix with `generate-env --env "):
+            continue
+        else:
+            print(f"[WARN] {warning}")
+    if redacted_count:
+        print(
+            f"[WARN] {redacted_count} environment-file drift warning(s) redacted; "
+            "see the app's secrets.yaml."
+        )
+
+
+class _EnvGenerationOutput:
+    """Filter known generator diagnostics without inspecting the environment file."""
+
+    def __init__(self, target):
+        self.target = target
+        self.pending = ""
+        self.redacting_detail = False
+
+    def write(self, text):
+        self.pending += text
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            self._line(line, "\n")
+        return len(text)
+
+    def _line(self, line, ending):
+        if "Error parsing" in line:
+            self.redacting_detail = True
+            self.target.write("[WARN] Environment configuration diagnostic redacted; see the app's secrets.yaml." + ending)
+            return
+        if self.redacting_detail:
+            if not re.match(r"^\s*\[(?:INFO|WARN|ERROR)\]", line):
+                return
+            self.redacting_detail = False
+        if (("Skipping " in line and " from " in line) or "Missing value for " in line or
+                "SECRETS_CONTEXT" in line or _COMPOSE_MISSING_VARIABLE_RE.search(line)):
+            self.target.write("[WARN] Environment variable diagnostic redacted; see the app's secrets.yaml." + ending)
+        else:
+            self.target.write(line + ending)
+
+    def flush(self):
+        self.target.flush()
+
+    def finish(self):
+        if self.pending:
+            self._line(self.pending, "")
+            self.pending = ""
+        self.target.flush()
+
+
+def run_env_generation():
+    stdout, stderr = _EnvGenerationOutput(sys.stdout), _EnvGenerationOutput(sys.stderr)
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            generate_env.main()
+    except Exception:
+        print("[ERROR] Environment generation failed; see the app's configuration.", file=sys.stderr)
+        raise SystemExit(1) from None
+    finally:
+        stdout.finish()
+        stderr.finish()
+
 
 def normalize_project_name(name: str) -> str:
     normalized = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in name.lower())
@@ -54,12 +208,16 @@ def run_command(command, cwd=None, ignore_errors=False, shell=False, capture_out
         if capture_output:
             return subprocess.Popen(command, cwd=cwd, shell=use_shell, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
-        subprocess.run(command, check=True, cwd=cwd, shell=use_shell)
-    except subprocess.CalledProcessError as e:
-        if ignore_errors:
-            print(f"[WARN] Command failed (ignored): {e}")
+        if not capture_output and _is_compose_command(command):
+            _run_compose_command(command, cwd=cwd, check=True)
         else:
-            print(f"[ERROR] Command failed: {e}")
+            subprocess.run(command, check=True, cwd=cwd, shell=use_shell)
+    except subprocess.CalledProcessError as e:
+        detail = f"with exit code {e.returncode}" if _is_compose_command(command) else str(e)
+        if ignore_errors:
+            print(f"[WARN] Command failed (ignored): {detail}")
+        else:
+            print(f"[ERROR] Command failed: {detail}")
             sys.exit(e.returncode)
 
 def load_compose_service_names(compose_files_args):
@@ -241,15 +399,9 @@ def stream_docker_logs(compose_files_args, services):
     
     try:
         # Explicitly piping stdout/stderr to the current process's streams
-        subprocess.run(
-            cmd, 
-            check=False, 
-            shell=(sys.platform == "win32"),
-            stdout=sys.stdout,
-            stderr=sys.stderr
-        )
-    except Exception as e:
-        print(f"[WARN] Log stream interrupted: {e}")
+        _run_compose_command(cmd, check=False)
+    except Exception:
+        print("[WARN] Log stream interrupted.")
 
 
 def frontend_needs_pnpm_install(node_modules_exists, marker_mtime, source_mtimes):
@@ -632,6 +784,21 @@ def main():
         action="store_true",
         help="Run in isolated spool mode with its own compose project name and docker-compose.spool.yml.",
     )
+    parser.add_argument(
+        "--test-management",
+        action="store_true",
+        help="Bootstrap the opt-in disposable local test-management environment.",
+    )
+    parser.add_argument(
+        "--test-management-resume",
+        metavar="INSTANCE",
+        help="Explicitly resume a stopped isolated test-management instance.",
+    )
+    parser.add_argument(
+        "--test-management-stop",
+        metavar="INSTANCE",
+        help="Stop a verified isolated instance without deleting its data.",
+    )
 
     args = parser.parse_args()
 
@@ -676,6 +843,28 @@ def main():
         os.environ["MEDIA_VOLUME_NAME"] = f"{project_name}_media_volume"
         os.environ["EXCEL_VOLUME_NAME"] = f"{project_name}_excel_volume"
 
+    if (args.test_management_resume or args.test_management_stop) and not args.test_management:
+        parser.error("Test-management instance operations require --test-management.")
+    if args.test_management_resume and args.test_management_stop:
+        parser.error("Choose either test-management resume or stop.")
+    if args.test_management:
+        if (args.edge or args.env or args.vite or args.watch or args.spool or args.compose_files or
+                args.compose_project_name or args.celery or args.java or args.migrate or args.makemigrations or args.translate or
+                args.refresh or args.refresh_deps):
+            parser.error("Test-management startup cannot be combined with other modes or maintenance options.")
+        from django_core_micha.scripts.isolated_test_start import IsolationError, resume_isolated_instance, start_isolated_instance, stop_isolated_instance
+        try:
+            if args.test_management_stop:
+                stop_isolated_instance(BASE_DIR, args.test_management_stop)
+            elif args.test_management_resume:
+                resume_isolated_instance(BASE_DIR, args.test_management_resume)
+            else:
+                start_isolated_instance(BASE_DIR)
+        except IsolationError as exc:
+            print(f"[ERROR] {exc}")
+            raise SystemExit(1) from None
+        return
+
     os.environ["UV_FLAGS"] = uv_flags_value
     if should_build:
         if uv_flags_value:
@@ -688,14 +877,13 @@ def main():
 
     # DX-4: warn (never block) when .env has outlived project.yaml, or the local
     # venv has outlived requirements.txt. Silent on a clean start.
-    for warning in collect_drift_warnings(BASE_DIR, env_mode):
-        print(f"[WARN] {warning}")
+    emit_drift_warnings(collect_drift_warnings(BASE_DIR, env_mode))
 
     # --- SCHRITT 1: ENV GENERATION ---
     if FORCE_ENV:
         print(f"[INFO] Generating .env for {env_mode}...")
         sys.argv = ["generate-env", "--env", env_mode]
-        generate_env.main()
+        run_env_generation()
 
         frontend_env_path = frontend_dir / ".env"
         if frontend_dir.exists():
@@ -834,7 +1022,7 @@ def main():
                 print(f"[INFO] Streaming logs for {' & '.join(log_services)} (Ctrl+C to stop)...")
                 try:
                     cmd = ["docker-compose"] + compose_files_args + ["logs", "-f"] + log_services
-                    subprocess.run(cmd, check=True, shell=(sys.platform=="win32"))
+                    _run_compose_command(cmd, check=True)
                 except KeyboardInterrupt:
                     print("\n[INFO] Stopping containers...")
                     run_command(["docker-compose"] + compose_files_args + ["stop"])
@@ -844,7 +1032,7 @@ def main():
         try:
             # 2. Nur RELEVANTE Logs anzeigen (Main Thread blockiert hier)
             cmd = ["docker-compose"] + compose_files_args + ["logs", "-f"] + log_services
-            subprocess.run(cmd, check=True, shell=(sys.platform=="win32"))
+            _run_compose_command(cmd, check=True)
         except KeyboardInterrupt:
             print("\n[INFO] Stopping containers...")
             # 3. Aufräumen: Wenn du CTRL+C drückst, stoppen wir alles (wie beim normalen 'up')

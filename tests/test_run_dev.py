@@ -1,7 +1,12 @@
 """Tests for run-dev's celery auto-detection, the --java opt-in flag, and DCM-DX-5's
 UV_FLAGS/pnpm-drift/readiness/traefik-ownership pure functions."""
+import io
+import subprocess
+
+import pytest
 import yaml
 
+from django_core_micha.scripts import run_dev
 from django_core_micha.scripts.run_dev import (
     compute_active_local_profiles,
     load_compose_service_names,
@@ -215,3 +220,155 @@ def test_load_project_yaml_name_reads_project_name(tmp_path):
 
 def test_load_project_yaml_name_missing_file_returns_none(tmp_path):
     assert load_project_yaml_name(tmp_path) is None
+
+
+class _FakeComposeProcess:
+    def __init__(self, *, stdout="", stderr="", returncode=0):
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
+        self.returncode = returncode
+
+    def wait(self):
+        return self.returncode
+
+
+def test_run_command_redacts_compose_variable_warning_and_preserves_normal_error(monkeypatch, capsys):
+    process = _FakeComposeProcess(
+        stderr=(
+            'WARN[0000] The "SYNTHETIC_ENV_NAME" variable is not set. Defaulting to a blank string.\n'
+            "normal error line\n"
+        ),
+        returncode=17,
+    )
+    monkeypatch.setattr(run_dev.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(SystemExit) as exc_info:
+        run_dev.run_command(["docker-compose", "up"])
+
+    assert exc_info.value.code == 17
+    captured = capsys.readouterr()
+    assert "SYNTHETIC_ENV_NAME" not in captured.err
+    assert "1 Compose variable diagnostic(s) redacted; see the app's secrets.yaml." in captured.err
+    assert "normal error line" in captured.err
+
+
+def test_stream_docker_logs_redacts_compose_variable_warning(monkeypatch, capsys):
+    process = _FakeComposeProcess(
+        stdout='The "STREAM_ONLY_ENV" variable is not set. Defaulting to a blank string.\n',
+    )
+    monkeypatch.setattr(run_dev.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    run_dev.stream_docker_logs([], ["backend"])
+
+    captured = capsys.readouterr()
+    assert "STREAM_ONLY_ENV" not in captured.out
+    assert "Compose variable diagnostic(s) redacted; see the app's secrets.yaml." in captured.out
+
+
+def test_interactive_migration_prompt_keeps_stdout_attached(monkeypatch):
+    process = _FakeComposeProcess(stderr='The "SYNTHETIC_ENV_NAME" variable is not set.\n')
+    options = {}
+    def popen(*args, **kwargs):
+        options.update(kwargs)
+        return process
+    monkeypatch.setattr(run_dev.subprocess, "Popen", popen)
+    run_dev._run_compose_command(["docker-compose", "exec", "-T", "backend", "python", "manage.py", "makemigrations"])
+    assert options["stdout"] is None
+
+
+@pytest.mark.parametrize("line", [
+    "required variable SYNTHETIC_NAME is missing a value: required\n",
+    "invalid interpolation format for service: ${SYNTHETIC_NAME:?required}\n",
+    "./.env line 3: unexpected character in variable name SYNTHETIC_NAME\n",
+])
+def test_compose_redacts_other_variable_diagnostics(line):
+    output = io.StringIO()
+    run_dev._forward_compose_output(io.StringIO(line), output, {"compose": 0})
+    assert "SYNTHETIC_NAME" not in output.getvalue()
+    assert "secrets.yaml" in output.getvalue()
+    if "required variable" in line or "invalid interpolation" in line:
+        assert output.getvalue().startswith("[ERROR]")
+
+
+def test_literal_interpolation_in_an_ordinary_log_is_preserved():
+    line = "backend | rendered template contains ${user}\n"
+    output = io.StringIO()
+    run_dev._forward_compose_output(io.StringIO(line), output, {"compose": 0})
+    assert output.getvalue() == line
+
+
+def test_service_log_that_resembles_compose_diagnostic_is_preserved():
+    line = 'backend-1 | required variable describes an application rule\n'
+    output = io.StringIO()
+    run_dev._forward_compose_output(io.StringIO(line), output, {"compose": 0})
+    assert output.getvalue() == line
+
+
+def test_emit_drift_warnings_replaces_environment_variable_names(capsys):
+    run_dev.emit_drift_warnings([
+        ".env is missing key(s) project.yaml/secrets.yaml now declare (values not shown): DRIFT_ENV_NAME",
+        "fix with `generate-env --env local`",
+        "backend/.venv is missing pinned package(s): ordinary-package",
+    ])
+
+    output = capsys.readouterr().out
+    assert "DRIFT_ENV_NAME" not in output
+    assert "1 environment-file drift warning(s) redacted; see the app's secrets.yaml." in output
+    assert "ordinary-package" in output
+
+
+def test_env_generation_redacts_names_without_changing_exit_code(monkeypatch, capsys):
+    def fake_generator():
+        print("   [WARN] Missing value for SYNTHETIC_SECRET_NAME (using empty value)")
+        print("   [INFO] Skipping SYNTHETIC_SECRET_NAME from secrets.yaml (exclude_from_env)")
+        print("normal generation message")
+        raise SystemExit(17)
+
+    monkeypatch.setattr(run_dev.generate_env, "main", fake_generator)
+    with pytest.raises(SystemExit) as exit_info:
+        run_dev.run_env_generation()
+    assert exit_info.value.code == 17
+    output = capsys.readouterr().out
+    assert "SYNTHETIC_SECRET_NAME" not in output
+    assert "Environment variable diagnostic redacted" in output
+    assert "normal generation message" in output
+
+
+@pytest.mark.parametrize("resume", [None, "innoservice-tm-" + "a" * 32])
+def test_test_management_uses_isolated_launcher_before_ordinary_setup(monkeypatch, tmp_path, resume):
+    from django_core_micha.scripts import isolated_test_start
+    calls = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(run_dev.sys, "argv", ["run-dev", "--test-management"] + (["--test-management-resume", resume] if resume else []))
+    monkeypatch.setattr(isolated_test_start, "start_isolated_instance", lambda cwd: calls.append(("start", cwd)))
+    monkeypatch.setattr(isolated_test_start, "resume_isolated_instance", lambda cwd, project: calls.append(("resume", cwd, project)))
+    monkeypatch.setattr(run_dev, "collect_drift_warnings", lambda *args: pytest.fail("ordinary environment setup was reached"))
+    run_dev.main()
+    assert calls == ([("resume", tmp_path, resume)] if resume else [("start", tmp_path)])
+
+
+def test_test_management_stop_uses_isolated_launcher(monkeypatch, tmp_path):
+    from django_core_micha.scripts import isolated_test_start
+    calls = []
+    project = "innoservice-tm-" + "a" * 32
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(run_dev.sys, "argv", ["run-dev", "--test-management", "--test-management-stop", project])
+    monkeypatch.setattr(isolated_test_start, "stop_isolated_instance", lambda cwd, name: calls.append((cwd, name)))
+    monkeypatch.setattr(run_dev, "collect_drift_warnings", lambda *args: pytest.fail("ordinary environment setup was reached"))
+    run_dev.main()
+    assert calls == [(tmp_path, project)]
+
+
+@pytest.mark.parametrize("flags", [
+    ["--test-management-resume", "innoservice-tm-" + "a" * 32],
+    ["--test-management-stop", "innoservice-tm-" + "a" * 32],
+    ["--test-management", "--test-management-resume", "innoservice-tm-" + "a" * 32,
+     "--test-management-stop", "innoservice-tm-" + "a" * 32],
+    ["--test-management", "--migrate"],
+])
+def test_test_management_rejects_incompatible_cli_modes(monkeypatch, tmp_path, flags):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(run_dev.sys, "argv", ["run-dev", *flags])
+    with pytest.raises(SystemExit) as result:
+        run_dev.main()
+    assert result.value.code == 2

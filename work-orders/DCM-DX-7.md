@@ -24,6 +24,12 @@ Tier 3: a change inside shared core (`django-core-micha`), released as a patch v
 Risks: over-filtering could hide a useful startup error — only lines that name a variable from the
 environment file are redacted, and the redaction keeps the line's kind.
 
+Scope clarification approved by the operator on 2026-11-16: redact Compose and
+configuration diagnostics while preserving ordinary application logs. Arbitrary
+application output can itself contain environment names or values; without access
+to those names and values it cannot be identified reliably, and it is outside the
+guarantee. The earlier absolute-output wording is superseded by this clarification.
+
 Tests to write: a fixture compose warning naming a variable is printed redacted with the neutral
 hint; a normal error line passes unchanged; the exit code of a failing compose call is preserved.
 

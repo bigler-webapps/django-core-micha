@@ -14,6 +14,7 @@ INSTALLED_APPS = [
     "django_core_micha.terms",
     "django_core_micha.privacy",
     "django_core_micha.activity",
+    "django_core_micha.test_management",
     "django_core_micha.onboarding",
     "allauth",
     "allauth.account",

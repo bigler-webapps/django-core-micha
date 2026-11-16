@@ -1,0 +1,476 @@
+"""Validation helpers for the dedicated local test-management stack.
+
+These helpers intentionally do not launch containers. Startup remains disabled
+until runtime inspection and the database preflight have also succeeded.
+"""
+
+from pathlib import Path
+import json
+import ipaddress
+import os
+import queue
+import re
+import secrets
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+import yaml
+
+
+class IsolationError(ValueError):
+    pass
+
+
+_PROJECT = re.compile(r"^innoservice-tm-[0-9a-f]{32}$")
+
+
+def _docker_json(name: str, expression: str, *, env=None):
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{json " + expression + "}}", name],
+            check=True, capture_output=True, text=True, timeout=15, env=env,
+            shell=(sys.platform == "win32"),
+        )
+        return json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise IsolationError("Unable to inspect the isolated container.") from exc
+
+
+def _mountinfo(name: str, *, env=None) -> str:
+    try:
+        result = subprocess.run(["docker", "exec", name, "cat", "/proc/self/mountinfo"],
+                                check=True, capture_output=True, text=True, timeout=15, env=env,
+                                shell=(sys.platform == "win32"))
+        return result.stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise IsolationError("Unable to verify the isolated mount.") from exc
+
+
+def _has_mount(mountinfo: str, target: str) -> bool:
+    for line in mountinfo.splitlines():
+        left, separator, right = line.partition(" - ")
+        fields = left.split()
+        if separator and len(fields) > 4 and fields[4] == target and bool(right.split()):
+            return True
+    return False
+
+
+def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo):
+    """Verify actual per-instance volumes, loopback binding and exclusive network.
+
+    Docker inspection is restricted to named non-secret fields; container
+    environments and Compose-expanded configuration are never inspected.
+    """
+    if not _PROJECT.fullmatch(project):
+        raise IsolationError("Invalid isolated instance handle.")
+    backend, db = f"{project}-backend-1", f"{project}-db-1"
+    network = f"{project}_isolated"
+    try:
+        for name, service, image in ((backend, "backend", "innoservice-test-management:local"), (db, "db", "postgres:18")):
+            labels = inspect(name, ".Config.Labels")
+            if (labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != service or
+                    inspect(name, ".Config.Image") != image or inspect(name, ".State.Running") is not True or
+                    inspect(name, ".HostConfig.Privileged") is not False):
+                raise IsolationError("Container identity or state failed verification.")
+            networks = inspect(name, ".NetworkSettings.Networks")
+            if set(networks) != {network}:
+                raise IsolationError("Container network membership failed verification.")
+        if inspect(network, ".Internal") is not True:
+            raise IsolationError("The instance network is not internal.")
+        backend_id, db_id = inspect(backend, ".Id"), inspect(db, ".Id")
+        members = inspect(network, ".Containers")
+        if set(members) != {backend_id, db_id}:
+            raise IsolationError("The instance network has unexpected endpoints.")
+        db_address = str(ipaddress.ip_interface(members[db_id]["IPv4Address"]).ip)
+        if inspect(db, ".NetworkSettings.Networks")[network]["IPAddress"] != db_address:
+            raise IsolationError("The database network address does not match.")
+        mounts = inspect(backend, ".Mounts")
+        if len(mounts) != 3 or {item["Destination"] for item in mounts} != {"/app/backend", "/app/frontend_host/build_current", "/app/backend/media"}:
+            raise IsolationError("The backend mount list is not isolated.")
+        binds = [item for item in mounts if item["Destination"] != "/app/backend/media"]
+        if any(item["Type"] != "bind" or item["RW"] is not False for item in binds):
+            raise IsolationError("A backend source mount is not read-only.")
+        media = next(item for item in mounts if item["Destination"] == "/app/backend/media")
+        db_mounts = inspect(db, ".Mounts")
+        if (media.get("Type") != "volume" or media.get("Name") != f"{project}_media" or media.get("RW") is not True or
+                len(db_mounts) != 1 or db_mounts[0].get("Type") != "volume" or
+                db_mounts[0].get("Destination") != "/var/lib/postgresql" or
+                db_mounts[0].get("Name") != f"{project}_database" or db_mounts[0].get("RW") is not True):
+            raise IsolationError("The instance volumes do not match their containers.")
+        for suffix in ("media", "database"):
+            volume = f"{project}_{suffix}"
+            labels = inspect(volume, ".Labels")
+            if (labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.volume") != suffix or
+                    inspect(volume, ".Driver") != "local" or inspect(volume, ".Scope") != "local" or inspect(volume, ".Options")):
+                raise IsolationError("A test volume has unexpected ownership or options.")
+        if not _has_mount(mountinfo(backend), "/app/backend/media") or not _has_mount(mountinfo(db), "/var/lib/postgresql"):
+            raise IsolationError("A test volume is not mounted inside its container.")
+        ports = inspect(backend, ".NetworkSettings.Ports") or {}
+        configured = inspect(backend, ".HostConfig.PortBindings") or {}
+        if any(ports.values()) or any(configured.values()):
+            raise IsolationError("The backend exposes a host port.")
+        db_ports = inspect(db, ".NetworkSettings.Ports") or {}
+        if any(value for value in db_ports.values()):
+            raise IsolationError("The database exposes a host port.")
+        return None, db_address
+    except IsolationError:
+        raise
+    except (TypeError, KeyError, ValueError, AttributeError) as exc:
+        raise IsolationError("Runtime isolation verification failed.") from exc
+
+
+def validate_stopped_instance(project: str, inspect=_docker_json) -> None:
+    """Refuse to resume a live backend or a project with foreign volumes."""
+    if not _PROJECT.fullmatch(project):
+        raise IsolationError("Invalid isolated instance handle.")
+    backend, db = f"{project}-backend-1", f"{project}-db-1"
+    try:
+        for name, service, image in ((backend, "backend", "innoservice-test-management:local"), (db, "db", "postgres:18")):
+            labels = inspect(name, ".Config.Labels")
+            if (labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != service or
+                    inspect(name, ".Config.Image") != image or inspect(name, ".HostConfig.Privileged") is not False):
+                raise ValueError
+        if inspect(backend, ".State.Running") is not False:
+            raise IsolationError("The instance is still running; refusing to take it over.")
+        mounts, db_mounts = inspect(backend, ".Mounts"), inspect(db, ".Mounts")
+        if len(mounts) != 3 or {m["Destination"] for m in mounts} != {"/app/backend", "/app/frontend_host/build_current", "/app/backend/media"}:
+            raise ValueError
+        for item in mounts:
+            if item["Destination"] == "/app/backend/media":
+                if item.get("Type") != "volume" or item.get("Name") != f"{project}_media" or item.get("RW") is not True:
+                    raise ValueError
+            elif item.get("Type") != "bind" or item.get("RW") is not False:
+                raise ValueError
+        if (len(db_mounts) != 1 or db_mounts[0].get("Type") != "volume" or
+                db_mounts[0].get("Destination") != "/var/lib/postgresql" or
+                db_mounts[0].get("Name") != f"{project}_database" or db_mounts[0].get("RW") is not True):
+            raise ValueError
+        for suffix in ("media", "database"):
+            volume = f"{project}_{suffix}"
+            labels = inspect(volume, ".Labels")
+            if (labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.volume") != suffix or
+                    inspect(volume, ".Driver") != "local" or inspect(volume, ".Scope") != "local" or inspect(volume, ".Options")):
+                raise ValueError
+    except IsolationError:
+        raise
+    except (TypeError, KeyError, ValueError, AttributeError) as exc:
+        raise IsolationError("The stopped instance ownership could not be verified.") from exc
+
+
+def validate_compose_file(path: Path) -> None:
+    """Reject a manifest that could reuse ordinary storage or expose a service."""
+    try:
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict) or set(config) != {"services", "networks", "volumes"}:
+            raise ValueError
+        if config["volumes"] != {"database": {}, "media": {}}:
+            raise ValueError
+        services = config["services"]
+        if set(services) != {"backend", "db"} or config["networks"] != {"isolated": {"internal": True, "ipam": {"config": [{"subnet": "${TEST_MANAGEMENT_SUBNET:?missing isolated network subnet}"}]}}}:
+            raise ValueError
+        backend, db = services["backend"], services["db"]
+        if set(backend) != {"image", "build", "command", "env_file", "environment", "volumes", "depends_on", "networks"}:
+            raise ValueError
+        if set(db) != {"image", "environment", "volumes", "healthcheck", "networks"}:
+            raise ValueError
+        if backend["image"] != "innoservice-test-management:local" or backend["build"] != {"context": ".", "dockerfile": "backend/Dockerfile"}:
+            raise ValueError
+        if backend["command"] != ["python", "-m", "django_core_micha.test_management.isolated_entrypoint"]:
+            raise ValueError
+        if backend["env_file"] != [".env"]:
+            raise ValueError
+        if backend["volumes"] != ["./backend:/app/backend:ro", "./frontend/build_current:/app/frontend_host/build_current:ro", {"type": "volume", "source": "media", "target": "/app/backend/media", "volume": {"nocopy": True}}]:
+            raise ValueError
+        if db["volumes"] != [{"type": "volume", "source": "database", "target": "/var/lib/postgresql", "volume": {"nocopy": True}}]:
+            raise ValueError
+        if backend["networks"] != ["isolated"] or db["networks"] != ["isolated"]:
+            raise ValueError
+        if backend["depends_on"] != {"db": {"condition": "service_healthy"}} or db["image"] != "postgres:18":
+            raise ValueError
+        if backend["environment"] != {
+            "DJANGO_SETTINGS_MODULE": "backend.local_test_management_settings",
+            "ENV_TYPE": "${ENV_TYPE:?missing original environment identity}",
+            "DB_HOST": "db", "DB_PORT": "5432", "DB_NAME": "${TEST_MANAGEMENT_DATABASE:?missing isolated database name}",
+            "DB_USER": "test_management", "DB_PASSWORD": "${TEST_MANAGEMENT_DATABASE_PASSWORD:?missing isolated database password}",
+            "DJANGO_SECRET_KEY": "${TEST_MANAGEMENT_DJANGO_SECRET:?missing isolated application secret}",
+            "TEST_MANAGEMENT_INSTANCE_ID": "${TEST_MANAGEMENT_INSTANCE_ID:?missing instance ID}",
+            "TEST_MANAGEMENT_CONTROLLER_TOKEN": "${TEST_MANAGEMENT_CONTROLLER_TOKEN:?missing controller token}",
+            "FRONTEND_BUILD_DIR": "/app/frontend_host/build_current",
+            "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
+        }:
+            raise ValueError
+        if db["environment"] != {
+            "POSTGRES_DB": "${TEST_MANAGEMENT_DATABASE:?missing isolated database name}",
+            "POSTGRES_USER": "test_management",
+            "POSTGRES_PASSWORD": "${TEST_MANAGEMENT_DATABASE_PASSWORD:?missing isolated database password}",
+        }:
+            raise ValueError
+        if db["healthcheck"] != {"test": ["CMD-SHELL", "pg_isready -U test_management -d $${POSTGRES_DB}"], "interval": "2s", "timeout": "2s", "retries": 30}:
+            raise ValueError
+    except (OSError, TypeError, KeyError, ValueError, yaml.YAMLError) as exc:
+        raise IsolationError("The standalone test-management Compose manifest is not the verified layout.") from exc
+
+
+_DIAGNOSTIC_PATTERNS = (
+    ("address pools have been fully subnetted", "Docker has no free local network address pool."),
+    ("could not find an available, non-overlapping", "Docker has no free local network address pool."),
+    ("pool overlaps", "The isolated Docker network overlaps an existing network."),
+    ("all predefined address pools", "Docker has no free local network address pool."),
+    ("no space left on device", "Insufficient disk space for the isolated stack."),
+    ("not enough space", "Insufficient disk space for the isolated stack."),
+    ("out of memory", "Insufficient memory for the isolated stack."),
+    ("permission denied", "Docker denied access while preparing the isolated stack."),
+    ("mounts denied", "Docker denied a required local mount."),
+    ("invalid mount config", "Docker rejected an isolated mount configuration."),
+    ("port is already allocated", "The isolated loopback port is unavailable."),
+    ("failed to solve", "The isolated image build failed."),
+    ("pull access denied", "A required container image is unavailable."),
+    ("no such file or directory", "A required isolated startup file is unavailable."),
+    ("error response from daemon", "Docker rejected an isolated startup operation."),
+)
+_DOCKER_ERROR_CATEGORIES = (
+    ("mount", "mount"), ("volume", "volume"), ("network", "network"),
+    ("port", "port"), ("path", "path"), ("permission", "permission"),
+    ("not a directory", "not-a-directory"), ("is a directory", "is-a-directory"),
+    ("already exists", "already-exists"), ("not found", "not-found"),
+    ("no such", "not-found"), ("invalid", "invalid"), ("read-only", "read-only"),
+    ("driver", "driver"), ("container", "container"), ("image", "image"),
+)
+
+
+def _run_private(command, *, cwd, env, timeout=60, heartbeat=False):
+    """Run without exposing Compose output, runtime configuration or credentials."""
+    try:
+        process = subprocess.Popen(command, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, encoding="utf-8", errors="replace", shell=False)
+        diagnostic = {"message": None, "daemon_error": False, "categories": set()}
+
+        def inspect_output():
+            tail = ""
+            while True:
+                chunk = process.stdout.read(4096)
+                if not chunk:
+                    return
+                sample = (tail + chunk).lower()
+                if diagnostic["message"] is None:
+                    diagnostic["message"] = next((message for pattern, message in _DIAGNOSTIC_PATTERNS if pattern in sample), None)
+                if "error response from daemon" in sample:
+                    diagnostic["daemon_error"] = True
+                    sample = sample[sample.rfind("error response from daemon"):]
+                if diagnostic["daemon_error"]:
+                    diagnostic["categories"].update(label for pattern, label in _DOCKER_ERROR_CATEGORIES if pattern in sample)
+                tail = sample[-256:]
+
+        reader = threading.Thread(target=inspect_output, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + timeout
+        next_update = time.monotonic() + 30
+        while process.poll() is None:
+            if time.monotonic() >= deadline:
+                process.terminate()
+                raise IsolationError("The isolated startup step timed out.")
+            if heartbeat and time.monotonic() >= next_update:
+                print("[INFO] Preparing the isolated test instance...", flush=True)
+                next_update = time.monotonic() + 30
+            time.sleep(0.5)
+        reader.join(timeout=5)
+        if process.returncode and diagnostic["message"]:
+            print(f"[WARN] {diagnostic['message']}", flush=True)
+        if process.returncode and diagnostic["categories"]:
+            print(f"[WARN] Docker error categories: {', '.join(sorted(diagnostic['categories']))}.", flush=True)
+        return process.returncode
+    except OSError as exc:
+        raise IsolationError("Unable to run the isolated startup step.") from exc
+
+
+def _docker_output(command, *, cwd, env):
+    try:
+        result = subprocess.run(command, cwd=str(cwd), env=env, check=True, capture_output=True,
+                                text=True, timeout=15, shell=False)
+        return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise IsolationError("Unable to verify the local Docker daemon.") from exc
+
+
+def _assert_local_docker(cwd: Path, env: dict) -> None:
+    host = (_docker_output(["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], cwd=cwd, env=env)
+            if env.get("DOCKER_CONTEXT") else
+            env.get("DOCKER_HOST") or _docker_output(["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], cwd=cwd, env=env))
+    if not (host.startswith("unix:///") or host.lower().startswith("npipe:////./pipe/")):
+        raise IsolationError("Test management requires a local Docker daemon.")
+    env.pop("DOCKER_CONTEXT", None)
+    env["DOCKER_HOST"] = host
+    _docker_output(["docker", "info", "--format", "{{.ServerVersion}}"], cwd=cwd, env=env)
+
+
+def _start_loopback_proxy(project, cwd, env):
+    proxy_env = dict(env)
+    for key in ("TEST_MANAGEMENT_CONTROLLER_TOKEN", "TEST_MANAGEMENT_DATABASE_PASSWORD", "TEST_MANAGEMENT_DJANGO_SECRET"):
+        proxy_env.pop(key, None)
+    flags = (getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)) if sys.platform == "win32" else 0
+    try:
+        process = subprocess.Popen([sys.executable, "-m", "django_core_micha.test_management.local_proxy", project, str(cwd)],
+                                   cwd=str(cwd), env=proxy_env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, text=True, encoding="utf-8", shell=False,
+                                   creationflags=flags, start_new_session=(sys.platform != "win32"))
+    except OSError as exc:
+        raise IsolationError("The local browser relay could not be started.") from exc
+    lines = queue.Queue(maxsize=1)
+    threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True).start()
+    try:
+        line = lines.get(timeout=15).strip()
+        match = re.fullmatch(r"READY ([0-9]{1,5})", line)
+        if not match or not 1 <= int(match.group(1)) <= 65535:
+            raise ValueError
+        return process, match.group(1)
+    except (queue.Empty, ValueError) as exc:
+        process.terminate()
+        raise IsolationError("The local browser relay did not become ready.") from exc
+
+
+def _finish_start(project, instance, compose, cwd, env, *, renew=False):
+    inspect = lambda name, expression: _docker_json(name, expression, env=env)
+    mountinfo = lambda name: _mountinfo(name, env=env)
+    _, database_ip = validate_runtime(project, inspect=inspect, mountinfo=mountinfo)
+    for command in (["chown", "1000:1000", "/app/backend/media"], ["chmod", "0700", "/app/backend/media"]):
+        if _run_private(compose + ["exec", "-T", "--user", "0", "backend"] + command, cwd=cwd, env=env):
+            raise IsolationError("The isolated media volume could not be prepared.")
+    if _run_private(compose + ["exec", "-T", "backend", "python", "-m", "django_core_micha.test_management.isolated_entrypoint", "install-proof", database_ip], cwd=cwd, env=env):
+        raise IsolationError("The database isolation preflight failed.")
+    if _run_private(compose + ["exec", "-T", "backend", "python", "manage.py", "migrate", "--noinput"], cwd=cwd, env=env, timeout=300, heartbeat=True):
+        raise IsolationError("The isolated database migration failed.")
+    if renew and _run_private(compose + ["exec", "-T", "backend", "python", "manage.py", "renew_test_controller"], cwd=cwd, env=env):
+        raise IsolationError("The isolated controller could not be renewed.")
+    _, final_ip = validate_runtime(project, inspect=inspect, mountinfo=mountinfo)
+    if final_ip != database_ip:
+        raise IsolationError("The isolated runtime changed during startup.")
+    proxy, port = _start_loopback_proxy(project, cwd, env)
+    url = f"http://127.0.0.1:{port}/api/healthz"
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=15) as response:
+                if response.status == 200:
+                    print(f"READY http://127.0.0.1:{port}/", flush=True)
+                    return {"instance": str(instance), "project": project, "base_url": f"http://127.0.0.1:{port}"}
+        except (OSError, urllib.error.URLError):
+            pass
+        time.sleep(1)
+    proxy.terminate()
+    raise IsolationError("The isolated backend did not become ready.")
+
+
+def start_isolated_instance(cwd: Path, inherited_env=None):
+    """Start one uniquely named instance after static and runtime isolation checks."""
+    env = dict(os.environ if inherited_env is None else inherited_env)
+    if env.get("ENV_TYPE") and env["ENV_TYPE"].lower() != "local":
+        raise IsolationError("The caller environment is not local.")
+    # Compose resolves the app's own original identity; an inherited shell
+    # value must not mask a staging/production value from the app configuration.
+    env.pop("ENV_TYPE", None)
+    if cwd.name.lower() != "innoservice" or not (cwd / "frontend" / "build_current" / "index.html").is_file():
+        raise IsolationError("The supported app and its local frontend build are required.")
+    manifest = cwd / "docker-compose.test-management.yml"
+    validate_compose_file(manifest)
+    _assert_local_docker(cwd, env)
+    instance = uuid.uuid4()
+    project = f"innoservice-tm-{instance.hex}"
+    env.update({
+        "TEST_MANAGEMENT_INSTANCE_ID": str(instance),
+        "TEST_MANAGEMENT_SUBNET": f"10.{instance.bytes[0]}.{instance.bytes[1]}.0/24",
+        "TEST_MANAGEMENT_DATABASE": f"dcm_tm_{instance.hex}",
+        "TEST_MANAGEMENT_DATABASE_PASSWORD": secrets.token_urlsafe(32),
+        "TEST_MANAGEMENT_DJANGO_SECRET": secrets.token_urlsafe(48),
+        "TEST_MANAGEMENT_CONTROLLER_TOKEN": secrets.token_urlsafe(32),
+    })
+    env.pop("COMPOSE_PROFILES", None)
+    for suffix in ("database", "media"):
+        name = f"{project}_{suffix}"
+        try:
+            result = subprocess.run(["docker", "volume", "inspect", name], cwd=str(cwd), env=env,
+                                    capture_output=True, text=True, timeout=15, shell=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise IsolationError("Unable to verify a fresh test volume.") from exc
+        if result.returncode == 0:
+            raise IsolationError("A generated test volume already exists; refusing reuse.")
+        if "no such volume" not in result.stderr.lower():
+            raise IsolationError("Unable to verify a fresh test volume.")
+    compose = ["docker", "compose", "-p", project, "-f", str(manifest)]
+    print(f"[INFO] Isolated instance: {project}", flush=True)
+    if _run_private(compose + ["up", "-d", "--build"], cwd=cwd, env=env, timeout=1800, heartbeat=True):
+        raise IsolationError("The isolated containers could not be started.")
+    try:
+        return _finish_start(project, instance, compose, cwd, env)
+    except Exception:
+        # A failed candidate is stopped but never deletes volumes or other instances.
+        _run_private(compose + ["stop"], cwd=cwd, env=env, timeout=60)
+        raise
+
+
+def resume_isolated_instance(cwd: Path, project: str, inherited_env=None):
+    """Explicitly resume one stopped instance without taking over a live one."""
+    if not _PROJECT.fullmatch(project):
+        raise IsolationError("Invalid isolated instance handle.")
+    env = dict(os.environ if inherited_env is None else inherited_env)
+    if env.get("ENV_TYPE") and env["ENV_TYPE"].lower() != "local":
+        raise IsolationError("The caller environment is not local.")
+    env.pop("ENV_TYPE", None)
+    env.pop("COMPOSE_PROFILES", None)
+    manifest = cwd / "docker-compose.test-management.yml"
+    validate_compose_file(manifest)
+    _assert_local_docker(cwd, env)
+    validate_stopped_instance(project, inspect=lambda name, expression: _docker_json(name, expression, env=env))
+    instance = uuid.UUID(hex=project.removeprefix("innoservice-tm-"))
+    # Compose needs placeholders to parse the manifest for `start`/`exec`.
+    # Those operations retain the original container environment and credentials.
+    env.update({"TEST_MANAGEMENT_INSTANCE_ID": str(instance), "TEST_MANAGEMENT_SUBNET": f"10.{instance.bytes[0]}.{instance.bytes[1]}.0/24", "TEST_MANAGEMENT_DATABASE": f"dcm_tm_{instance.hex}",
+                "TEST_MANAGEMENT_DATABASE_PASSWORD": "resume-placeholder", "TEST_MANAGEMENT_DJANGO_SECRET": "resume-placeholder",
+                "TEST_MANAGEMENT_CONTROLLER_TOKEN": "resume-placeholder"})
+    compose = ["docker", "compose", "-p", project, "-f", str(manifest)]
+    print(f"[INFO] Resuming isolated instance: {project}", flush=True)
+    try:
+        if _run_private(compose + ["start", "db"], cwd=cwd, env=env):
+            raise IsolationError("The isolated database could not be resumed.")
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if _docker_json(f"{project}-db-1", ".State.Health.Status", env=env) == "healthy":
+                break
+            time.sleep(1)
+        else:
+            raise IsolationError("The isolated database did not become ready.")
+        if _run_private(compose + ["start", "backend"], cwd=cwd, env=env):
+            raise IsolationError("The isolated backend could not be resumed.")
+        return _finish_start(project, instance, compose, cwd, env, renew=True)
+    except Exception:
+        _run_private(compose + ["stop"], cwd=cwd, env=env, timeout=60)
+        raise
+
+
+def stop_isolated_instance(cwd: Path, project: str, inherited_env=None):
+    """Stop only the verified instance; preserve its data for explicit recovery."""
+    if not _PROJECT.fullmatch(project):
+        raise IsolationError("Invalid isolated instance handle.")
+    env = dict(os.environ if inherited_env is None else inherited_env)
+    if env.get("ENV_TYPE") and env["ENV_TYPE"].lower() != "local":
+        raise IsolationError("The caller environment is not local.")
+    env.pop("ENV_TYPE", None)
+    env.pop("COMPOSE_PROFILES", None)
+    manifest = cwd / "docker-compose.test-management.yml"
+    validate_compose_file(manifest)
+    _assert_local_docker(cwd, env)
+    inspect = lambda name, expression: _docker_json(name, expression, env=env)
+    validate_runtime(project, inspect=inspect, mountinfo=lambda name: _mountinfo(name, env=env))
+    instance = uuid.UUID(hex=project.removeprefix("innoservice-tm-"))
+    env.update({"TEST_MANAGEMENT_INSTANCE_ID": str(instance), "TEST_MANAGEMENT_SUBNET": f"10.{instance.bytes[0]}.{instance.bytes[1]}.0/24", "TEST_MANAGEMENT_DATABASE": f"dcm_tm_{instance.hex}",
+                "TEST_MANAGEMENT_DATABASE_PASSWORD": "stop-placeholder", "TEST_MANAGEMENT_DJANGO_SECRET": "stop-placeholder",
+                "TEST_MANAGEMENT_CONTROLLER_TOKEN": "stop-placeholder"})
+    compose = ["docker", "compose", "-p", project, "-f", str(manifest)]
+    if _run_private(compose + ["stop"], cwd=cwd, env=env, timeout=60):
+        raise IsolationError("The isolated instance could not be stopped.")
+    print(f"[INFO] Stopped isolated instance: {project}", flush=True)
