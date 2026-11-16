@@ -82,3 +82,10 @@ current changes. Do not edit this WO or the register.
 
 Review per Tier 3. Release as a patch version per the dcm release flow; consumers pick it up with
 their next pin bump.
+
+## Completion
+
+Implemented in the 3.26.1 release together with DCM-DX-6. Independent review
+used `gpt-6.1-terra` and `gpt-6-luna`; accepted findings were corrected and
+targeted tests passed. Core release run 43944825038 passed and published the
+package. The operator-approved scope leaves ordinary application logs unchanged.

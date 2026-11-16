@@ -374,7 +374,7 @@ WO; the request was reaffirmed after the GitHub access interruption.
 
 ## Completion
 
-In progress; not released. The isolated PostgreSQL/media stack started without a
+Completed. The isolated PostgreSQL/media stack started without a
 published backend port. Browser checks passed for all seven profiles and an extra
 rights combination, two independent logins, real permission changes, private media,
 both PDF layouts, reset/session revocation and explicit restart recovery. Local
@@ -382,6 +382,11 @@ activation checks rejected staging, production and unknown environment identitie
 this is not a staging deployment acceptance test. The targeted core suite passed
 86 tests, the consumer adapter/manifest suite 28 and the existing permission suite
 48. Independent two-round reviews ran on core and consumer; in-scope findings were
-fixed and retested. The installed-package check, release and consumer deployment
-remain outstanding. A credential-like database value appeared in an earlier test
-traceback and was reported for rotation; no credential is recorded here.
+fixed and retested. Core 3.26.1 was published by run 43944825038; Innoservice
+uses that installed package and was deployed to staging at `a6878fc` by run
+43949708714. Its CI run 43949759326 passed backend, frontend, image and security
+jobs; the local browser scenarios, including explicit restart recovery, also passed
+using the installed package. The staging management URL returned 404. The CI E2E
+job was not enabled; local browser evidence does not close separate staging QA.
+A credential-like database value appeared in an earlier test traceback and was
+reported for rotation; no credential is recorded here.
