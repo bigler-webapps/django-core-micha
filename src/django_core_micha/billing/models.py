@@ -132,6 +132,26 @@ class ContractPayment(models.Model):
         constraints=[models.UniqueConstraint(fields=("stripe_invoice_id",),condition=~Q(stripe_invoice_id=""),name="dcm_bill_invoice_unique")]
 
 
+class AnnualTermReminder(models.Model):
+    """Durable one-time annual-to-monthly reminder delivery state."""
+    STATUSES=[(x,x) for x in ("pending","sending","failed","ambiguous","sent","unresolved","cancelled")]
+    contract=models.OneToOneField(Contract,on_delete=models.CASCADE,related_name="annual_term_reminder")
+    status=models.CharField(max_length=16,choices=STATUSES,default="pending",db_index=True)
+    idempotency_key=models.CharField(max_length=180,unique=True)
+    payload=models.JSONField(default=dict)
+    due_at=models.DateTimeField()
+    first_attempt_at=models.DateTimeField(null=True,blank=True)
+    last_attempt_at=models.DateTimeField(null=True,blank=True)
+    sent_at=models.DateTimeField(null=True,blank=True)
+    attempts=models.PositiveIntegerField(default=0)
+    late=models.BooleanField(default=False)
+    provider_message_id=models.CharField(max_length=255,blank=True,default="")
+    last_error_code=models.CharField(max_length=120,blank=True,default="")
+    updated_at=models.DateTimeField(auto_now=True)
+    class Meta:
+        indexes=[models.Index(fields=("status","due_at"),name="dcm_bill_reminder_due")]
+
+
 class Declaration(models.Model):
     KINDS=[(x,x) for x in ("cancellation","withdrawal")]
     CHANNELS=[(x,x) for x in ("public","account","operator")]
