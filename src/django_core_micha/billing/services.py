@@ -126,13 +126,14 @@ def tokens_for(rate_name,units):
     if rate_name not in rates: raise KeyError(rate_name)
     return units*rates[rate_name]
 
-def record_ai_call(*,user,provider,model,input_tokens,output_tokens,cache_tokens=0,cache_read_tokens=0,cache_write_tokens=0,purpose,reference=""):
+def record_ai_call(*,user,provider,model,input_tokens,output_tokens,cache_tokens=0,cache_read_tokens=0,cache_write_tokens=0,purpose,reference="",extra_cost_usd_micros=0):
     try:
         from django_core_micha.ai_prices import price_usage
         read_tokens = int(cache_read_tokens or 0) + (int(cache_tokens or 0) if not cache_read_tokens and not cache_write_tokens else 0)
         write_tokens = int(cache_write_tokens or 0)
         micros = price_usage(model, input_tokens=input_tokens, output_tokens=output_tokens,
                              cache_read_tokens=read_tokens, cache_write_tokens=write_tokens)
+        micros += max(0, int(extra_cost_usd_micros or 0))
         with transaction.atomic():
             return AICostRecord.objects.create(app=getattr(settings,"DCM_BILLING_APP",""),user=user,provider=provider,model=model,input_tokens=max(0,int(input_tokens)),output_tokens=max(0,int(output_tokens)),cache_tokens=max(0,read_tokens+write_tokens),cost_usd_micros=max(0,micros),purpose=purpose,reference=reference)
     except Exception:

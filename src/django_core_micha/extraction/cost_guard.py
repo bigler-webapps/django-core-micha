@@ -270,6 +270,29 @@ def release_reservation(*, reservation: _Reservation | None) -> None:
         _decrement_reservation(reservation)
 
 
+def settle_fixed_reservation(*, reservation: _Reservation | None, actual_cents: int | None = None) -> int:
+    """Settle one non-token provider charge against an existing reservation.
+
+    Hosted execution is billed in container/time units rather than tokens. The
+    caller reserves a conservative fixed allowance before creating a resource;
+    an absent actual amount means settle that allowance. Releasing the
+    reservation after incrementing settled spend preserves admission safety.
+    """
+    if reservation is None:
+        return 0
+    cents = reservation.cents if actual_cents is None else int(actual_cents)
+    if cents < 0:
+        raise ValueError("actual_cents must be non-negative")
+    try:
+        total = _increment_day_counter(reservation.user_id, reservation.day, cents) if cents else _read_counter(
+            _cache_key_for_day(reservation.user_id, reservation.day))
+    except Exception:
+        logger.exception("Could not settle fixed AI execution accounting")
+        return 0
+    _decrement_reservation(reservation)
+    return total
+
+
 def charge_user(user_id: int | None, cents: int) -> int:
     """Atomically add cents to a user's daily counter and enforce the cap."""
     if not _is_enabled() or user_id is None or cents <= 0:

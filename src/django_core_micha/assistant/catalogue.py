@@ -101,4 +101,6 @@ def catalogue_check(app_configs, **kwargs):
     for row in entries():
         if row.get("billing") == "pay_per_use" and row["model"] not in rates:
             errors.append(Error(f"Pay-per-use assistant model {row['model']} has no AI cost rate", id="dcm_assistant.E001"))
+    from .execution import configuration_errors
+    errors.extend(Error(message, id="dcm_assistant.E003") for message in configuration_errors(entries()))
     return errors

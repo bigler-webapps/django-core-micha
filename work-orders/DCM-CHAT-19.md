@@ -1,8 +1,11 @@
 # DCM-CHAT-19 — Provider-side code execution for Assistant analyses
 
+**ROLE: IMPLEMENTER.** You are the already-dispatched coding instance, not the orchestrator. Implement Parts A and B yourself; do not dispatch, review, commit, push or perform Part C.
+
 ## Part A — Envelope
 
-**Repository:** `django-core-micha`. **Tier:** 3, shared-core change covering off-host execution, dataset transfer and cost accounting. **First consumer:** `HRAM-AI-6`. This order delivers and releases the shared capability. The consumer's pin and activation belong to HRAM.
+**Repository:** `django-core-micha`.
+**Tier 3:** shared-core change covering off-host execution, dataset transfer and cost accounting. **First consumer:** `HRAM-AI-6`. This order delivers and releases the shared capability. The consumer's pin and activation belong to HRAM.
 
 ### Expected outcome
 
@@ -41,14 +44,38 @@ No HRAM app changes, UI, local sandbox, new network tool, generic file upload or
 
 ## Part B — Implementation map
 
-Placeholder. The Orchestrator completes the context package, absolute target paths, progress contract and implementer preamble after Gate #1. No dispatch with this placeholder.
+Workspace `C:/Users/Micha Bigler/Documents/webapps`; repository `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`.
+
+### Context package
+
+- Own the implementation and focused tests in `src/django_core_micha/assistant/`, including `drivers/openai_api.py`, `drivers/anthropic_api.py`, `drivers/base.py`, `drivers/claude_cli.py`, `catalogue.py`, `hooks.py`, `turns.py`, `models.py`, `limits.py`, `limit.py`, `views.py`, `urls.py`, appropriate assistant migrations, and new narrowly scoped modules/tests as necessary. Extend `src/django_core_micha/extraction/cost_guard.py` or `ai_prices.py` only as needed for execution reservation/accounting. No consumer, infra, CI or dependency change. Report public contract changes so the orchestrator updates `docs/design/assistant-chat.md`.
+- `turns._create_turn` enforces chat ownership/scope and period limit; `run_turn` constructs the provider driver, invokes trusted app hooks and rechecks authorization; `_finish` persists turn usage/cost and calls the billing hook. `assistant/access.py`, `hooks.py` (`can_access_scope`, `is_shared_scope`, `turn_is_valid`, `tools_for_chat`) and the existing websocket consumer enforce the access boundary. `AssistantTurn` holds sender, usage, cost and trace, and existing history is serialized by `turn_payload`. Do not expose provider IDs or files via client-supplied references. Preserve ordinary non-opted-in turn behavior.
+- OpenAI driver uses Responses streaming and per-call `_reserve`/settlement; Anthropic uses Messages streaming and the same cost guard; CLI has its own disabled built-in-tools guard. Review `assistant/tests/test_access_recheck.py`, `test_usage_cost_chunk_a.py`, `test_aborted_turn_cost.py`, `test_turn_hooks.py`, `test_chunk_b.py`, `test_structured_turns.py` and existing driver mocks for contracts. Test both mocked providers, failure after a billable start, access revocation and current-analysis-only retrieval. App policy and dataset supply must be server-side trusted hooks, not a client capability or provider IDs. Complete the data and lifecycle contract, not a stub.
+- Official OpenAI Responses API reference documents `code_interpreter` auto containers with `network_policy: {type: disabled}`; explicitly request disabled network and disallow other hosted tools. OpenAI container prices shown on 2026-11-17: 1/4/16/64 GiB cost USD 0.03/0.12/0.48/1.92 per 20-minute session. Official Anthropic code execution docs describe `code_execution_20250825` or later, disabled networking, container data retained up to 30 days, non-ZDR, separately retained Files API files, and execution-time billing with five-minute minimum and USD 0.05/hour beyond a monthly free allowance. Enforce explicit app-plus-each-data-class retention approval for Anthropic and default-deny unsupported or unpriced models/configurations. Configurable validated provider rates and conservative accounting are required where account-specific charges cannot be inferred.
+- Official references: https://developers.openai.com/api/reference/resources/responses/methods/create ; https://developers.openai.com/api/docs/guides/tools-code-interpreter ; https://platform.openai.com/pricing/ ; https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool . Provider protocols and SDK signatures must be verified locally from installed libraries or supplied fakes; no credentials, secret files, real data or real provider calls.
+
+### Preamble and progress contract
+
+Your first tool action is `codex-hook-canary-ws-gov-60` exactly. The expected denial is `WS-GOV-60 canary: workspace hooks are active`; continue. If absent, report unverified coverage once and continue.
+
+Parts A and B are the complete specification. Read nearest `AGENTS.md`, `.codex/skills/backend-engineering/SKILL.md` and app `MEMORY.md` for conventions. Stay in scope. Schema changes needed for private results and accounting are authorized; no dependency, CI, unrelated permission or app changes. Do not edit the register or `MEMORY.md`. Your tools are for editing source and test files and running only tests you wrote, once; no installs, lockfiles, package managers, cleanup, git operations, dispatch or self-review. Report `RESULT: BLOCKED <reason>` if an essential provider contract or scope cannot be implemented safely. Leave changes uncommitted; the orchestrator owns documentation, authoritative tests and independent reviews.
+
+Print `PLAN: <steps>` first, then `PROGRESS: [n/total] <action>` before relevant actions and completion, no gaps over about two minutes. Finish exactly once with `RESULT: DONE` or `RESULT: BLOCKED <reason>`.
 
 ## Part C — Orchestrator only
 
-STOP — this part is not an instruction to the implementer.
+STOP — implementer: this part is not addressed to you. Do not perform reviews, update the register, commit, push or dispatch.
 
 At mapping, check `assistant/drivers/{openai_api,anthropic_api,claude_cli,base}.py`, the catalogue and turn-access hooks, `assistant/limit.py`, turn usage and persistence, and `docs/design/assistant-chat.md`. Follow the existing cost and access contracts before deciding on extensions. Record the supported provider/model and cost evidence. Use synthetic inputs for provider checks. Plan Tier 3 independent and security reviews. Release the DCM consumer contract before HRAM pins it for AI-6. Release and app rollout follow their own repository procedures.
 
 ## Gate record
 
-On 2026-11-17 the operator selected explicit Anthropic retention approval per app and data class, and a fresh container for each analysis. Gate #1 for code implementation is pending.
+On 2026-11-17 the operator selected explicit Anthropic retention approval per app and data class, and a fresh container for each analysis. Gate #1 approved by the operator in chat on 2026-11-17 by requesting implementation after DCM-BILL-13.
+
+## Completion
+
+Implemented the default-deny, privately scoped hosted execution contract and provider adapters with isolated analysis containers, bounded results, cleanup, access checks and conservative usage accounting. Verified model support is restricted to the documented OpenAI `gpt-5` and Anthropic `claude-haiku-4-5` identifiers; consumers must explicitly configure policy and pricing, and Anthropic additionally requires retention approval for each app and data class. Actual provider billing can differ from conservative estimates. No live provider requests or consumer rollout were performed.
+
+Independent review: envelope by Codex `gpt-6.1-terra`; regression, duplication, tests and security by Codex `gpt-6-luna`. Blocking findings from both rounds were corrected, followed by targeted checks. Anthropic pause continuation and access-loss handling received additional local verification after the final review. Release: 3.29.0.
+
+Validation: assistant, extraction and aborted-turn accounting suites: 307 passed, 1 skipped, with a Windows socket-thread warning in an existing CLI bridge test. The provider execution suite including pause continuation: 19 passed. The assistant migration check reported no pending changes. Provider behavior was mocked; no live provider integration was exercised.

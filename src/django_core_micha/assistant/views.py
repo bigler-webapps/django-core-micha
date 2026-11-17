@@ -41,6 +41,7 @@ def _cursor_context(kind,user,**extra): return {"kind":kind,"user":str(user.pk),
 def _shape(request,rows,context_tokens):
     """Catalogue entry JSON; shared by the user catalogue and the admin model list."""
     from django_core_micha.ai_prices import price_usage
+    from .execution import model_supports_execution
     converter=_catalogue_hook("COST_TO_TOKENS")
     medium_costs={entry_id(e):price_usage(e["model"],input_tokens=context_tokens,output_tokens=800) for e in rows}
     ranked=sorted(medium_costs.values())
@@ -63,6 +64,7 @@ def _shape(request,rows,context_tokens):
         shaped.append({"id":entry_id(e),"driver":e["driver"],"model":e["model"],"label":e.get("name",e["model"]),
             "provider":{"claude_cli":"claude_code","anthropic_api":"anthropic","openai_api":"openai"}[e["driver"]],
             "level":model_level(e),"efforts":e["efforts"],"billing":e["billing"],"default":bool(e.get("default")),"estimate":estimates,
+            "code_execution_supported":model_supports_execution(e),
             "average_cost_usd_micros":_average_cost(entry_id(e))})
     return shaped
 

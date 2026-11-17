@@ -94,7 +94,7 @@ def _create_turn(chat_id, user_id, message):
     except IntegrityError as exc:
         raise DriverError("turn_active") from exc
 
-def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=None, session_tokens=None, session_version=None, context_tokens=0):
+def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=None, session_tokens=None, session_version=None, context_tokens=0, execution_results=None):
     with transaction.atomic():
         turn = AssistantTurn.objects.select_for_update().select_related("chat").get(pk=turn_id)
         if turn.state != "generating": return False
@@ -103,10 +103,17 @@ def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=N
         normalized = {key: max(0, int((usage or {}).get(key, 0) or 0)) for key in
             ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")}
         normalized["cost_usd_micros"] = price_usage(turn.model, **normalized)
+        if "execution_usd_micros" in (usage or {}):
+            normalized["execution_usd_micros"] = max(0, int(usage["execution_usd_micros"] or 0))
+            if "execution_requests" in usage:
+                normalized["execution_requests"] = max(0, int(usage["execution_requests"] or 0))
+            normalized["execution_cost_basis"] = "estimated" if normalized["execution_usd_micros"] else "none"
+            normalized["cost_usd_micros"] += normalized["execution_usd_micros"]
         normalized["context_tokens"] = max(0, int(context_tokens or 0))
         turn.finished_at, turn.usage, turn.tool_trace = timezone.now(), normalized, trace or []
+        turn.execution_results = execution_results or []
         turn.cost_usd_micros, turn.context_tokens = normalized["cost_usd_micros"], normalized["context_tokens"]
-        turn.save(update_fields=("assistant_text", "state", "error_code", "finished_at", "usage", "tool_trace", "cost_usd_micros", "context_tokens"))
+        turn.save(update_fields=("assistant_text", "state", "error_code", "finished_at", "usage", "execution_results", "tool_trace", "cost_usd_micros", "context_tokens"))
         from django.apps import apps
         if usage and apps.is_installed("django_core_micha.billing"):
             try:
@@ -114,7 +121,7 @@ def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=N
                 record_ai_call(user=turn.sender or turn.chat.owner, provider=turn.driver, model=turn.model,
                     input_tokens=int(usage.get("input_tokens", 0) or 0), output_tokens=int(usage.get("output_tokens", 0) or 0),
                     cache_read_tokens=normalized["cache_read_tokens"], cache_write_tokens=normalized["cache_write_tokens"],
-                    purpose="chat", reference=str(turn.pk))
+                    purpose="chat", reference=str(turn.pk), extra_cost_usd_micros=normalized.get("execution_usd_micros", 0))
             except Exception:
                 log.error("Assistant billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
         chat = turn.chat
@@ -248,13 +255,29 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
     if len(message) > get_limit("max_message_length"): raise DriverError("prompt_too_long")
     turn = await sync_to_async(_start)(chat.pk, user.pk, message)
     beat = asyncio.create_task(_heartbeat(turn.pk))
-    chunks, trace, usage, session_id = [], [], {}, None
+    chunks, trace, usage, session_id, execution_results = [], [], {}, None, []
     last_context_tokens = 0
     session_file = False
     saw_init = False
     task = asyncio.current_task()
     access_lost = False
     watcher = None
+    driver = None
+    execution = None
+    access_ok = None
+    async def finish_execution_session():
+        if execution is None or driver is None:
+            return
+        finish = getattr(driver, "finish_execution", None)
+        if finish is None:
+            return
+        try:
+            await finish(execution)
+        except Exception as cleanup_error:
+            log.warning("Assistant execution cleanup failed (%s)", type(cleanup_error).__name__)
+        if execution.session.possible_charge:
+            usage["execution_usd_micros"] = max(int(usage.get("execution_usd_micros", 0) or 0),
+                                                execution.reserved_usd_micros)
     try:
         # Resolver is deliberately the one credential seam and runs exactly once per turn.
         credential, billing = resolve_credential(user, turn.driver)
@@ -339,12 +362,30 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
         if not await access_ok():
             access_lost = True
             raise asyncio.CancelledError
+        from .execution import prepare_execution
+        model_entry = await sync_to_async(entry_by_id)(f"{turn.driver}:{turn.model}")
+        if model_entry:
+            try:
+                execution = await prepare_execution(current, user, turn, model_entry, authorize=access_ok)
+            except DriverError:
+                raise
+            except Exception as exc:
+                log.warning("Assistant execution preparation failed (%s)", type(exc).__name__)
+                execution = None
+            if execution is not None:
+                kwargs["execution"] = execution
+                kwargs["authorize"] = access_ok
         structured = bool(getattr(settings, "DCM_ASSISTANT_STRUCTURED_TURNS", False))
+        execution_deadline = asyncio.get_running_loop().time() + execution.max_execution_seconds if execution else None
         async def collect_round(call_kwargs):
             nonlocal usage, session_id, saw_init, last_context_tokens
             chunks.clear()  # the failure branches store the partial text of the round that was running
             round_chunks = chunks
-            async with asyncio.timeout(get_limit("provider_timeout")):
+            timeout_seconds = get_limit("provider_timeout")
+            execution_config = call_kwargs.get("execution")
+            if execution_config is not None:
+                timeout_seconds = min(timeout_seconds, max(0, execution_deadline - asyncio.get_running_loop().time()))
+            async with asyncio.timeout(timeout_seconds):
                 async for event in driver.stream(model=turn.model, **call_kwargs):
                     if cancel_event and cancel_event.is_set(): raise asyncio.CancelledError
                     if event.get("type") == "delta":
@@ -363,6 +404,21 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
                             usage[key] = usage.get(key, 0) + value
                         last_context_tokens = max(0, int(row["context_tokens"] or 0)) if row.get("context_tokens") else sum(
                             max(0, int(row.get(key, 0) or 0)) for key in ("input_tokens", "cache_read_tokens", "cache_write_tokens"))
+                        if "execution_usd_micros" in row:
+                            usage["execution_usd_micros"] = usage.get("execution_usd_micros", 0) + max(0, int(row["execution_usd_micros"] or 0))
+                        if "execution_requests" in row:
+                            usage["execution_requests"] = usage.get("execution_requests", 0) + max(0, int(row["execution_requests"] or 0))
+                    elif event.get("type") == "execution":
+                        record = event.get("record")
+                        if isinstance(record, dict):
+                            if execution is None:
+                                raise DriverError("execution_unavailable")
+                            execution_results.append(record)
+                            from .execution import _limits
+                            caps = _limits()
+                            if (sum(len(item.get("data", [])) for item in execution_results) > caps["max_execution_output_files"] or
+                                    len(json.dumps(execution_results, ensure_ascii=False).encode("utf-8")) > caps["max_execution_output_total_bytes"] + caps["max_execution_text_bytes"] * 2 * execution.max_continuations):
+                                raise DriverError("execution_output_invalid")
                     elif event.get("type") == "session": session_id = event.get("session_id")
                     elif event.get("type") == "init": saw_init = True
             return "".join(round_chunks)
@@ -401,38 +457,72 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
         elif isinstance(result, AfterTurnResult):
             if result.text is not None: text = result.text
             for frame in result.frames or ():
+                if access_ok is not None and not await access_ok():
+                    access_lost = True
+                    raise asyncio.CancelledError
                 try:
                     if not isinstance(frame, dict) or not isinstance(frame.get("name"), str) or not frame["name"] or "payload" not in frame: raise ValueError("malformed frame")
                     json.dumps(frame["payload"])
                     await emit({"type":"app", "name":frame["name"], "payload":frame["payload"]})
                 except Exception: log.exception("Malformed assistant app frame")
         elif result is None: text = raw_text
+        if access_ok is not None and not await access_ok():
+            access_lost = True
+            raise asyncio.CancelledError
+        await finish_execution_session()
         input_tokens = int(usage.get("input_tokens", 0) or 0)
         session_tokens = (current.session_tokens + input_tokens) if resumed else input_tokens
         await _finish_and_hook(turn.pk, text, "completed", usage=usage, trace=trace, session_id=session_id,
-            session_tokens=session_tokens, session_version=configured_version or None, context_tokens=last_context_tokens)
+            session_tokens=session_tokens, session_version=configured_version or None, context_tokens=last_context_tokens,
+            execution_results=execution_results)
     except asyncio.CancelledError as exc:
+        await finish_execution_session()
+        estimate = max(0, int(getattr(exc, "execution_cost_estimate", 0) or 0))
+        if estimate:
+            usage["execution_usd_micros"] = max(int(usage.get("execution_usd_micros", 0) or 0), estimate)
+        if access_lost:
+            execution_results.clear()
         if getattr(exc, "before_init", False) and session_file:
             await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
-        await _finish_and_hook(turn.pk, "".join(chunks), "cancelled", "cancelled", usage, trace, context_tokens=last_context_tokens)
+        await _finish_and_hook(turn.pk, "" if access_lost else "".join(chunks), "cancelled", "cancelled", usage, [] if access_lost else trace, context_tokens=last_context_tokens, execution_results=execution_results)
+        if access_lost: raise AccessLost() from exc
         try:
-            cancelled = await sync_to_async(AssistantTurn.objects.get)(pk=turn.pk)
+            cancelled = await sync_to_async(AssistantTurn.objects.select_related("chat").get)(pk=turn.pk)
             await emit({"type":"turn","turn":turn_payload(cancelled)})
         except Exception:
             pass
-        if access_lost: raise AccessLost() from exc
         raise
     except TimeoutError as exc:
+        await finish_execution_session()
+        if access_ok is not None and not await access_ok():
+            execution_results.clear()
+            await _finish_and_hook(turn.pk, "", "cancelled", "access_lost", usage, [], context_tokens=last_context_tokens)
+            raise AccessLost() from exc
+        estimate = max(0, int(getattr(exc, "execution_cost_estimate", 0) or 0))
+        if estimate:
+            usage["execution_usd_micros"] = max(int(usage.get("execution_usd_micros", 0) or 0), estimate)
         if session_file and not saw_init:
             await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
-        await _finish_and_hook(turn.pk, "".join(chunks), "failed", "timeout", usage, trace, context_tokens=last_context_tokens)
+        await _finish_and_hook(turn.pk, "".join(chunks), "failed", "timeout", usage, trace, context_tokens=last_context_tokens, execution_results=execution_results)
         await _emit_final(turn.pk, emit)
         raise DriverError("timeout") from exc
     except Exception as exc:
+        await finish_execution_session()
+        if access_ok is not None and not await access_ok():
+            access_lost = True
+        estimate = max(0, int(getattr(exc, "execution_cost_estimate", 0) or 0))
+        if estimate:
+            usage["execution_usd_micros"] = max(int(usage.get("execution_usd_micros", 0) or 0), estimate)
+        if getattr(exc, "code", "") == "access_lost":
+            access_lost = True
+        if access_lost:
+            execution_results.clear()
         code = getattr(exc, "code", "provider_error")
         if isinstance(exc, DriverError) and getattr(exc, "before_init", False) and session_file:
             await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
-        await _finish_and_hook(turn.pk, "".join(chunks), "failed", code, usage, trace, context_tokens=last_context_tokens)
+        state = "cancelled" if access_lost else "failed"
+        await _finish_and_hook(turn.pk, "" if access_lost else "".join(chunks), state, code, usage, [] if access_lost else trace, context_tokens=last_context_tokens, execution_results=execution_results)
+        if access_lost: raise AccessLost() from exc
         await _emit_final(turn.pk, emit)
         if isinstance(exc, DriverError): raise
         log.exception("Assistant provider turn failed")
@@ -470,6 +560,9 @@ def turn_payload(turn, chat=None):
               "cache_write_tokens": int((turn.usage or {}).get("cache_write_tokens", 0) or 0),
               "cost_usd_micros": int(turn.cost_usd_micros or 0), "context_tokens": int(turn.context_tokens or 0)},
           "billing_source": turn.billing_source}
+    from .execution import execution_scope_is_private
+    if execution_scope_is_private(chat.scope):
+        result["execution_results"] = turn.execution_results or []
     from .hooks import is_shared_scope
     if is_shared_scope(chat.scope): result["sender_id"] = turn.sender_id
     return result

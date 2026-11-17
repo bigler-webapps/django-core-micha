@@ -33,6 +33,7 @@ class AssistantTurn(models.Model):
     effort = models.CharField(max_length=12, blank=True)
     billing_source = models.CharField(max_length=24, default="deployment")
     usage = models.JSONField(default=dict, blank=True)
+    execution_results = models.JSONField(default=list, blank=True)
     cost_usd_micros = models.BigIntegerField(default=0)
     context_tokens = models.PositiveIntegerField(default=0)
     tool_trace = models.JSONField(default=list, blank=True)
