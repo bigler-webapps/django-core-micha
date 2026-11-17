@@ -5,6 +5,8 @@ until runtime inspection and the database preflight have also succeeded.
 """
 
 from pathlib import Path
+from contextlib import contextmanager
+import hashlib
 import json
 import ipaddress
 import os
@@ -13,6 +15,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -26,7 +29,121 @@ class IsolationError(ValueError):
     pass
 
 
-_PROJECT = re.compile(r"^innoservice-tm-[0-9a-f]{32}$")
+_IDENTITY = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+_PROJECT = re.compile(r"^([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-tm-([0-9a-f]{32})$")
+
+
+def _load_consumer(cwd: Path, *, stop_only=False):
+    """Load a versioned, deliberately small app-owned declaration."""
+    try:
+        cwd = cwd.resolve(strict=True)
+        declaration = cwd / "test-management.consumer.json"
+        if declaration.is_symlink():
+            raise ValueError
+        synthetic_local = False
+        if declaration.exists():
+            if declaration.is_symlink() or declaration.resolve().parent != cwd:
+                raise ValueError
+            data = json.loads(declaration.read_text(encoding="utf-8"), object_pairs_hook=_declaration_object)
+            if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
+                raise ValueError
+            fields = {"version", "identity"}
+            if set(data) == fields | {"mode"}:
+                if data["mode"] != "synthetic-local":
+                    raise ValueError
+                synthetic_local = True
+            elif set(data) != fields:
+                raise ValueError
+            identity = data["identity"]
+            if not isinstance(identity, str) or len(identity) > 30 or not _IDENTITY.fullmatch(identity):
+                raise ValueError
+            if identity == "innoservice" and cwd.name.lower() != "innoservice":
+                raise ValueError
+            if synthetic_local and (identity == "innoservice" or cwd.name.lower() == "innoservice"):
+                raise ValueError
+        elif cwd.name.lower() == "innoservice":
+            identity = "innoservice"
+        else:
+            raise ValueError
+        if synthetic_local and not stop_only and os.path.lexists(cwd / ".env"):
+            raise ValueError
+        if synthetic_local and not stop_only:
+            from .synthetic_test_fixture import validate_fixture
+
+            validate_fixture(cwd)
+        for relative in (() if stop_only else ("docker-compose.test-management.yml", "backend", "frontend/build_current", "frontend/build_current/index.html")):
+            path = cwd / relative
+            if not path.exists() or not path.resolve().is_relative_to(cwd):
+                raise ValueError
+        return cwd, identity, synthetic_local
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise IsolationError("Invalid or missing test-management consumer declaration.") from exc
+
+
+def consumer(cwd: Path):
+    cwd, identity, _ = _load_consumer(cwd)
+    return cwd, identity
+
+
+def consumer_compose_environment(cwd: Path, env: dict):
+    """Keep generated fixtures independent of implicit Compose environment files."""
+    _, _, synthetic_local = _load_consumer(cwd)
+    if synthetic_local:
+        env.pop("COMPOSE_ENV_FILES", None)
+        env["COMPOSE_DISABLE_ENV_FILE"] = "1"
+
+
+def project_instance(project: str, identity: str):
+    match = _PROJECT.fullmatch(project)
+    if not match or match.group(1) != identity:
+        raise IsolationError("Invalid isolated instance handle for this consumer.")
+    return uuid.UUID(hex=match.group(2))
+
+
+def consumer_image(identity, cwd):
+    directory = os.path.normcase(str(cwd.resolve())).encode("utf-8")
+    return f"{identity}-test-management-{hashlib.sha256(directory).hexdigest()}:local"
+
+
+def _image_matches(actual, identity, cwd):
+    expected = consumer_image(identity, cwd) if cwd is not None else f"{identity}-test-management:local"
+    return actual == expected or (identity == "innoservice" and actual == "innoservice-test-management:local")
+
+
+@contextmanager
+def _legacy_image_override(identity, cwd):
+    if identity != "innoservice":
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="dcm-test-management-") as directory:
+        path = Path(directory) / "image-override.yml"
+        path.write_text(yaml.safe_dump({"services": {"backend": {"image": consumer_image(identity, cwd)}}}), encoding="utf-8")
+        yield path
+
+
+def _verify_directory(labels, cwd):
+    if cwd is not None:
+        recorded = labels.get("com.docker.compose.project.working_dir")
+        if not isinstance(recorded, str) or Path(recorded).resolve() != cwd.resolve():
+            raise IsolationError("The instance belongs to another application directory.")
+
+
+def _verify_bind_sources(mounts, cwd):
+    if cwd is not None:
+        expected = {"/app/backend": cwd / "backend", "/app/frontend_host/build_current": cwd / "frontend" / "build_current"}
+        for mount in mounts:
+            if mount.get("Destination") in expected:
+                if not isinstance(mount.get("Source"), str) or Path(mount["Source"]).resolve() != expected[mount["Destination"]].resolve():
+                    raise IsolationError("A source mount belongs to another application directory.")
+
+
+def _declaration_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate consumer declaration key.")
+        result[key] = value
+    return result
 
 
 def _docker_json(name: str, expression: str, *, env=None):
@@ -60,21 +177,21 @@ def _has_mount(mountinfo: str, target: str) -> bool:
     return False
 
 
-def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo):
+def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo, *, identity="innoservice", cwd=None):
     """Verify actual per-instance volumes, loopback binding and exclusive network.
 
     Docker inspection is restricted to named non-secret fields; container
     environments and Compose-expanded configuration are never inspected.
     """
-    if not _PROJECT.fullmatch(project):
-        raise IsolationError("Invalid isolated instance handle.")
+    project_instance(project, identity)
     backend, db = f"{project}-backend-1", f"{project}-db-1"
     network = f"{project}_isolated"
     try:
-        for name, service, image in ((backend, "backend", "innoservice-test-management:local"), (db, "db", "postgres:18")):
+        for name, service in ((backend, "backend"), (db, "db")):
             labels = inspect(name, ".Config.Labels")
+            _verify_directory(labels, cwd)
             if (labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != service or
-                    inspect(name, ".Config.Image") != image or inspect(name, ".State.Running") is not True or
+                    not (_image_matches(inspect(name, ".Config.Image"), identity, cwd) if service == "backend" else inspect(name, ".Config.Image") == "postgres:18") or inspect(name, ".State.Running") is not True or
                     inspect(name, ".HostConfig.Privileged") is not False):
                 raise IsolationError("Container identity or state failed verification.")
             networks = inspect(name, ".NetworkSettings.Networks")
@@ -82,6 +199,9 @@ def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo):
                 raise IsolationError("Container network membership failed verification.")
         if inspect(network, ".Internal") is not True:
             raise IsolationError("The instance network is not internal.")
+        labels = inspect(network, ".Labels")
+        if labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.network") != "isolated":
+            raise IsolationError("The instance network has unexpected ownership.")
         backend_id, db_id = inspect(backend, ".Id"), inspect(db, ".Id")
         members = inspect(network, ".Containers")
         if set(members) != {backend_id, db_id}:
@@ -90,6 +210,7 @@ def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo):
         if inspect(db, ".NetworkSettings.Networks")[network]["IPAddress"] != db_address:
             raise IsolationError("The database network address does not match.")
         mounts = inspect(backend, ".Mounts")
+        _verify_bind_sources(mounts, cwd)
         if len(mounts) != 3 or {item["Destination"] for item in mounts} != {"/app/backend", "/app/frontend_host/build_current", "/app/backend/media"}:
             raise IsolationError("The backend mount list is not isolated.")
         binds = [item for item in mounts if item["Destination"] != "/app/backend/media"]
@@ -115,7 +236,8 @@ def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo):
         if any(ports.values()) or any(configured.values()):
             raise IsolationError("The backend exposes a host port.")
         db_ports = inspect(db, ".NetworkSettings.Ports") or {}
-        if any(value for value in db_ports.values()):
+        db_configured = inspect(db, ".HostConfig.PortBindings") or {}
+        if any(db_ports.values()) or any(db_configured.values()):
             raise IsolationError("The database exposes a host port.")
         return None, db_address
     except IsolationError:
@@ -124,20 +246,21 @@ def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo):
         raise IsolationError("Runtime isolation verification failed.") from exc
 
 
-def validate_stopped_instance(project: str, inspect=_docker_json) -> None:
+def validate_stopped_instance(project: str, inspect=_docker_json, *, identity="innoservice", cwd=None) -> None:
     """Refuse to resume a live backend or a project with foreign volumes."""
-    if not _PROJECT.fullmatch(project):
-        raise IsolationError("Invalid isolated instance handle.")
+    project_instance(project, identity)
     backend, db = f"{project}-backend-1", f"{project}-db-1"
     try:
-        for name, service, image in ((backend, "backend", "innoservice-test-management:local"), (db, "db", "postgres:18")):
+        for name, service in ((backend, "backend"), (db, "db")):
             labels = inspect(name, ".Config.Labels")
+            _verify_directory(labels, cwd)
             if (labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != service or
-                    inspect(name, ".Config.Image") != image or inspect(name, ".HostConfig.Privileged") is not False):
+                    not (_image_matches(inspect(name, ".Config.Image"), identity, cwd) if service == "backend" else inspect(name, ".Config.Image") == "postgres:18") or inspect(name, ".HostConfig.Privileged") is not False):
                 raise ValueError
         if inspect(backend, ".State.Running") is not False:
             raise IsolationError("The instance is still running; refusing to take it over.")
         mounts, db_mounts = inspect(backend, ".Mounts"), inspect(db, ".Mounts")
+        _verify_bind_sources(mounts, cwd)
         if len(mounts) != 3 or {m["Destination"] for m in mounts} != {"/app/backend", "/app/frontend_host/build_current", "/app/backend/media"}:
             raise ValueError
         for item in mounts:
@@ -162,9 +285,15 @@ def validate_stopped_instance(project: str, inspect=_docker_json) -> None:
         raise IsolationError("The stopped instance ownership could not be verified.") from exc
 
 
-def validate_compose_file(path: Path) -> None:
+def validate_compose_file(path: Path, *, identity="innoservice") -> None:
     """Reject a manifest that could reuse ordinary storage or expose a service."""
     try:
+        declaration = path.parent / "test-management.consumer.json"
+        synthetic_local = False
+        if declaration.is_symlink() or declaration.exists():
+            cwd, declared_identity, synthetic_local = _load_consumer(path.parent)
+            if declared_identity != identity or path.resolve() != (cwd / "docker-compose.test-management.yml").resolve():
+                raise ValueError
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(config, dict) or set(config) != {"services", "networks", "volumes"}:
             raise ValueError
@@ -174,15 +303,19 @@ def validate_compose_file(path: Path) -> None:
         if set(services) != {"backend", "db"} or config["networks"] != {"isolated": {"internal": True, "ipam": {"config": [{"subnet": "${TEST_MANAGEMENT_SUBNET:?missing isolated network subnet}"}]}}}:
             raise ValueError
         backend, db = services["backend"], services["db"]
-        if set(backend) != {"image", "build", "command", "env_file", "environment", "volumes", "depends_on", "networks"}:
+        backend_fields = {"image", "build", "command", "environment", "volumes", "depends_on", "networks"}
+        if not synthetic_local:
+            backend_fields.add("env_file")
+        if set(backend) != backend_fields:
             raise ValueError
         if set(db) != {"image", "environment", "volumes", "healthcheck", "networks"}:
             raise ValueError
-        if backend["image"] != "innoservice-test-management:local" or backend["build"] != {"context": ".", "dockerfile": "backend/Dockerfile"}:
+        image = "innoservice-test-management:local" if identity == "innoservice" else "${TEST_MANAGEMENT_IMAGE:?missing isolated image}"
+        if backend["image"] != image or backend["build"] != {"context": ".", "dockerfile": "backend/Dockerfile"}:
             raise ValueError
         if backend["command"] != ["python", "-m", "django_core_micha.test_management.isolated_entrypoint"]:
             raise ValueError
-        if backend["env_file"] != [".env"]:
+        if not synthetic_local and backend["env_file"] != [".env"]:
             raise ValueError
         if backend["volumes"] != ["./backend:/app/backend:ro", "./frontend/build_current:/app/frontend_host/build_current:ro", {"type": "volume", "source": "media", "target": "/app/backend/media", "volume": {"nocopy": True}}]:
             raise ValueError
@@ -194,7 +327,7 @@ def validate_compose_file(path: Path) -> None:
             raise ValueError
         if backend["environment"] != {
             "DJANGO_SETTINGS_MODULE": "backend.local_test_management_settings",
-            "ENV_TYPE": "${ENV_TYPE:?missing original environment identity}",
+            "ENV_TYPE": "local" if synthetic_local else "${ENV_TYPE:?missing original environment identity}",
             "DB_HOST": "db", "DB_PORT": "5432", "DB_NAME": "${TEST_MANAGEMENT_DATABASE:?missing isolated database name}",
             "DB_USER": "test_management", "DB_PASSWORD": "${TEST_MANAGEMENT_DATABASE_PASSWORD:?missing isolated database password}",
             "DJANGO_SECRET_KEY": "${TEST_MANAGEMENT_DJANGO_SECRET:?missing isolated application secret}",
@@ -334,10 +467,10 @@ def _start_loopback_proxy(project, cwd, env):
         raise IsolationError("The local browser relay did not become ready.") from exc
 
 
-def _finish_start(project, instance, compose, cwd, env, *, renew=False):
+def _finish_start(project, instance, compose, cwd, env, *, identity, renew=False):
     inspect = lambda name, expression: _docker_json(name, expression, env=env)
     mountinfo = lambda name: _mountinfo(name, env=env)
-    _, database_ip = validate_runtime(project, inspect=inspect, mountinfo=mountinfo)
+    _, database_ip = validate_runtime(project, inspect=inspect, mountinfo=mountinfo, identity=identity, cwd=cwd)
     for command in (["chown", "1000:1000", "/app/backend/media"], ["chmod", "0700", "/app/backend/media"]):
         if _run_private(compose + ["exec", "-T", "--user", "0", "backend"] + command, cwd=cwd, env=env):
             raise IsolationError("The isolated media volume could not be prepared.")
@@ -347,7 +480,7 @@ def _finish_start(project, instance, compose, cwd, env, *, renew=False):
         raise IsolationError("The isolated database migration failed.")
     if renew and _run_private(compose + ["exec", "-T", "backend", "python", "manage.py", "renew_test_controller"], cwd=cwd, env=env):
         raise IsolationError("The isolated controller could not be renewed.")
-    _, final_ip = validate_runtime(project, inspect=inspect, mountinfo=mountinfo)
+    _, final_ip = validate_runtime(project, inspect=inspect, mountinfo=mountinfo, identity=identity, cwd=cwd)
     if final_ip != database_ip:
         raise IsolationError("The isolated runtime changed during startup.")
     proxy, port = _start_loopback_proxy(project, cwd, env)
@@ -366,6 +499,31 @@ def _finish_start(project, instance, compose, cwd, env, *, renew=False):
     raise IsolationError("The isolated backend did not become ready.")
 
 
+def _stop_owned_candidate(project, identity, compose, cwd, env):
+    """Stop only services whose project and checkout ownership can be proved.
+
+    Isolation validation may itself have failed, so cleanup must not depend on
+    the unsafe property being valid. Unknown or missing services are untouched.
+    """
+    project_instance(project, identity)
+    try:
+        validate_compose_file(cwd / "docker-compose.test-management.yml", identity=identity)
+    except IsolationError:
+        print("[WARN] Candidate cleanup refused because its manifest changed.", flush=True)
+        return
+    for service in ("backend", "db"):
+        try:
+            labels = _docker_json(f"{project}-{service}-1", ".Config.Labels", env=env)
+            if (labels.get("com.docker.compose.project") != project or
+                    labels.get("com.docker.compose.service") != service):
+                continue
+            _verify_directory(labels, cwd)
+            if _run_private(compose + ["stop", service], cwd=cwd, env=env, timeout=60):
+                print("[WARN] An owned candidate service could not be stopped.", flush=True)
+        except (IsolationError, AttributeError, TypeError):
+            continue
+
+
 def start_isolated_instance(cwd: Path, inherited_env=None):
     """Start one uniquely named instance after static and runtime isolation checks."""
     env = dict(os.environ if inherited_env is None else inherited_env)
@@ -374,14 +532,15 @@ def start_isolated_instance(cwd: Path, inherited_env=None):
     # Compose resolves the app's own original identity; an inherited shell
     # value must not mask a staging/production value from the app configuration.
     env.pop("ENV_TYPE", None)
-    if cwd.name.lower() != "innoservice" or not (cwd / "frontend" / "build_current" / "index.html").is_file():
-        raise IsolationError("The supported app and its local frontend build are required.")
+    cwd, identity = consumer(cwd)
     manifest = cwd / "docker-compose.test-management.yml"
-    validate_compose_file(manifest)
+    validate_compose_file(manifest, identity=identity)
+    consumer_compose_environment(cwd, env)
     _assert_local_docker(cwd, env)
     instance = uuid.uuid4()
-    project = f"innoservice-tm-{instance.hex}"
+    project = f"{identity}-tm-{instance.hex}"
     env.update({
+        "TEST_MANAGEMENT_IMAGE": consumer_image(identity, cwd),
         "TEST_MANAGEMENT_INSTANCE_ID": str(instance),
         "TEST_MANAGEMENT_SUBNET": f"10.{instance.bytes[0]}.{instance.bytes[1]}.0/24",
         "TEST_MANAGEMENT_DATABASE": f"dcm_tm_{instance.hex}",
@@ -401,35 +560,38 @@ def start_isolated_instance(cwd: Path, inherited_env=None):
             raise IsolationError("A generated test volume already exists; refusing reuse.")
         if "no such volume" not in result.stderr.lower():
             raise IsolationError("Unable to verify a fresh test volume.")
-    compose = ["docker", "compose", "-p", project, "-f", str(manifest)]
-    print(f"[INFO] Isolated instance: {project}", flush=True)
-    if _run_private(compose + ["up", "-d", "--build"], cwd=cwd, env=env, timeout=1800, heartbeat=True):
-        raise IsolationError("The isolated containers could not be started.")
-    try:
-        return _finish_start(project, instance, compose, cwd, env)
-    except Exception:
-        # A failed candidate is stopped but never deletes volumes or other instances.
-        _run_private(compose + ["stop"], cwd=cwd, env=env, timeout=60)
-        raise
+    with _legacy_image_override(identity, cwd) as override:
+        compose = ["docker", "compose", "-p", project, "-f", str(manifest)]
+        if override is not None:
+            compose += ["-f", str(override)]
+        print(f"[INFO] Isolated instance: {project}", flush=True)
+        try:
+            if _run_private(compose + ["up", "-d", "--build"], cwd=cwd, env=env, timeout=1800, heartbeat=True):
+                raise IsolationError("The isolated containers could not be started.")
+            return _finish_start(project, instance, compose, cwd, env, identity=identity)
+        except Exception:
+            # A failed candidate is stopped but never deletes volumes or other instances.
+            _stop_owned_candidate(project, identity, compose, cwd, env)
+            raise
 
 
 def resume_isolated_instance(cwd: Path, project: str, inherited_env=None):
     """Explicitly resume one stopped instance without taking over a live one."""
-    if not _PROJECT.fullmatch(project):
-        raise IsolationError("Invalid isolated instance handle.")
+    cwd, identity = consumer(cwd)
+    instance = project_instance(project, identity)
     env = dict(os.environ if inherited_env is None else inherited_env)
     if env.get("ENV_TYPE") and env["ENV_TYPE"].lower() != "local":
         raise IsolationError("The caller environment is not local.")
     env.pop("ENV_TYPE", None)
     env.pop("COMPOSE_PROFILES", None)
     manifest = cwd / "docker-compose.test-management.yml"
-    validate_compose_file(manifest)
+    validate_compose_file(manifest, identity=identity)
+    consumer_compose_environment(cwd, env)
     _assert_local_docker(cwd, env)
-    validate_stopped_instance(project, inspect=lambda name, expression: _docker_json(name, expression, env=env))
-    instance = uuid.UUID(hex=project.removeprefix("innoservice-tm-"))
+    validate_stopped_instance(project, inspect=lambda name, expression: _docker_json(name, expression, env=env), identity=identity, cwd=cwd)
     # Compose needs placeholders to parse the manifest for `start`/`exec`.
     # Those operations retain the original container environment and credentials.
-    env.update({"TEST_MANAGEMENT_INSTANCE_ID": str(instance), "TEST_MANAGEMENT_SUBNET": f"10.{instance.bytes[0]}.{instance.bytes[1]}.0/24", "TEST_MANAGEMENT_DATABASE": f"dcm_tm_{instance.hex}",
+    env.update({"TEST_MANAGEMENT_IMAGE": consumer_image(identity, cwd), "TEST_MANAGEMENT_INSTANCE_ID": str(instance), "TEST_MANAGEMENT_SUBNET": f"10.{instance.bytes[0]}.{instance.bytes[1]}.0/24", "TEST_MANAGEMENT_DATABASE": f"dcm_tm_{instance.hex}",
                 "TEST_MANAGEMENT_DATABASE_PASSWORD": "resume-placeholder", "TEST_MANAGEMENT_DJANGO_SECRET": "resume-placeholder",
                 "TEST_MANAGEMENT_CONTROLLER_TOKEN": "resume-placeholder"})
     compose = ["docker", "compose", "-p", project, "-f", str(manifest)]
@@ -446,31 +608,27 @@ def resume_isolated_instance(cwd: Path, project: str, inherited_env=None):
             raise IsolationError("The isolated database did not become ready.")
         if _run_private(compose + ["start", "backend"], cwd=cwd, env=env):
             raise IsolationError("The isolated backend could not be resumed.")
-        return _finish_start(project, instance, compose, cwd, env, renew=True)
+        return _finish_start(project, instance, compose, cwd, env, identity=identity, renew=True)
     except Exception:
-        _run_private(compose + ["stop"], cwd=cwd, env=env, timeout=60)
+        _stop_owned_candidate(project, identity, compose, cwd, env)
         raise
 
 
 def stop_isolated_instance(cwd: Path, project: str, inherited_env=None):
     """Stop only the verified instance; preserve its data for explicit recovery."""
-    if not _PROJECT.fullmatch(project):
-        raise IsolationError("Invalid isolated instance handle.")
+    # Stopping an owned runtime must remain possible after source/build changes.
+    # No Compose parsing or synthetic code execution is needed for this operation.
+    cwd, identity, _ = _load_consumer(cwd, stop_only=True)
+    project_instance(project, identity)
     env = dict(os.environ if inherited_env is None else inherited_env)
     if env.get("ENV_TYPE") and env["ENV_TYPE"].lower() != "local":
         raise IsolationError("The caller environment is not local.")
     env.pop("ENV_TYPE", None)
     env.pop("COMPOSE_PROFILES", None)
-    manifest = cwd / "docker-compose.test-management.yml"
-    validate_compose_file(manifest)
     _assert_local_docker(cwd, env)
     inspect = lambda name, expression: _docker_json(name, expression, env=env)
-    validate_runtime(project, inspect=inspect, mountinfo=lambda name: _mountinfo(name, env=env))
-    instance = uuid.UUID(hex=project.removeprefix("innoservice-tm-"))
-    env.update({"TEST_MANAGEMENT_INSTANCE_ID": str(instance), "TEST_MANAGEMENT_SUBNET": f"10.{instance.bytes[0]}.{instance.bytes[1]}.0/24", "TEST_MANAGEMENT_DATABASE": f"dcm_tm_{instance.hex}",
-                "TEST_MANAGEMENT_DATABASE_PASSWORD": "stop-placeholder", "TEST_MANAGEMENT_DJANGO_SECRET": "stop-placeholder",
-                "TEST_MANAGEMENT_CONTROLLER_TOKEN": "stop-placeholder"})
-    compose = ["docker", "compose", "-p", project, "-f", str(manifest)]
-    if _run_private(compose + ["stop"], cwd=cwd, env=env, timeout=60):
+    validate_runtime(project, inspect=inspect, mountinfo=lambda name: _mountinfo(name, env=env), identity=identity, cwd=cwd)
+    command = ["docker", "stop", f"{project}-backend-1", f"{project}-db-1"]
+    if _run_private(command, cwd=cwd, env=env, timeout=60):
         raise IsolationError("The isolated instance could not be stopped.")
     print(f"[INFO] Stopped isolated instance: {project}", flush=True)

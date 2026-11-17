@@ -5,22 +5,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import threading
 import time
 
 from .http_relay import HOP_HEADERS, MAX_BYTES, allowed_path
+from django_core_micha.scripts.isolated_test_start import (
+    IsolationError, _assert_local_docker, consumer, consumer_compose_environment, consumer_image, project_instance, validate_compose_file, validate_runtime,
+)
 
-_PROJECT = re.compile(r"^innoservice-tm-[0-9a-f]{32}$")
 
-
-def compose_env(project):
+def compose_env(project, cwd):
+    cwd, identity = consumer(cwd)
+    project_instance(project, identity)
     env = dict(os.environ)
+    consumer_compose_environment(cwd, env)
+    env.pop("COMPOSE_PROFILES", None)
     for key in ("ENV_TYPE", "TEST_MANAGEMENT_DATABASE_PASSWORD", "TEST_MANAGEMENT_DJANGO_SECRET", "TEST_MANAGEMENT_CONTROLLER_TOKEN"):
         env.pop(key, None)
-    env.update({"TEST_MANAGEMENT_DATABASE": "relay_placeholder", "TEST_MANAGEMENT_DATABASE_PASSWORD": "relay_placeholder",
+    env.update({"TEST_MANAGEMENT_IMAGE": consumer_image(identity, cwd), "TEST_MANAGEMENT_DATABASE": "relay_placeholder", "TEST_MANAGEMENT_DATABASE_PASSWORD": "relay_placeholder",
                 "TEST_MANAGEMENT_DJANGO_SECRET": "relay_placeholder", "TEST_MANAGEMENT_CONTROLLER_TOKEN": "relay_placeholder",
                 "TEST_MANAGEMENT_INSTANCE_ID": "00000000-0000-0000-0000-000000000000", "TEST_MANAGEMENT_SUBNET": "10.0.0.0/24"})
     return env
@@ -57,9 +61,13 @@ def handler_for(project, cwd):
                 message = {"method": self.command, "path": self.path,
                            "headers": [[key, value] for key, value in self.headers.items()],
                            "body": base64.b64encode(body).decode("ascii")}
+                checked_cwd, identity = consumer(cwd)
+                project_instance(project, identity)
+                validate_compose_file(checked_cwd / "docker-compose.test-management.yml", identity=identity)
+                validate_runtime(project, identity=identity, cwd=checked_cwd)
                 command = ["docker", "compose", "-p", project, "-f", "docker-compose.test-management.yml", "exec", "-T",
                            "backend", "python", "-m", "django_core_micha.test_management.http_relay"]
-                result = subprocess.run(command, cwd=str(cwd), env=compose_env(project), input=json.dumps(message),
+                result = subprocess.run(command, cwd=str(cwd), env=compose_env(project, cwd), input=json.dumps(message),
                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                         encoding="utf-8", timeout=150, check=True, shell=False)
                 response = json.loads(result.stdout)
@@ -102,11 +110,20 @@ def monitor(server, project):
 
 
 def main():
-    if len(sys.argv) != 3 or not _PROJECT.fullmatch(sys.argv[1]):
+    if len(sys.argv) != 3:
         raise SystemExit(1)
-    project, cwd = sys.argv[1], Path(sys.argv[2]).resolve()
-    if cwd.name.lower() != "innoservice" or not (cwd / "docker-compose.test-management.yml").is_file():
-        raise SystemExit(1)
+    project = sys.argv[1]
+    try:
+        cwd, identity = consumer(Path(sys.argv[2]))
+        project_instance(project, identity)
+        validate_compose_file(cwd / "docker-compose.test-management.yml", identity=identity)
+        docker_env = dict(os.environ)
+        _assert_local_docker(cwd, docker_env)
+        os.environ.pop("DOCKER_CONTEXT", None)
+        os.environ["DOCKER_HOST"] = docker_env["DOCKER_HOST"]
+        validate_runtime(project, identity=identity, cwd=cwd)
+    except (IsolationError, OSError):
+        raise SystemExit(1) from None
     server = QuietServer(("127.0.0.1", 0), handler_for(project, cwd))
     threading.Thread(target=monitor, args=(server, project), daemon=True).start()
     print(f"READY {server.server_port}", flush=True)
