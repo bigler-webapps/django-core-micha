@@ -9,6 +9,7 @@ INSTALLED_APPS = [
     "django_core_micha.notifications",
     "django_core_micha.messaging",
     "django_core_micha.assistant",
+    "django_core_micha.ai_policy",
     "django_core_micha.billing",
     "django_core_micha.receipts",
     "django_core_micha.terms",

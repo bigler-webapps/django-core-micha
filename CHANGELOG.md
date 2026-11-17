@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.30.0] — 2026-11-17
+
+- DCM-CHAT-20 adds an opt-in managed AI policy app with durable revisions, scoped enrolment, a refresh command and source-aware routing. Managed assistant catalogue, chat, completion and direct workload callers can distinguish accounts that offer the same model. Existing unenrolled applications keep their local catalogue and credentials.
+
 ## [3.25.0] — 2026-11-14
 
 ### Added

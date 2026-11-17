@@ -2,6 +2,16 @@
 
 `django_core_micha.assistant` is opt-in. Add it to `INSTALLED_APPS`, mount `django_core_micha.assistant.urls` under an application-selected REST prefix, and include `django_core_micha.assistant.routing.websocket_urlpatterns` in the authenticated Channels router. The app owns prompts, read-only tools, scope authorization, catalogue entries and limit overrides. The core enforces scope access; chats are owner-only unless the app explicitly shares a non-empty scope.
 
+## Centrally managed AI policy
+
+Enrolled deployments also add `django_core_micha.ai_policy` and run its migrations. Set `DCM_AI_POLICY_ENABLED`, `DCM_AI_POLICY_APP_ID`, `DCM_AI_POLICY_ENVIRONMENT`, the trusted HTTPS `DCM_AI_POLICY_BASE_URL`, and a dedicated `DCM_AI_POLICY_ENROLLMENT_CREDENTIAL` through the app's deployment settings. `DCM_AI_POLICY_SOURCES` maps source IDs to a trusted driver, display label and `credential_setting` used locally to resolve a server-side model credential. A catalogue row uses `source_id` to distinguish multiple accounts offering the same model.
+
+Run `manage.py sync_ai_policy --watch` as a deployment-managed worker to maintain contact even when no chat is open. The transport checks a fixed enrolment endpoint. It durably applies the newest valid policy for the configured app/environment before acknowledging that revision. Request-time checks continue to use the last valid policy during a transport outage. Until an enrolled deployment has a valid policy, managed provider calls are unavailable.
+
+In managed mode, the authenticated catalogue and availability response add `policy: {revision: integer|null}`. Entries add `source_id` and `source_label`; their `id` is an opaque source/model identity. `default` is the server's standard if locally eligible. A saved selection that loses eligibility can use the eligible standard at the next turn. Selection submitted explicitly by the caller is checked against the current policy, availability and local rules. A request which has reached a provider retains the account it started with. Provider failures do not trigger a switch to another account.
+
+Direct workloads call `django_core_micha.ai_policy.resolver.resolve_workload` with their local eligible source/model rows just before dispatch, supplying the workload's existing eligibility callback when needed. Continue to apply consent, access and cost checks around that boundary. Keep the returned credential server-side. For async work, run the resolver through `sync_to_async`. Unenrolled assistant apps continue to use their existing catalogue and credentials.
+
 ## App hooks and settings
 
 - `DCM_ASSISTANT_SYSTEM_PROMPT_BUILDER(chat) -> str`

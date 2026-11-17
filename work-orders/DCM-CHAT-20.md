@@ -42,6 +42,8 @@ STOP — implementer, do not act on Part C.
 
 Independently review the mapped Tier 3 slice including security and the checked inputs to provider routing. Verify affected assistant, extraction budget and policy tests. Release the additive DCM contract before consumer pins. The parent WO owns the end-to-end 30-second guarantee, the central and UCM behavior and staging rollout evidence.
 
+The independent OpenAI reviews used codex/gpt-6.1-terra (envelope) and codex/gpt-6-luna (regression, duplication, tests, security). The review found legacy startup/identity regressions, local eligibility bypass in routing, incorrect standard selection, missing provider-boundary recheck, and several readiness and test gaps. Corrections retain last-valid policy on disconnection as required by the approved Envelope. The central and first live consumer still need to verify the end-to-end delivery window and PostgreSQL concurrency.
+
 ## Gate record
 
 Gate #1 approved by the operator in BCO-UI-10 chat on 2026-11-17. This work order maps the DCM portion of the approved BCO-UI-10 Envelope. No independent scope extension.

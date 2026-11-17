@@ -14,7 +14,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .catalogue import default_entry, entry_by_id, entry_enabled, validate
+from .catalogue import default_entry, entries, entry_by_id, entry_enabled, entry_usable, validate
 from .access import can_view_chat
 from django.core.exceptions import ObjectDoesNotExist
 from django.contrib.auth import get_user_model
@@ -26,6 +26,8 @@ from .hooks import (AfterTurnResult, availability_reason, build_system_prompt,
 from .history import build_history, latest_summary
 from .limits import get_limit
 from .models import AssistantChat, AssistantSummary, AssistantTurn
+from django_core_micha.ai_policy.policy import policy_enabled, refresh_policy
+from django_core_micha.ai_policy.resolver import resolve_workload, source_id as row_source_id
 
 log = logging.getLogger(__name__)
 TITLE_DEFAULT = AssistantChat._meta.get_field("title").default
@@ -62,8 +64,36 @@ def _start(chat_id, user_id, message):
         raise DriverError("rate_limited")
     return turn
 
+def _select_managed_turn(chat, user):
+    selector = {"source": chat.selected_source_id or None, "driver": chat.selected_driver or None,
+                "model": chat.selected_model or None}
+    if any(selector.values()):
+        try:
+            return resolve_workload(user, rows=entries(), effort=chat.selected_effort, refresh=False,
+                                    eligible=entry_usable, **selector)
+        except ValueError:
+            pass
+    try:
+        return resolve_workload(user, rows=entries(), refresh=False, eligible=entry_usable)
+    except ValueError as exc:
+        raise DriverError("unavailable") from exc
+
+
+def _recheck_managed_turn(turn, user):
+    try:
+        return resolve_workload(user, rows=entries(), source=turn.source_id, driver=turn.driver,
+                                model=turn.model, effort=turn.effort, eligible=entry_usable)
+    except ValueError as exc:
+        raise DriverError("unavailable") from exc
+
+
 def _create_turn(chat_id, user_id, message):
     reconcile_interrupted()
+    if policy_enabled():
+        try:
+            refresh_policy()
+        except Exception:
+            pass
     try:
         with transaction.atomic():
             chat = AssistantChat.objects.select_for_update().get(pk=chat_id)
@@ -71,16 +101,25 @@ def _create_turn(chat_id, user_id, message):
             if not can_view_chat(user, chat): raise AccessLost()
 
             if chat.archived_at: raise DriverError("archived")
-            selected = entry_by_id(f"{chat.selected_driver}:{chat.selected_model}") if chat.selected_driver and chat.selected_model else None
-            if selected is None or not entry_enabled(selected):
-                # a disabled or removed entry continues on the current default instead of failing
-                fallback = default_entry(user)
-                if fallback is None: raise DriverError("not_configured")
-                chat.selected_driver, chat.selected_model = fallback["driver"], fallback["model"]
-                efforts = fallback.get("efforts") or ["medium"]
-                if chat.selected_effort not in efforts: chat.selected_effort = efforts[0]
-                chat.save(update_fields=("selected_driver", "selected_model", "selected_effort", "updated_at"))
-            validate(chat.selected_driver, chat.selected_model, chat.selected_effort)
+            if policy_enabled():
+                resolved = _select_managed_turn(chat, user)
+                selection = resolved.driver, resolved.model, resolved.effort, resolved.source_id
+                previous = chat.selected_driver, chat.selected_model, chat.selected_effort, chat.selected_source_id
+                if selection != previous:
+                    chat.selected_driver, chat.selected_model, chat.selected_effort, chat.selected_source_id = selection
+                    chat.save(update_fields=("selected_driver", "selected_model", "selected_effort", "selected_source_id", "updated_at"))
+            else:
+                selected = entry_by_id(f"{chat.selected_driver}:{chat.selected_model}") if chat.selected_driver and chat.selected_model else None
+                if selected is None or not entry_enabled(selected):
+                    fallback = default_entry(user)
+                    if fallback is None:
+                        raise DriverError("not_configured")
+                    chat.selected_driver, chat.selected_model = fallback["driver"], fallback["model"]
+                    efforts = fallback.get("efforts") or ["medium"]
+                    if chat.selected_effort not in efforts:
+                        chat.selected_effort = efforts[0]
+                    chat.save(update_fields=("selected_driver", "selected_model", "selected_effort", "updated_at"))
+                validate(chat.selected_driver, chat.selected_model, chat.selected_effort)
             from .limit import over_limit
             if over_limit(user): raise DriverError("quota_exceeded")
             if chat.turns.filter(state="generating").exists(): raise DriverError("turn_active")
@@ -90,6 +129,7 @@ def _create_turn(chat_id, user_id, message):
             seq = (chat.turns.order_by("-sequence").values_list("sequence", flat=True).first() or 0) + 1
             return AssistantTurn.objects.create(chat=chat, sender_id=user_id, sequence=seq, user_text=message,
                 driver=chat.selected_driver, model=chat.selected_model, effort=chat.selected_effort,
+                source_id=chat.selected_source_id if policy_enabled() else "",
                 heartbeat_at=timezone.now())
     except IntegrityError as exc:
         raise DriverError("turn_active") from exc
@@ -132,12 +172,14 @@ def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=N
             chat.title = title[:60] or TITLE_DEFAULT
         if session_id and turn.driver == "claude_cli":
             chat.session_driver, chat.session_reference = turn.driver, session_id
+            chat.session_source_id = turn.source_id
             if session_tokens is not None: chat.session_tokens = session_tokens
             if session_version is not None: chat.session_prompt_version = session_version
         elif turn.driver != "claude_cli":
             chat.session_driver, chat.session_reference = "", ""
+            chat.session_source_id = ""
         chat.updated_at = timezone.now()
-        chat.save(update_fields=("title", "session_driver", "session_reference", "session_tokens", "session_prompt_version", "updated_at"))
+        chat.save(update_fields=("title", "session_driver", "session_reference", "session_source_id", "session_tokens", "session_prompt_version", "updated_at"))
         return True
 
 def _invoke_usage_hook(turn_id, kind="reply"):
@@ -207,7 +249,7 @@ async def _summarize_if_needed(chat, user, message, turn=None):
                    "Keep decisions, agreed codes and definitions, open questions, and which material was worked on. Write in the conversation's language. "
                    "Do NOT restate current project state; lookups provide it fresh.")
     prompt = "<<<CONVERSATION DATA>>>\n" + "\n\n".join(transcript).replace("<<<", "<< <").replace(">>>", "> >>") + "\n<<<END CONVERSATION DATA>>>"
-    entry = f"{chat.selected_driver}:{chat.selected_model}"
+    entry = f"{chat.selected_source_id or chat.selected_driver}:{chat.selected_model}"
     configured = await sync_to_async(entry_by_id)(entry)
     effort = "low" if configured and "low" in configured.get("efforts", []) else ((configured or {}).get("efforts") or ["low"])[0]
     try:
@@ -279,11 +321,11 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
             usage["execution_usd_micros"] = max(int(usage.get("execution_usd_micros", 0) or 0),
                                                 execution.reserved_usd_micros)
     try:
-        # Resolver is deliberately the one credential seam and runs exactly once per turn.
-        credential, billing = resolve_credential(user, turn.driver)
-        await sync_to_async(AssistantTurn.objects.filter(pk=turn.pk).update)(billing_source=billing)
-        if turn.driver != "claude_cli" and not credential:
-            raise DriverError("not_configured")
+        if not policy_enabled():
+            credential, billing = resolve_credential(user, turn.driver)
+            await sync_to_async(AssistantTurn.objects.filter(pk=turn.pk).update)(billing_source=billing)
+            if turn.driver != "claude_cli" and not credential:
+                raise DriverError("not_configured")
         current = await sync_to_async(AssistantChat.objects.get)(pk=chat.pk)
         prompt = await sync_to_async(build_system_prompt)(current)
         context_text = await sync_to_async(build_turn_context)(current, user, message, turn,
@@ -304,7 +346,8 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
         tools = await sync_to_async(tools_for_chat)(current)
         configured_version = await sync_to_async(prompt_version)()
         resumed = False
-        if turn.driver == "claude_cli" and current.session_driver == turn.driver and current.session_reference:
+        if (turn.driver == "claude_cli" and current.session_driver == turn.driver and current.session_reference
+                and current.session_source_id == turn.source_id):
             from .drivers.claude_cli import _session_dirs
             _, config_dir, _ = _session_dirs(current.pk)
             session_file = any((config_dir / "projects").glob(f"*/{current.session_reference}.jsonl"))
@@ -335,9 +378,8 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
         provider_message = message
         if context_text and turn.driver != "claude_cli":
             provider_message = f"{context_text}\n\n---\n\n{message}"
-        driver = _make_driver(turn.driver, credential)
         kwargs = {"prompt": prompt_data, "messages": history_rows + [{"role": "user", "content": provider_message}],
-            "system": prompt, "tools": tools, "user": user, "chat": current, "credential": credential,
+            "system": prompt, "tools": tools, "user": user, "chat": current,
             "effort": turn.effort, "cancel_event": cancel_event,
             "session_id": current.session_reference if session_file else None,
             "max_tool_calls": get_limit("max_tool_calls")}
@@ -362,8 +404,17 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
         if not await access_ok():
             access_lost = True
             raise asyncio.CancelledError
+        if policy_enabled():
+            resolved = await sync_to_async(_recheck_managed_turn)(turn, user)
+            credential = resolved.credential
+            kwargs["source_id"] = resolved.source_id
+            await sync_to_async(AssistantTurn.objects.filter(pk=turn.pk).update)(billing_source=resolved.billing_source)
+        kwargs["credential"] = credential
+        driver = _make_driver(turn.driver, credential)
         from .execution import prepare_execution
-        model_entry = await sync_to_async(entry_by_id)(f"{turn.driver}:{turn.model}")
+        model_entry = next((row for row in entries()
+            if row.get("driver") == turn.driver and row.get("model") == turn.model
+            and (not policy_enabled() or row_source_id(row) == turn.source_id)), None)
         if model_entry:
             try:
                 execution = await prepare_execution(current, user, turn, model_entry, authorize=access_ok)
@@ -553,7 +604,7 @@ def turn_payload(turn, chat=None):
         "assistant_text": turn.assistant_text, "state": turn.state, "error_code": turn.error_code or None,
         "tool_steps": [{"name": item.get("name", ""), "label": item.get("label", "")} for item in turn.tool_trace],
         "sources": [source for item in turn.tool_trace for source in item.get("sources", [])],
-        "driver": turn.driver, "model": turn.model, "effort": turn.effort,
+        "driver": turn.driver, "model": turn.model, "source_id": turn.source_id or None, "effort": turn.effort,
           "usage": {**(turn.usage or {}), "input_tokens": int((turn.usage or {}).get("input_tokens", 0) or 0),
               "output_tokens": int((turn.usage or {}).get("output_tokens", 0) or 0),
               "cache_read_tokens": int((turn.usage or {}).get("cache_read_tokens", 0) or 0),

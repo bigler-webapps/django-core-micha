@@ -10,13 +10,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .availability import availability
-from .catalogue import default_entry, entries, entry_by_id, entry_id, entry_enabled, model_level, selection_of, usable_entries, validate
+from .catalogue import (default_entry, entries, entry_by_id, entry_id, entry_enabled, model_level,
+    row_source_id, row_source_label, selection_of, usable_entries, validate)
 from .hooks import availability_reason, can_access_scope, is_shared_scope, _hook
 from .access import can_view_chat, is_creator
 from .models import AssistantChat
 from .history import summary_payload
 from .pagination import InvalidCursor, decode_cursor, encode_cursor
 from .turns import delete_session, reconcile_interrupted, turn_payload
+from django_core_micha.ai_policy.policy import current_policy, policy_enabled
 
 def _chat(user, chat_id):
     try: chat = AssistantChat.objects.get(pk=chat_id)
@@ -29,10 +31,13 @@ def _iso(value): return value.isoformat() if value else None
 def payload(chat):
     return {"id":str(chat.pk),"scope":chat.scope,"title":chat.title,"title_source":chat.title_source,
         "archived_at":_iso(chat.archived_at),"driver":chat.selected_driver,"model":chat.selected_model,
+        "source_id":chat.selected_source_id or None,
         "effort":chat.selected_effort,"selection":_selection(chat),"created_at":_iso(chat.created_at),"updated_at":_iso(chat.updated_at)}
 
 def _selection(chat):
-    row=next((r for r in entries() if r.get("driver")==chat.selected_driver and r.get("model")==chat.selected_model),None)
+    managed = policy_enabled()
+    row = next((r for r in entries() if r.get("driver") == chat.selected_driver and r.get("model") == chat.selected_model
+                and (not managed or r.get("source_id") == chat.selected_source_id)), None)
     return selection_of(row,chat.selected_effort) if row else None
 
 def _problem(code, status_code=400): return Response({"code":code,"error":code},status=status_code)
@@ -64,8 +69,9 @@ def _shape(request,rows,context_tokens):
         shaped.append({"id":entry_id(e),"driver":e["driver"],"model":e["model"],"label":e.get("name",e["model"]),
             "provider":{"claude_cli":"claude_code","anthropic_api":"anthropic","openai_api":"openai"}[e["driver"]],
             "level":model_level(e),"efforts":e["efforts"],"billing":e["billing"],"default":bool(e.get("default")),"estimate":estimates,
+            **({"source_id": row_source_id(e), "source_label": row_source_label(e), "policy_revision": e.get("policy_revision")} if e.get("source_id") else {}),
             "code_execution_supported":model_supports_execution(e),
-            "average_cost_usd_micros":_average_cost(entry_id(e))})
+            "average_cost_usd_micros":_average_cost(f"{e['driver']}:{e['model']}")})
     return shaped
 
 class CatalogueView(APIView):
@@ -80,7 +86,11 @@ class CatalogueView(APIView):
             last=chat.turns.filter(state="completed").order_by("-sequence").first()
             context_tokens=last.context_tokens if last else 0
         shaped=_shape(request,rows,context_tokens)
-        return Response({"default":selection_of(row) if row else None,"entries":shaped})
+        payload = {"default": selection_of(row) if row else None, "entries": shaped}
+        if policy_enabled():
+            state = current_policy()
+            payload["policy"] = {"revision": state.revision if state else None}
+        return _no_store(Response(payload))
 
 def _average_cost(value):
     from .limit import average_cost_usd_micros
@@ -175,14 +185,23 @@ class AvailabilityView(APIView):
     permission_classes=[IsAuthenticated]
     def get(self,request):
         result=availability()
-        # a provider is up but this user has no enabled, allowed entry: nothing can run
-        if entries() and result.get("status")=="available" and not usable_entries(request.user):
-            return Response({"status":"unavailable","reason":"no_model_enabled","providers":result.get("providers",{})})
         if "scope" in request.query_params:
             scope=request.query_params.get("scope","")
             if not can_access_scope(request.user,scope): return _problem("not_found",404)
             reason=availability_reason(request.user,scope)
             if reason: return Response({"status":"unavailable","reason":reason,"providers":result.get("providers",{})})
+        if policy_enabled():
+            rows = usable_entries(request.user)
+            state = current_policy()
+            drivers = {row["driver"] for row in rows}
+            result = {"status": "available" if drivers else "unavailable",
+                      "providers": {driver: "available" if driver in drivers else "not_configured"
+                                    for driver in result["providers"]},
+                      "policy": {"revision": state.revision if state else None}}
+            if not drivers:
+                result["reason"] = "no_model_enabled" if state else "policy_unavailable"
+        elif entries() and result.get("status") == "available" and not usable_entries(request.user):
+            return Response({"status": "unavailable", "reason": "no_model_enabled", "providers": result.get("providers", {})})
         return Response(result)
 
 class ChatListCreateView(APIView):
@@ -208,20 +227,28 @@ class ChatListCreateView(APIView):
         return Response({"results":[payload(x) for x in rows],"next":nxt,"has_more":more})
     def post(self,request):
         body=request.data if isinstance(request.data,dict) else {}
-        if set(body)-{"title","scope","driver","model","effort"}: return _problem("invalid_request")
+        if set(body)-{"title","scope","driver","model","effort","source_id"}: return _problem("invalid_request")
         scope=body.get("scope","")
         if not isinstance(scope,str) or len(scope)>255 or not can_access_scope(request.user,scope): return _problem("access_lost",403)
         selection=default_entry(request.user)
         driver=body.get("driver",selection.get("driver") if selection else "")
         model=body.get("model",selection.get("model") if selection else "")
         effort=body.get("effort",(selection.get("efforts") or ["medium"])[0] if selection else "medium")
+        source = body.get("source_id")
+        explicit = any(key in body for key in ("driver", "model", "source_id"))
+        if policy_enabled() and not explicit and selection:
+            source = selection.get("source_id")
+        if policy_enabled() and explicit and not (driver and model):
+            return _problem("invalid_selection")
         if driver and model:
-            try: validate(driver,model,effort,request.user)
+            try: validated = validate(driver, model, effort, request.user, source)
             except ValueError: return _problem("invalid_selection")
+            source = validated.get("source_id") if policy_enabled() else None
         title=body.get("title","New chat")
         if not isinstance(title,str) or not title.strip() or len(title)>200: return _problem("invalid_title")
         chat=AssistantChat.objects.create(owner=request.user,scope=scope,title=title.strip(),title_source="user" if "title" in body else "automatic",
-            selected_driver=driver,selected_model=model,selected_effort=effort)
+            selected_driver=driver,selected_model=model,selected_effort=effort,
+            selected_source_id=source or "")
         return Response(payload(chat),status=status.HTTP_201_CREATED)
 
 class ChatDetailView(APIView):
@@ -231,13 +258,19 @@ class ChatDetailView(APIView):
         chat=_chat(request.user,chat_id); body=request.data if isinstance(request.data,dict) else {}
         if chat.archived_at and body.get("archived") is not False: return _problem("archived",409)
         allowed={"title","archived","driver","model","effort","selection"}
+        if policy_enabled(): allowed.add("source_id")
         if not body or set(body)-allowed: return _problem("invalid_request")
         if "selection" in body:
             picked=body["selection"]
-            row=entry_by_id(picked.get("entry")) if isinstance(picked,dict) and set(picked)<={"entry","effort"} else None
+            row=entry_by_id(picked.get("entry")) if isinstance(picked,dict) and set(picked)<={"entry","effort","source_id"} else None
             if row is None: return _problem("invalid_selection")
             body={**{k:v for k,v in body.items() if k!="selection"},"driver":row["driver"],"model":row["model"],
                 "effort":picked.get("effort",chat.selected_effort)}
+            source = row.get("source_id")
+            if picked.get("source_id") not in (None, source):
+                return _problem("invalid_selection")
+            if policy_enabled():
+                body["source_id"] = source
         if "title" in body:
             title=body["title"]
             if not isinstance(title,str) or not title.strip() or len(title)>200: return _problem("invalid_title")
@@ -245,11 +278,13 @@ class ChatDetailView(APIView):
         if "archived" in body:
             if type(body["archived"]) is not bool: return _problem("invalid_request")
             chat.archived_at=timezone.now() if body["archived"] else None
-        if set(body)&{"driver","model","effort"}:
+        if set(body)&{"driver","model","effort","source_id"}:
             driver=body.get("driver",chat.selected_driver); model=body.get("model",chat.selected_model); effort=body.get("effort",chat.selected_effort)
-            try: validate(driver,model,effort,request.user)
+            source = body.get("source_id", chat.selected_source_id if driver == chat.selected_driver and model == chat.selected_model else None)
+            try: validated = validate(driver, model, effort, request.user, source or None)
             except ValueError: return _problem("invalid_selection")
             chat.selected_driver,chat.selected_model,chat.selected_effort=driver,model,effort
+            chat.selected_source_id=(validated.get("source_id") or "") if policy_enabled() else ""
         chat.save(); return Response(payload(chat))
     def delete(self,request,chat_id):
         chat=_chat(request.user,chat_id)

@@ -7,13 +7,15 @@ import uuid
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from asgiref.sync import async_to_sync
-from .catalogue import entry_by_id, entries, validate
+from asgiref.sync import async_to_sync, sync_to_async
+from .catalogue import entries, entry_by_id, entry_usable, validate
 from .credentials import resolve_credential
 from .drivers.base import DriverError
 from .limits import get_limit
 from .turns import _make_driver
 from .structured import check_schema, validation_error
+from django_core_micha.ai_policy.policy import policy_enabled
+from django_core_micha.ai_policy.resolver import resolve_workload
 
 @dataclass(frozen=True)
 class CompletionResult:
@@ -21,21 +23,31 @@ class CompletionResult:
     usage: dict
     data: object = None
 
-async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=None, effort=None, purpose="completion", response_schema=None):
+async def acomplete(user, *, prompt, system="", entry=None, source=None, driver=None, model=None, effort=None, purpose="completion", response_schema=None):
     if not isinstance(prompt, str) or not prompt.strip(): raise DriverError("invalid_output")
     if len(prompt.encode("utf-8")) + len((system or "").encode("utf-8")) > get_limit("max_prompt_bytes"): raise DriverError("prompt_too_long")
     if response_schema is not None and not check_schema(response_schema): raise DriverError("invalid_schema")
-    if entry is not None:
-        row = entry_by_id(entry)
+    source_id = ""
+    if policy_enabled():
+        try:
+            resolved = await sync_to_async(resolve_workload)(user, rows=entries(), entry=entry,
+                source=source, driver=driver, model=model, effort=effort, eligible=entry_usable)
+        except ValueError as exc:
+            raise DriverError(getattr(exc, "code", str(exc))) from exc
+        driver, model, effort = resolved.driver, resolved.model, resolved.effort
+        source_id, credential = resolved.source_id, resolved.credential
+    else:
+        if entry is not None:
+            row = entry_by_id(entry)
+            if row is None: raise DriverError("invalid_selection")
+            driver, model = row["driver"], row["model"]
+        if not driver or not model: raise DriverError("invalid_selection")
+        row = next((r for r in entries() if r.get("driver") == driver and r.get("model") == model), None)
         if row is None: raise DriverError("invalid_selection")
-        driver, model = row["driver"], row["model"]
-    if not driver or not model: raise DriverError("invalid_selection")
-    row = next((r for r in entries() if r.get("driver")==driver and r.get("model")==model), None)
-    if row is None: raise DriverError("invalid_selection")
-    effort = effort or (row.get("efforts") or ["medium"])[0]
-    try: validate(driver, model, effort)
-    except ValueError as exc: raise DriverError("invalid_selection") from exc
-    credential, _billing = resolve_credential(user, driver)
+        effort = effort or (row.get("efforts") or ["medium"])[0]
+        try: validate(driver, model, effort)
+        except ValueError as exc: raise DriverError("invalid_selection") from exc
+        credential, _billing = resolve_credential(user, driver)
     if driver != "claude_cli" and not credential: raise DriverError("not_configured")
     client = SimpleNamespace(pk=f"completion-{uuid.uuid4()}") if driver == "claude_cli" else None
     cleanup = None
@@ -55,6 +67,7 @@ async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=N
             async with asyncio.timeout(get_limit("provider_timeout")):
                 async for event in provider.stream(model=model, prompt=payload, messages=current_messages,
                         system=system, tools=[], user=user, chat=client, credential=credential, effort=effort,
+                        **({"source_id": source_id} if source_id else {}),
                         cancel_event=None, session_id=None, max_tool_calls=get_limit("max_tool_calls"),
                         response_schema=response_schema):
                     if event.get("type")=="delta":
@@ -106,7 +119,6 @@ async def acomplete(user, *, prompt, system="", entry=None, driver=None, model=N
         from django.apps import apps
         if usage and apps.is_installed("django_core_micha.billing"):
             try:
-                from asgiref.sync import sync_to_async
                 from django_core_micha.billing.services import record_ai_call
                 await sync_to_async(record_ai_call, thread_sensitive=True)(user=user, provider=driver, model=model, input_tokens=int(usage.get("input_tokens",0) or 0),
                     output_tokens=int(usage.get("output_tokens",0) or 0),
