@@ -61,6 +61,8 @@ DCM 3.32.0 provides stable managed family identities, revisioned private source/
 
 Validation: 101 affected tests passed; the migration consistency check reported no changes. Independent OpenAI review: envelope and security `codex/gpt-6.1-terra`; regression, duplication and tests `codex/gpt-6-luna`. Two implementation review rounds; the accepted findings were corrected and affected tests rerun. The central attestation provenance, deployed app tariff adapters and live rollout remain consumer acceptance requirements.
 
+The initial 3.32.0 publication run failed its full suite on two legacy summary tests and two unmanaged extraction cost-limit tests; no package was published. The follow-up restores those unmanaged behaviors while keeping missing managed usage unresolved. Six affected tests passed. The correction's independent closing review found no issues: envelope and security `codex/gpt-6.1-terra`; regression, duplication and tests `codex/gpt-6-luna`.
+
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-17 in the Codex requirements chat: “Ich gebe alle drei WO frei.” Approved Envelope: `f083789`.

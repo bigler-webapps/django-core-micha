@@ -219,7 +219,10 @@ def _response_cost_cents(*, response, model: str) -> int:
     from .drivers._common import usage_from_response
     usage = usage_from_response(response)
     if not usage.reported:
-        return None
+        from django_core_micha.ai_policy.policy import policy_enabled
+        if policy_enabled():
+            return None
+        return estimate_cost_cents(model=model, input_tokens=1000, output_tokens=1000)
     return estimate_cost_cents(model=model, input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
         cache_read_tokens=usage.cache_read_tokens, cache_write_tokens=usage.cache_write_tokens)
 

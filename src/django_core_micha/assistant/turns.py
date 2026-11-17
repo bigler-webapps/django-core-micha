@@ -325,9 +325,10 @@ async def _summarize_if_needed(chat, user, message, turn=None):
         from django_core_micha.ai_prices import price_usage
         usage = {key: max(0, int((result.usage or {}).get(key, 0) or 0)) for key in
                  ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")}
-        usage["reported"] = result.usage_reported
+        usage_reported = getattr(result, "usage_reported", bool(result.usage))
+        usage["reported"] = usage_reported
         cost_usd_micros = 0
-        if result.usage_reported:
+        if usage_reported:
             from django.apps import apps
             cost_record = None
             if apps.is_installed("django_core_micha.billing"):
@@ -336,12 +337,13 @@ async def _summarize_if_needed(chat, user, message, turn=None):
                     app=getattr(settings, "DCM_BILLING_APP", ""), purpose="summary",
                     reference=summary_reference).first)()
             cost_usd_micros = (cost_record.cost_usd_micros if cost_record and cost_record.cost_usd_micros is not None
-                               else price_usage(configured.model if family_choice else configured["model"], **usage))
+                               else price_usage(configured.model if family_choice else configured["model"],
+                                                **{key: usage[key] for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")}))
         usage["cost_usd_micros"] = cost_usd_micros
         usage["context_tokens"] = usage["input_tokens"] + usage["cache_read_tokens"] + usage["cache_write_tokens"]
         summary = await sync_to_async(AssistantSummary.objects.create)(chat=chat, up_to_sequence=cutoff,
             text=result.text, usage=usage, cost_usd_micros=usage["cost_usd_micros"])
-        if result.usage_reported:
+        if usage_reported:
             await sync_to_async(_invoke_summary_hook, thread_sensitive=True)(chat, user, turn or old_turns[-1], usage)
         return summary
     except Exception as exc:

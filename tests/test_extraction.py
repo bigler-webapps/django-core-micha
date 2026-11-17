@@ -397,6 +397,13 @@ def test_missing_usage_still_charges(model, expected):
     ) == expected
 
 
+@override_settings(AI_COST_LIMIT_ENABLED=True, DCM_AI_POLICY_ENABLED=True)
+def test_managed_missing_usage_does_not_create_an_estimated_charge():
+    assert charge_user_for_response(user_id=12, response=SimpleNamespace(), model="gpt-4o-mini") == 0
+    with override_settings(DCM_AI_POLICY_ENABLED=False):
+        assert charge_user_for_response(user_id=12, response=SimpleNamespace(), model="gpt-4o-mini") == 1
+
+
 def test_cache_key_is_provider_neutral_and_scoped():
     key = _cache_key(1234)
     assert "ai:cost:1234" in key
