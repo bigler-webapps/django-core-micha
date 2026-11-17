@@ -25,3 +25,9 @@ Run scoped receipt/policy checks, independent Tier 3 review, and release before 
 ## Gate record
 
 Gate #1 approved by the operator on 2026-11-17 for BCO-UI-10, including shared core routing of direct workloads. This maps only the already-approved receipt path.
+
+### Verification
+
+- The operator explicitly approved the independent DCM-RCPT-3 OpenAI review on 2026-11-17. Two read-only rounds covered the Envelope with Codex `gpt-6.1-terra` and regression, duplication, tests and security with Codex `gpt-6-luna`.
+- The final round found no product or security issue. A test now changes to a second source/model standard and verifies the credential at dispatch. Two observations about legacy and consent tests were retained as intentional regression coverage.
+- Candidate release: DCM `3.31.0`. The parent BCO-UI-10 tracks the published version, consumer pins, enrolment and staging acceptance.

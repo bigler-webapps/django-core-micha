@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.31.0] — 2026-11-17
+
+- DCM-RCPT-3 applies the central standard to enrolled receipt readers. Each deployment publishes the locally eligible document models and selects credentials by source while retaining its existing disclosed provider and receipt safeguards.
+
 ## [3.30.0] — 2026-11-17
 
 - DCM-CHAT-20 adds an opt-in managed AI policy app with durable revisions, scoped enrolment, a refresh command and source-aware routing. Managed assistant catalogue, chat, completion and direct workload callers can distinguish accounts that offer the same model. Existing unenrolled applications keep their local catalogue and credentials.

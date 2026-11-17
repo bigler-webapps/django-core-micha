@@ -3,6 +3,8 @@ import logging
 import re
 from copy import deepcopy
 from django.conf import settings
+from django_core_micha.ai_policy.policy import policy_enabled
+from django_core_micha.ai_policy.resolver import resolve_workload
 from django_core_micha.extraction import ExtractionRequest, extract_document, require_json_payload
 from django_core_micha.extraction.cost_guard import AICostLimitExceeded
 from .accounts import get_accounts,filter_suggestions
@@ -14,6 +16,17 @@ from .prepare import prepare
 from .prompt import build_prompts
 from .schema import CORE, build_schema,resolve_extension
 log=logging.getLogger(__name__)
+
+def _managed_workload(user, provider, effort):
+    driver = {"openai": "openai_api", "anthropic": "anthropic_api"}.get(provider)
+    if driver is None:
+        raise ReceiptError("provider_unavailable")
+    rows = getattr(settings, "DCM_RECEIPTS_AI_POLICY_CATALOGUE", ()) or ()
+    try:
+        return resolve_workload(user, rows=rows, effort=effort,
+            eligible=lambda _user, row: row.get("driver") == driver)
+    except ValueError as exc:
+        raise ReceiptError("provider_unavailable") from exc
 
 def read_receipts(user,content:bytes,*,context=None,extension=None):
     if not getattr(user,"is_authenticated",False):raise ReceiptError("authentication_required")
@@ -55,9 +68,15 @@ def read_receipts(user,content:bytes,*,context=None,extension=None):
                 try:dynamic_prompt=prompt_for(validated_context,user)
                 except Exception as exc:log.warning("Receipt extension prompt failed (%s)",type(exc).__name__)
             system,user_prompt=build_prompts(ext,accounts,fallback_currency=fallback_currency,dynamic_prompt=dynamic_prompt)
-            req=ExtractionRequest(system_prompt=system,user_prompt=user_prompt,schema=build_schema(ext,bool(accounts)),max_output_tokens=int(getattr(settings,"DCM_RECEIPTS_MAX_OUTPUT_TOKENS",4000)),effort=getattr(settings,"DCM_RECEIPTS_EFFORT","low"),thinking={},image_bytes=prepared.image_bytes,image_mime_type=prepared.image_mime_type,pdf_text=prepared.pdf_text,upload_bytes=prepared.upload_bytes,upload_mime_type=prepared.upload_mime_type,upload_filename=prepared.upload_filename)
-            provider=getattr(settings,"DCM_RECEIPTS_PROVIDER","openai");model=getattr(settings,"DCM_RECEIPTS_MODEL","gpt-6-luna")
-            key=getattr(settings,"OPENAI_API_KEY" if provider=="openai" else "ANTHROPIC_API_KEY","")
+            provider = getattr(settings, "DCM_RECEIPTS_PROVIDER", "openai")
+            effort = getattr(settings, "DCM_RECEIPTS_EFFORT", "low")
+            if policy_enabled():
+                workload = _managed_workload(user, provider, effort)
+                model, key = workload.model, workload.credential
+            else:
+                model = getattr(settings, "DCM_RECEIPTS_MODEL", "gpt-6-luna")
+                key = getattr(settings, "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY", "")
+            req=ExtractionRequest(system_prompt=system,user_prompt=user_prompt,schema=build_schema(ext,bool(accounts)),max_output_tokens=int(getattr(settings,"DCM_RECEIPTS_MAX_OUTPUT_TOKENS",4000)),effort=effort,thinking={},image_bytes=prepared.image_bytes,image_mime_type=prepared.image_mime_type,pdf_text=prepared.pdf_text,upload_bytes=prepared.upload_bytes,upload_mime_type=prepared.upload_mime_type,upload_filename=prepared.upload_filename)
             result=extract_document(req,provider=provider,api_key=key,model=model,user_id=user.pk)
             payload=require_json_payload(result.raw_text,getattr(result,"raw_response",None))
     except ReceiptError:raise
