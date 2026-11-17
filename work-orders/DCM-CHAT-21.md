@@ -31,7 +31,7 @@ Release the family-aware DCM contract before `BCO-UI-10` or `HRAM-AI-6` pins it.
 - With identical reported usage and the same app tariff, dispatch over an API account and a Claude subscription. Assert identical internal token debits against the correct initiating user, one debit per chargeable operation, and independent upstream cost attribution. Cover app-specific billing adapters, shared chat senders, missing usage, late usage, retries and an existing refund path.
 - Verify provider-side execution for an eligible resolved pair and denial before dataset upload for an ineligible pair. The same family can be chat-only on another source. Preserve HRAM's existing authorization and consent boundaries. Use fake provider transports and synthetic data.
 
-## Part B — Implementation map
+## B. Implementation map
 
 Target: `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`. Baseline `9b432f8` includes DCM-CHAT-20 (3.30.0) and DCM-CHAT-19. The existing contract is documented in `docs/design/assistant-chat.md` and `work-orders/DCM-CHAT-20.md`. Reuse the existing AI policy, assistant, extraction and billing capabilities listed in `webapp-management/SHARED_CAPABILITIES.md`.
 
@@ -49,7 +49,7 @@ For direct and receipt workloads inspect `src/django_core_micha/receipts/reader.
 >
 > Begin with `PLAN: <steps>` and give `PROGRESS: [n/total] <action>` before relevant actions, with no gap over two minutes. Finish exactly once with `RESULT: DONE` or `RESULT: BLOCKED <reason>`.
 
-## Part C — Orchestrator only
+## C. Orchestrator only
 
 > Implementers stop at this line. The review, release and consumer coordination below belong to the Orchestrator.
 
