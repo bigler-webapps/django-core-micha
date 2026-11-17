@@ -43,4 +43,4 @@ Verify the existing policy payload, catalogue selection, receipt dispatch, user 
 
 ## Gate record
 
-The operator requested this follow-up WO on 2026-11-17. Gate #1 for implementation is pending.
+Gate #1 approved by the operator 2026-11-17 in the Codex requirements chat: “Ich gebe alle drei WO frei.” Approved Envelope: `f083789`.
