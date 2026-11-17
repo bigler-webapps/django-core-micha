@@ -33,7 +33,21 @@ Release the family-aware DCM contract before `BCO-UI-10` or `HRAM-AI-6` pins it.
 
 ## Part B — Implementation map
 
-The Orchestrator fills the target paths, shared contract map and configured implementer preamble after approval. This order is not dispatchable while this placeholder is present.
+Target: `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`. Baseline `9b432f8` includes DCM-CHAT-20 (3.30.0) and DCM-CHAT-19. The existing contract is documented in `docs/design/assistant-chat.md` and `work-orders/DCM-CHAT-20.md`. Reuse the existing AI policy, assistant, extraction and billing capabilities listed in `webapp-management/SHARED_CAPABILITIES.md`.
+
+The current private policy is persisted by `src/django_core_micha/ai_policy/policy.py` and `models.py`: `allowed` maps source IDs to concrete model IDs and `standard` is a source/model pair; `apply_policy` locks and rejects conflicting revisions. `resolver.py` supplies `resolve_workload`, local source eligibility and credential resolution. Extend the contract and durable state compatibly for stable public family identity and centrally changeable concrete mapping; retain app/environment validation, last valid state and revision ordering. `transport.py` and `management/commands/sync_ai_policy.py` handle the existing delivery boundary.
+
+Map the public catalogue and stored choices through `src/django_core_micha/assistant/catalogue.py` (`effective_entries`, `default_entry`, `entry_id`, `selection_of`, `validate`), `views.py`, `consumers.py`, `models.py` and the existing migrations. The private source/model must remain available to trusted server-side execution and historical records while managed responses and events contain only public fields. Preserve unmanaged paths. `turns.py` resolves and dispatches turns, retains the initiating sender, records usage and invokes the app usage hook; `completion.py` handles one-shot calls. `execution.py` (`model_supports_execution`, `prepare_execution`) and the provider drivers enforce execution capabilities. Resolve before any dataset is sent.
+
+For direct and receipt workloads inspect `src/django_core_micha/receipts/reader.py`, `extraction/service.py`, `extraction/types.py`, `extraction/drivers/` and the shared resolver. `billing/services.py` contains `record_ai_call`, reference-based `debit_tokens` and `reverse_debit`; `assistant/drivers/base.py` and `extraction/cost_guard.py` contain the existing budget settlement. Preserve app-specific tariff hooks and refunds, keep upstream source/cost separate, and do not invent usage for missing reports. Existing tests in `tests/test_ai_policy.py`, `assistant/tests/test_managed_policy.py`, `test_provider_execution.py`, `test_completion.py`, `test_usage_cost_chunk_a.py`, `receipts/tests/test_managed_receipts.py` and billing tests provide integration seams. Add the focused tests required by Part A and additive migrations only as needed. The Orchestrator owns documentation, release and consumer coordination.
+
+### Implementer preamble
+
+> First tool action: run `codex-hook-canary-ws-gov-60` exactly from the workspace root. The expected denial is `WS-GOV-60 canary: workspace hooks are active`; continue. If absent, report unverified coverage once and continue under all workspace gates.
+>
+> Parts A and B are the COMPLETE specification. Read the nearest AGENTS.md, backend engineering skill and app MEMORY.md only for conventions. Work from the named seams; stay within the approved scope and preserve all other changes. Edit only scoped source and test files. Do not edit this WO, the register, MEMORY.md or documentation; do not install dependencies, run package managers, change lockfiles, tidy files, use credentials, call live providers, deploy, dispatch agents or self-review. Do not git add, commit or push. Write the required tests and run only the tests you wrote, once. The Orchestrator owns authoritative testing, independent review, documentation and release. If blocked, report the concrete reason.
+>
+> Begin with `PLAN: <steps>` and give `PROGRESS: [n/total] <action>` before relevant actions, with no gap over two minutes. Finish exactly once with `RESULT: DONE` or `RESULT: BLOCKED <reason>`.
 
 ## Part C — Orchestrator only
 
