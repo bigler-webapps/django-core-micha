@@ -90,8 +90,8 @@ def _definitively_unbilled(exc):
 
 
 async def charge_aborted(reservation, *, user, provider, model, input_tokens_estimate,
-                         output_tokens_estimate, reference, exc):
-    """Settle ambiguous provider work at its reserved estimate and record it once."""
+                         output_tokens_estimate, reference, exc, source_id="", purpose="chat_aborted"):
+    """Settle the local budget reservation and mark unreported provider usage unresolved."""
     from django_core_micha.extraction.cost_guard import settle_reservation
     try:
         settle_reservation(reservation=reservation, response=type("R", (), {"usage": Usage(
@@ -107,8 +107,8 @@ async def charge_aborted(reservation, *, user, provider, model, input_tokens_est
         from asgiref.sync import sync_to_async
         await asyncio.shield(sync_to_async(record_ai_call, thread_sensitive=True)(
             user=user, provider=provider, model=model,
-            input_tokens=int(input_tokens_estimate), output_tokens=int(output_tokens_estimate),
-            purpose="chat_aborted", reference=reference,
+            input_tokens=0, output_tokens=0, source_id=source_id,
+            usage_reported=False, purpose=purpose, reference=reference,
         ))
     except BaseException as record_exc:
         # Keep the provider exception (including cancellation) as the one that escapes.

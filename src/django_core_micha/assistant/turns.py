@@ -14,7 +14,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from .catalogue import default_entry, entries, entry_by_id, entry_enabled, entry_usable, validate
+from .catalogue import default_entry, effective_entries, entries, entry_by_id, entry_enabled, entry_usable, validate
 from .access import can_view_chat
 from django.core.exceptions import ObjectDoesNotExist
 from django.contrib.auth import get_user_model
@@ -26,8 +26,9 @@ from .hooks import (AfterTurnResult, availability_reason, build_system_prompt,
 from .history import build_history, latest_summary
 from .limits import get_limit
 from .models import AssistantChat, AssistantSummary, AssistantTurn
-from django_core_micha.ai_policy.policy import policy_enabled, refresh_policy
-from django_core_micha.ai_policy.resolver import resolve_workload, source_id as row_source_id
+from django_core_micha.ai_policy.policy import current_policy, policy_enabled, refresh_policy
+from django_core_micha.ai_policy.resolver import (family_identity_for_route, resolve_workload,
+    source_id as row_source_id)
 
 log = logging.getLogger(__name__)
 TITLE_DEFAULT = AssistantChat._meta.get_field("title").default
@@ -65,6 +66,24 @@ def _start(chat_id, user_id, message):
     return turn
 
 def _select_managed_turn(chat, user):
+    state = current_policy()
+    if state and state.families:
+        try:
+            if chat.selected_provider and chat.selected_family:
+                if not any(item["provider"] == chat.selected_provider and item["family"] == chat.selected_family
+                           for item in state.families):
+                    return resolve_workload(user, rows=entries(), workload="chat", refresh=False,
+                                            eligible=entry_usable)
+                return resolve_workload(user, rows=entries(), provider=chat.selected_provider,
+                    family=chat.selected_family, effort=chat.selected_effort, workload="chat", refresh=False,
+                    eligible=entry_usable)
+            if chat.selected_model or chat.selected_driver or chat.selected_source_id:
+                return resolve_workload(user, rows=entries(), source=chat.selected_source_id or None,
+                    driver=chat.selected_driver or None, model=chat.selected_model,
+                    effort=chat.selected_effort, workload="chat", refresh=False, eligible=entry_usable)
+            return resolve_workload(user, rows=entries(), workload="chat", refresh=False, eligible=entry_usable)
+        except ValueError as exc:
+            raise DriverError("unavailable") from exc
     selector = {"source": chat.selected_source_id or None, "driver": chat.selected_driver or None,
                 "model": chat.selected_model or None}
     if any(selector.values()):
@@ -81,8 +100,11 @@ def _select_managed_turn(chat, user):
 
 def _recheck_managed_turn(turn, user):
     try:
+        if turn.provider and turn.family:
+            return resolve_workload(user, rows=entries(), provider=turn.provider, family=turn.family,
+                                    effort=turn.effort, workload="chat", eligible=entry_usable)
         return resolve_workload(user, rows=entries(), source=turn.source_id, driver=turn.driver,
-                                model=turn.model, effort=turn.effort, eligible=entry_usable)
+                                model=turn.model, effort=turn.effort, workload="chat", eligible=entry_usable)
     except ValueError as exc:
         raise DriverError("unavailable") from exc
 
@@ -104,10 +126,14 @@ def _create_turn(chat_id, user_id, message):
             if policy_enabled():
                 resolved = _select_managed_turn(chat, user)
                 selection = resolved.driver, resolved.model, resolved.effort, resolved.source_id
-                previous = chat.selected_driver, chat.selected_model, chat.selected_effort, chat.selected_source_id
-                if selection != previous:
+                previous = (chat.selected_driver, chat.selected_model, chat.selected_effort, chat.selected_source_id,
+                            chat.selected_provider, chat.selected_family)
+                next_selection = (*selection, resolved.provider, resolved.family)
+                if next_selection != previous:
                     chat.selected_driver, chat.selected_model, chat.selected_effort, chat.selected_source_id = selection
-                    chat.save(update_fields=("selected_driver", "selected_model", "selected_effort", "selected_source_id", "updated_at"))
+                    chat.selected_provider, chat.selected_family = resolved.provider, resolved.family
+                    chat.save(update_fields=("selected_driver", "selected_model", "selected_effort", "selected_source_id",
+                                             "selected_provider", "selected_family", "updated_at"))
             else:
                 selected = entry_by_id(f"{chat.selected_driver}:{chat.selected_model}") if chat.selected_driver and chat.selected_model else None
                 if selected is None or not entry_enabled(selected):
@@ -130,19 +156,22 @@ def _create_turn(chat_id, user_id, message):
             return AssistantTurn.objects.create(chat=chat, sender_id=user_id, sequence=seq, user_text=message,
                 driver=chat.selected_driver, model=chat.selected_model, effort=chat.selected_effort,
                 source_id=chat.selected_source_id if policy_enabled() else "",
+                provider=chat.selected_provider if policy_enabled() else "",
+                family=chat.selected_family if policy_enabled() else "",
                 heartbeat_at=timezone.now())
     except IntegrityError as exc:
         raise DriverError("turn_active") from exc
 
-def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=None, session_tokens=None, session_version=None, context_tokens=0, execution_results=None):
+def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=None, session_tokens=None, session_version=None, context_tokens=0, execution_results=None, usage_reported=None):
     with transaction.atomic():
         turn = AssistantTurn.objects.select_for_update().select_related("chat").get(pk=turn_id)
         if turn.state != "generating": return False
         turn.assistant_text, turn.state, turn.error_code = text, state, error
+        usage_reported = bool(usage) if usage_reported is None else bool(usage_reported)
         from django_core_micha.ai_prices import price_usage
         normalized = {key: max(0, int((usage or {}).get(key, 0) or 0)) for key in
             ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")}
-        normalized["cost_usd_micros"] = price_usage(turn.model, **normalized)
+        normalized["cost_usd_micros"] = price_usage(turn.model, **normalized) if usage_reported else 0
         if "execution_usd_micros" in (usage or {}):
             normalized["execution_usd_micros"] = max(0, int(usage["execution_usd_micros"] or 0))
             if "execution_requests" in usage:
@@ -151,17 +180,24 @@ def _finish(turn_id, text, state, error="", usage=None, trace=None, session_id=N
             normalized["cost_usd_micros"] += normalized["execution_usd_micros"]
         normalized["context_tokens"] = max(0, int(context_tokens or 0))
         turn.finished_at, turn.usage, turn.tool_trace = timezone.now(), normalized, trace or []
+        turn.usage_reported = usage_reported
         turn.execution_results = execution_results or []
         turn.cost_usd_micros, turn.context_tokens = normalized["cost_usd_micros"], normalized["context_tokens"]
-        turn.save(update_fields=("assistant_text", "state", "error_code", "finished_at", "usage", "execution_results", "tool_trace", "cost_usd_micros", "context_tokens"))
+        turn.save(update_fields=("assistant_text", "state", "error_code", "finished_at", "usage", "usage_reported",
+                                 "execution_results", "tool_trace", "cost_usd_micros", "context_tokens"))
         from django.apps import apps
-        if usage and apps.is_installed("django_core_micha.billing"):
+        if (turn.provider_started or usage_reported) and apps.is_installed("django_core_micha.billing"):
             try:
                 from django_core_micha.billing.services import record_ai_call
-                record_ai_call(user=turn.sender or turn.chat.owner, provider=turn.driver, model=turn.model,
-                    input_tokens=int(usage.get("input_tokens", 0) or 0), output_tokens=int(usage.get("output_tokens", 0) or 0),
-                    cache_read_tokens=normalized["cache_read_tokens"], cache_write_tokens=normalized["cache_write_tokens"],
-                    purpose="chat", reference=str(turn.pk), extra_cost_usd_micros=normalized.get("execution_usd_micros", 0))
+                billing_options = {"user":turn.sender or turn.chat.owner, "provider":turn.driver, "model":turn.model,
+                    "input_tokens":int((usage or {}).get("input_tokens", 0) or 0),
+                    "output_tokens":int((usage or {}).get("output_tokens", 0) or 0),
+                    "cache_read_tokens":normalized["cache_read_tokens"],
+                    "cache_write_tokens":normalized["cache_write_tokens"],
+                    "purpose":"chat", "reference":str(turn.pk),
+                    "extra_cost_usd_micros":normalized.get("execution_usd_micros", 0),
+                    "source_id":turn.source_id, "usage_reported":usage_reported}
+                record_ai_call(**billing_options)
             except Exception:
                 log.error("Assistant billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
         chat = turn.chat
@@ -197,10 +233,29 @@ def _invoke_usage_hook(turn_id, kind="reply"):
 
 async def _finish_and_hook(*args, usage_kind="reply", **kwargs):
     turn_id = args[0] if args else kwargs["turn_id"]
+    reported_usage = kwargs.get("usage_reported")
+    if reported_usage is None:
+        reported_usage = bool(kwargs.get("usage") or (len(args) > 4 and args[4]))
+    state = args[2] if len(args) > 2 else kwargs.get("state")
+    if state != "completed" and reported_usage:
+        def has_unresolved_call():
+            from django.apps import apps
+            if not apps.is_installed("django_core_micha.billing"):
+                return False
+            from django_core_micha.billing.models import AICostRecord
+            return AICostRecord.objects.filter(purpose="chat", reference=str(turn_id), usage_status="unresolved").exists()
+        if await sync_to_async(has_unresolved_call, thread_sensitive=True)():
+            reported_usage = False
+            kwargs["usage_reported"] = False
     finished = await sync_to_async(_finish)(*args, **kwargs)
-    reported_usage = bool(kwargs.get("usage") or (len(args) > 4 and args[4]))
     if finished and reported_usage:
-        await sync_to_async(_invoke_usage_hook, thread_sensitive=True)(turn_id, usage_kind)
+        def uses_managed_settlement():
+            from django.apps import apps
+            if not apps.is_installed("django_core_micha.billing") or not policy_enabled():
+                return False
+            return AssistantTurn.objects.filter(pk=turn_id).exclude(source_id="").exists()
+        if not await sync_to_async(uses_managed_settlement, thread_sensitive=True)():
+            await sync_to_async(_invoke_usage_hook, thread_sensitive=True)(turn_id, usage_kind)
 
 def _invoke_summary_hook(chat, user, turn, usage):
     try:
@@ -250,18 +305,44 @@ async def _summarize_if_needed(chat, user, message, turn=None):
                    "Do NOT restate current project state; lookups provide it fresh.")
     prompt = "<<<CONVERSATION DATA>>>\n" + "\n\n".join(transcript).replace("<<<", "<< <").replace(">>>", "> >>") + "\n<<<END CONVERSATION DATA>>>"
     entry = f"{chat.selected_source_id or chat.selected_driver}:{chat.selected_model}"
-    configured = await sync_to_async(entry_by_id)(entry)
-    effort = "low" if configured and "low" in configured.get("efforts", []) else ((configured or {}).get("efforts") or ["low"])[0]
+    family_choice = bool(policy_enabled() and (chat.selected_provider and chat.selected_family))
+    if family_choice:
+        try:
+            configured = await sync_to_async(resolve_workload)(user, rows=entries(),
+                provider=chat.selected_provider, family=chat.selected_family,
+                effort=chat.selected_effort, workload="completion", eligible=entry_usable)
+        except ValueError:
+            return None
+    else:
+        configured = await sync_to_async(entry_by_id)(entry)
+    configured_efforts = (configured.row.get("efforts") or []) if family_choice else (configured or {}).get("efforts", [])
+    effort = "low" if "low" in configured_efforts else (configured_efforts or ["low"])[0]
+    summary_reference = f"summary:{chat.pk}:{cutoff}"
     try:
-        result = await acomplete(user, prompt=prompt, system=system_text, entry=entry, effort=effort, purpose="summary")
+        call = {"provider":chat.selected_provider, "family":chat.selected_family} if family_choice else {"entry":entry}
+        result = await acomplete(user, prompt=prompt, system=system_text, **call, effort=effort,
+            purpose="summary", reference=summary_reference)
         from django_core_micha.ai_prices import price_usage
         usage = {key: max(0, int((result.usage or {}).get(key, 0) or 0)) for key in
                  ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")}
-        usage["cost_usd_micros"] = price_usage(chat.selected_model, **usage)
+        usage["reported"] = result.usage_reported
+        cost_usd_micros = 0
+        if result.usage_reported:
+            from django.apps import apps
+            cost_record = None
+            if apps.is_installed("django_core_micha.billing"):
+                from django_core_micha.billing.models import AICostRecord
+                cost_record = await sync_to_async(AICostRecord.objects.filter(
+                    app=getattr(settings, "DCM_BILLING_APP", ""), purpose="summary",
+                    reference=summary_reference).first)()
+            cost_usd_micros = (cost_record.cost_usd_micros if cost_record and cost_record.cost_usd_micros is not None
+                               else price_usage(configured.model if family_choice else configured["model"], **usage))
+        usage["cost_usd_micros"] = cost_usd_micros
         usage["context_tokens"] = usage["input_tokens"] + usage["cache_read_tokens"] + usage["cache_write_tokens"]
         summary = await sync_to_async(AssistantSummary.objects.create)(chat=chat, up_to_sequence=cutoff,
             text=result.text, usage=usage, cost_usd_micros=usage["cost_usd_micros"])
-        await sync_to_async(_invoke_summary_hook, thread_sensitive=True)(chat, user, turn or old_turns[-1], usage)
+        if result.usage_reported:
+            await sync_to_async(_invoke_summary_hook, thread_sensitive=True)(chat, user, turn or old_turns[-1], usage)
         return summary
     except Exception as exc:
         log.error("Assistant summarisation failed (%s)", type(exc).__name__)
@@ -298,6 +379,9 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
     turn = await sync_to_async(_start)(chat.pk, user.pk, message)
     beat = asyncio.create_task(_heartbeat(turn.pk))
     chunks, trace, usage, session_id, execution_results = [], [], {}, None, []
+    usage_reported = False
+    usage_incomplete = False
+    usage_rounds = 0
     last_context_tokens = 0
     session_file = False
     saw_init = False
@@ -306,6 +390,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
     watcher = None
     driver = None
     execution = None
+    resolved = None
     access_ok = None
     async def finish_execution_session():
         if execution is None or driver is None:
@@ -321,6 +406,17 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
             usage["execution_usd_micros"] = max(int(usage.get("execution_usd_micros", 0) or 0),
                                                 execution.reserved_usd_micros)
     try:
+        if policy_enabled():
+            # A queued turn is authorized by its stable choice at dispatch time.
+            resolved = await sync_to_async(_recheck_managed_turn)(turn, user)
+            turn.driver, turn.model, turn.effort = resolved.driver, resolved.model, resolved.effort
+            turn.source_id, turn.provider, turn.family = resolved.source_id, resolved.provider, resolved.family
+            await sync_to_async(AssistantTurn.objects.filter(pk=turn.pk).update)(
+                driver=turn.driver, model=turn.model, effort=turn.effort, source_id=turn.source_id,
+                provider=turn.provider, family=turn.family, billing_source=resolved.billing_source)
+            await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(
+                selected_driver=turn.driver, selected_model=turn.model, selected_effort=turn.effort,
+                selected_source_id=turn.source_id, selected_provider=turn.provider, selected_family=turn.family)
         if not policy_enabled():
             credential, billing = resolve_credential(user, turn.driver)
             await sync_to_async(AssistantTurn.objects.filter(pk=turn.pk).update)(billing_source=billing)
@@ -382,7 +478,8 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
             "system": prompt, "tools": tools, "user": user, "chat": current,
             "effort": turn.effort, "cancel_event": cancel_event,
             "session_id": current.session_reference if session_file else None,
-            "max_tool_calls": get_limit("max_tool_calls")}
+            "max_tool_calls": get_limit("max_tool_calls"),
+            "billing_reference": str(turn.pk), "billing_purpose": "chat", "source_id": turn.source_id}
         async def access_ok():
             try:
                 allowed = await sync_to_async(can_view_chat)(user, current)  # scope permission, and for a non-creator the shared-scope decision
@@ -405,14 +502,28 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
             access_lost = True
             raise asyncio.CancelledError
         if policy_enabled():
-            resolved = await sync_to_async(_recheck_managed_turn)(turn, user)
+            latest = await sync_to_async(_recheck_managed_turn)(turn, user)
+            if latest.driver != turn.driver or (turn.driver == "claude_cli" and latest.source_id != turn.source_id):
+                raise DriverError("unavailable")
+            resolved = latest
+            turn.model, turn.source_id, turn.provider, turn.family = (
+                resolved.model, resolved.source_id, resolved.provider, resolved.family)
             credential = resolved.credential
             kwargs["source_id"] = resolved.source_id
-            await sync_to_async(AssistantTurn.objects.filter(pk=turn.pk).update)(billing_source=resolved.billing_source)
+            await sync_to_async(AssistantTurn.objects.filter(pk=turn.pk).update)(
+                model=turn.model, source_id=turn.source_id, provider=turn.provider, family=turn.family,
+                billing_source=resolved.billing_source)
         kwargs["credential"] = credential
+        from django.apps import apps
+        if apps.is_installed("django_core_micha.billing"):
+            from django_core_micha.billing.services import require_ai_usage_adapter
+            try:
+                await sync_to_async(require_ai_usage_adapter)(getattr(user, "pk", None), turn.source_id, "chat")
+            except ValueError as exc:
+                raise DriverError("accounting_unavailable") from exc
         driver = _make_driver(turn.driver, credential)
         from .execution import prepare_execution
-        model_entry = next((row for row in entries()
+        model_entry = resolved.row if resolved else next((row for row in entries()
             if row.get("driver") == turn.driver and row.get("model") == turn.model
             and (not policy_enabled() or row_source_id(row) == turn.source_id)), None)
         if model_entry:
@@ -429,13 +540,20 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
         structured = bool(getattr(settings, "DCM_ASSISTANT_STRUCTURED_TURNS", False))
         execution_deadline = asyncio.get_running_loop().time() + execution.max_execution_seconds if execution else None
         async def collect_round(call_kwargs):
-            nonlocal usage, session_id, saw_init, last_context_tokens
+            nonlocal usage, session_id, saw_init, last_context_tokens, usage_reported, usage_incomplete, usage_rounds
+            if usage_rounds and not usage_reported:
+                usage_incomplete = True
+            usage_rounds += 1
+            usage_reported = False
             chunks.clear()  # the failure branches store the partial text of the round that was running
             round_chunks = chunks
             timeout_seconds = get_limit("provider_timeout")
             execution_config = call_kwargs.get("execution")
             if execution_config is not None:
                 timeout_seconds = min(timeout_seconds, max(0, execution_deadline - asyncio.get_running_loop().time()))
+            if not turn.provider_started:
+                turn.provider_started = True
+                await sync_to_async(AssistantTurn.objects.filter(pk=turn.pk).update)(provider_started=True)
             async with asyncio.timeout(timeout_seconds):
                 async for event in driver.stream(model=turn.model, **call_kwargs):
                     if cancel_event and cancel_event.is_set(): raise asyncio.CancelledError
@@ -450,6 +568,11 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
                         await emit(event)
                     elif event.get("type") == "usage":
                         row = event.get("usage", {}) or {}
+                        if event.get("usage_reported", row.get("reported", True)):
+                            usage_reported = not usage_incomplete
+                        else:
+                            usage_incomplete = True
+                            usage_reported = False
                         for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
                             value = max(0, int(row.get(key, 0) or 0))
                             usage[key] = usage.get(key, 0) + value
@@ -525,7 +648,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
         session_tokens = (current.session_tokens + input_tokens) if resumed else input_tokens
         await _finish_and_hook(turn.pk, text, "completed", usage=usage, trace=trace, session_id=session_id,
             session_tokens=session_tokens, session_version=configured_version or None, context_tokens=last_context_tokens,
-            execution_results=execution_results)
+            execution_results=execution_results, usage_reported=usage_reported)
     except asyncio.CancelledError as exc:
         await finish_execution_session()
         estimate = max(0, int(getattr(exc, "execution_cost_estimate", 0) or 0))
@@ -535,7 +658,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
             execution_results.clear()
         if getattr(exc, "before_init", False) and session_file:
             await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
-        await _finish_and_hook(turn.pk, "" if access_lost else "".join(chunks), "cancelled", "cancelled", usage, [] if access_lost else trace, context_tokens=last_context_tokens, execution_results=execution_results)
+        await _finish_and_hook(turn.pk, "" if access_lost else "".join(chunks), "cancelled", "cancelled", usage, [] if access_lost else trace, context_tokens=last_context_tokens, execution_results=execution_results, usage_reported=usage_reported)
         if access_lost: raise AccessLost() from exc
         try:
             cancelled = await sync_to_async(AssistantTurn.objects.select_related("chat").get)(pk=turn.pk)
@@ -547,14 +670,14 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
         await finish_execution_session()
         if access_ok is not None and not await access_ok():
             execution_results.clear()
-            await _finish_and_hook(turn.pk, "", "cancelled", "access_lost", usage, [], context_tokens=last_context_tokens)
+            await _finish_and_hook(turn.pk, "", "cancelled", "access_lost", usage, [], context_tokens=last_context_tokens, usage_reported=usage_reported)
             raise AccessLost() from exc
         estimate = max(0, int(getattr(exc, "execution_cost_estimate", 0) or 0))
         if estimate:
             usage["execution_usd_micros"] = max(int(usage.get("execution_usd_micros", 0) or 0), estimate)
         if session_file and not saw_init:
             await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
-        await _finish_and_hook(turn.pk, "".join(chunks), "failed", "timeout", usage, trace, context_tokens=last_context_tokens, execution_results=execution_results)
+        await _finish_and_hook(turn.pk, "".join(chunks), "failed", "timeout", usage, trace, context_tokens=last_context_tokens, execution_results=execution_results, usage_reported=usage_reported)
         await _emit_final(turn.pk, emit)
         raise DriverError("timeout") from exc
     except Exception as exc:
@@ -572,7 +695,7 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
         if isinstance(exc, DriverError) and getattr(exc, "before_init", False) and session_file:
             await sync_to_async(AssistantChat.objects.filter(pk=chat.pk).update)(session_driver="", session_reference="")
         state = "cancelled" if access_lost else "failed"
-        await _finish_and_hook(turn.pk, "" if access_lost else "".join(chunks), state, code, usage, [] if access_lost else trace, context_tokens=last_context_tokens, execution_results=execution_results)
+        await _finish_and_hook(turn.pk, "" if access_lost else "".join(chunks), state, code, usage, [] if access_lost else trace, context_tokens=last_context_tokens, execution_results=execution_results, usage_reported=usage_reported)
         if access_lost: raise AccessLost() from exc
         await _emit_final(turn.pk, emit)
         if isinstance(exc, DriverError): raise
@@ -600,17 +723,34 @@ async def _emit_final(turn_id, emit):
 
 def turn_payload(turn, chat=None):
     chat = chat or turn.chat
+    usage = turn.usage or {}
+    if policy_enabled():
+        public_usage = {key: int(usage.get(key, 0) or 0) for key in
+                        ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")}
+        public_usage["context_tokens"] = int(turn.context_tokens or 0)
+        public_usage = public_usage if turn.usage_reported else None
+    else:
+        public_usage = {**usage, "input_tokens": int(usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            "cache_read_tokens": int(usage.get("cache_read_tokens", 0) or 0),
+            "cache_write_tokens": int(usage.get("cache_write_tokens", 0) or 0),
+            "cost_usd_micros": int(turn.cost_usd_micros or 0), "context_tokens": int(turn.context_tokens or 0)}
     result = {"id": str(turn.pk), "seq": turn.sequence, "user_text": turn.user_text,
         "assistant_text": turn.assistant_text, "state": turn.state, "error_code": turn.error_code or None,
         "tool_steps": [{"name": item.get("name", ""), "label": item.get("label", "")} for item in turn.tool_trace],
         "sources": [source for item in turn.tool_trace for source in item.get("sources", [])],
-        "driver": turn.driver, "model": turn.model, "source_id": turn.source_id or None, "effort": turn.effort,
-          "usage": {**(turn.usage or {}), "input_tokens": int((turn.usage or {}).get("input_tokens", 0) or 0),
-              "output_tokens": int((turn.usage or {}).get("output_tokens", 0) or 0),
-              "cache_read_tokens": int((turn.usage or {}).get("cache_read_tokens", 0) or 0),
-              "cache_write_tokens": int((turn.usage or {}).get("cache_write_tokens", 0) or 0),
-              "cost_usd_micros": int(turn.cost_usd_micros or 0), "context_tokens": int(turn.context_tokens or 0)},
-          "billing_source": turn.billing_source}
+        "effort": turn.effort, "usage": public_usage}
+    if policy_enabled():
+        provider, family = turn.provider, turn.family
+        if not provider or not family:
+            identity = family_identity_for_route(turn.source_id, turn.model, turn.driver)
+            if identity:
+                provider, family = identity
+        if provider and family:
+            result.update({"provider":provider,"family":family})
+    else:
+        result.update({"driver":turn.driver,"model":turn.model,"source_id":turn.source_id or None,
+                       "billing_source":turn.billing_source})
     from .execution import execution_scope_is_private
     if execution_scope_is_private(chat.scope):
         result["execution_results"] = turn.execution_results or []

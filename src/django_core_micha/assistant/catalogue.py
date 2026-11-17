@@ -4,7 +4,8 @@ from django.core.checks import Error, register
 from django.core.exceptions import ImproperlyConfigured
 from .availability import availability
 from .hooks import _hook
-from django_core_micha.ai_policy.policy import current_policy, policy_enabled
+from django_core_micha.ai_policy.policy import (PROVIDER_FAMILIES, current_policy,
+    policy_enabled)
 from django_core_micha.ai_policy.resolver import (effective_entry_id, local_rows, source_id,
     source_label, source_available)
 
@@ -16,14 +17,18 @@ def entries():
     return [dict(row) for row in rows]
 
 def effective_entries(user=None):
-    return local_rows(entries(), user, refresh=True)
+    return local_rows(entries(), user, refresh=True, workload="chat")
 
 DEFAULT_LEVELS = {"claude-fable-5-1": "top", "gpt-6-astra": "top", "claude-opus-5-5": "best",
                   "claude-sonnet-5-5": "balanced", "gpt-6.1-sol": "balanced",
                   "claude-haiku-5-5": "fast", "gpt-6-luna": "fast"}
+FAMILY_LEVELS = {"astra": "top", "fable": "top", "opus": "best", "terra": "balanced",
+                 "sonnet": "balanced", "sol": "balanced", "luna": "fast", "haiku": "fast"}
 
 def model_level(row):
     value = row.get("level")
+    if value is None:
+        value = FAMILY_LEVELS.get(row.get("family"))
     if value is None:
         value = (getattr(settings, "DCM_ASSISTANT_MODEL_LEVELS", {}) or {}).get(row["model"],
                  DEFAULT_LEVELS.get(row["model"], "balanced"))
@@ -46,9 +51,15 @@ def usable_entries(user):
     return [row for row in effective_entries(user) if entry_usable(user, row)]
 
 def default_entry(user=None):
-    rows = usable_entries(user) if user is not None else entries()
+    state = current_policy() if policy_enabled() else None
+    if state and state.families:
+        rows = usable_entries(user) if user is not None else effective_entries()
+    else:
+        rows = usable_entries(user) if user is not None else entries()
     if policy_enabled():
-        state = current_policy()
+        if state and state.families:
+            return next((row for row in rows if row.get("provider") == state.default_provider and
+                         row.get("family") == state.default_family), None)
         return next((row for row in rows if state and row_source_id(row) == state.standard_source_id
                      and row["model"] == state.standard_model_id), None)
     if user is not None and rows:
@@ -73,6 +84,9 @@ def row_source_label(row):
 
 def selection_of(row, effort=None):
     efforts = row.get("efforts") or ["medium"]
+    if row.get("provider") and row.get("family") and current_family_policy():
+        return {"entry": entry_id(row), "provider": row["provider"], "family": row["family"],
+                "effort": effort if effort in efforts else efforts[0]}
     result = {"entry": entry_id(row), "effort": effort if effort in efforts else efforts[0]}
     from django_core_micha.ai_policy.policy import policy_enabled
     if policy_enabled() and row.get("source_id"):
@@ -91,6 +105,22 @@ def validate(driver, model, effort, user=None, source=None):
     matches = [row for row in rows if row.get("driver") == driver and row.get("model") == model
                and (source is None or row_source_id(row) == source) and effort in row.get("efforts", [])
                and (user is None or entry_usable(user, row))]
+    if len(matches) == 1:
+        return matches[0]
+    raise ValueError("invalid_selection")
+
+
+def current_family_policy():
+    if not policy_enabled():
+        return False
+    state = current_policy()
+    return bool(state and state.families)
+
+
+def validate_family(provider, family, effort, user=None):
+    rows = usable_entries(user) if user is not None else effective_entries()
+    matches = [row for row in rows if row.get("provider") == provider and row.get("family") == family
+               and (effort is None or effort in (row.get("efforts") or []))]
     if len(matches) == 1:
         return matches[0]
     raise ValueError("invalid_selection")
@@ -114,6 +144,21 @@ def validate_catalogue():
     defaults = 0
     keys = set()
     for row in rows:
+        provider, family = row.get("provider"), row.get("family")
+        stable_family = (isinstance(provider, str) and provider in PROVIDER_FAMILIES and
+                         isinstance(family, str) and family in PROVIDER_FAMILIES[provider])
+        if stable_family:
+            if any(row.get(key) for key in ("driver", "model", "source_id", "source_label", "billing")):
+                raise ImproperlyConfigured("Stable assistant family constraints must not pin a route")
+            key = (provider, family)
+            if key in keys:
+                raise ImproperlyConfigured("Duplicate DCM_ASSISTANT_CATALOGUE family")
+            keys.add(key)
+            if row.get("default") is True:
+                defaults += 1
+            if row.get("efforts") and not set(row["efforts"]) <= EFFORTS:
+                raise ImproperlyConfigured("Invalid DCM_ASSISTANT_CATALOGUE effort list")
+            continue
         if row.get("driver") not in DRIVERS or not isinstance(row.get("model"), str) or not row.get("model"):
             raise ImproperlyConfigured("Invalid DCM_ASSISTANT_CATALOGUE driver or model")
         key = (row["driver"], row["model"], row.get("source_id") or "")
@@ -124,7 +169,10 @@ def validate_catalogue():
             raise ImproperlyConfigured("Invalid DCM_ASSISTANT_CATALOGUE effort list")
         if row.get("billing") not in {"subscription", "pay_per_use"}:
             raise ImproperlyConfigured("Invalid DCM_ASSISTANT_CATALOGUE billing tag")
-    if defaults != 1: raise ImproperlyConfigured("DCM_ASSISTANT_CATALOGUE must have exactly one default")
+    if not any(isinstance(row.get("provider"), str) and row.get("provider") in PROVIDER_FAMILIES and
+               row.get("family") in PROVIDER_FAMILIES[row["provider"]] for row in rows) and defaults == 0:
+        raise ImproperlyConfigured("DCM_ASSISTANT_CATALOGUE must have exactly one default")
+    if defaults > 1: raise ImproperlyConfigured("DCM_ASSISTANT_CATALOGUE must have at most one default")
 
 @register()
 def catalogue_check(app_configs, **kwargs):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from .cost_guard import (
@@ -22,6 +23,21 @@ def _definitively_unbilled(exc: DocumentExtractionError) -> bool:
     return 400 <= status < 500 and status not in {408, 409, 429}
 
 
+def _record_usage(*, response, provider, model, user_id, purpose, reference, source_id):
+    from django.apps import apps
+    if not apps.is_installed("django_core_micha.billing"):
+        return
+    from django.contrib.auth import get_user_model
+    from django_core_micha.billing.services import record_ai_call
+    from .drivers._common import usage_from_response
+    usage = usage_from_response(response)
+    user = get_user_model().objects.filter(pk=user_id).first() if user_id is not None else None
+    record_ai_call(user=user, provider=provider, model=model, input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens, cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens, purpose=purpose, reference=reference,
+        source_id=source_id, usage_reported=usage.reported)
+
+
 def extract_document(
     request: ExtractionRequest,
     *,
@@ -29,6 +45,8 @@ def extract_document(
     api_key: str,
     model: str,
     user_id: int | None,
+    source_id: str = "",
+    reference: str = "",
     client: Any = None,
     **provider_options: Any,
 ) -> ExtractionResult:
@@ -46,7 +64,16 @@ def extract_document(
             500,
         ) from exc
 
+    from django.apps import apps
+    if apps.is_installed("django_core_micha.billing"):
+        from django_core_micha.billing.services import require_ai_usage_adapter
+        try:
+            require_ai_usage_adapter(user_id, source_id, "extraction")
+        except ValueError as exc:
+            raise DocumentExtractionError(REQUEST_FAILED, "AI accounting is unavailable.", 503) from exc
+
     reservation = reserve_for_extraction(user_id=user_id, request=request, model=model)
+    reference = str(reference or f"extraction:{uuid.uuid4()}")
     try:
         result = driver(
             request,
@@ -58,9 +85,32 @@ def extract_document(
     except DocumentExtractionError as exc:
         if exc.response is not None:
             settle_reservation(reservation=reservation, response=exc.response, model=model)
+            try:
+                _record_usage(response=exc.response, provider=provider, model=model, user_id=user_id,
+                              purpose="extraction", reference=reference, source_id=source_id)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).error("Extraction billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
         elif _definitively_unbilled(exc):
             release_reservation(reservation=reservation)
+        elif exc.provider_request_started:
+            try:
+                _record_usage(response=None, provider=provider, model=model, user_id=user_id,
+                              purpose="extraction", reference=reference, source_id=source_id)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).error("Extraction billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
         # Ambiguous provider failures keep their reservation until bounded expiry.
+        raise
+    except Exception:
+        # A transport or adapter failure without a usage object is unresolved
+        # once the provider adapter has been entered; do not synthesize tokens.
+        try:
+            _record_usage(response=None, provider=provider, model=model, user_id=user_id,
+                          purpose="extraction", reference=reference, source_id=source_id)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).error("Extraction billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
         raise
     # Any other exception propagates with the reservation held: it may have
     # happened after the provider billed the call.
@@ -71,17 +121,10 @@ def extract_document(
         charge_user_for_response(user_id=user_id, response=result, model=model)
     else:
         settle_reservation(reservation=reservation, response=result, model=model)
-    from django.apps import apps
-    if apps.is_installed("django_core_micha.billing") and getattr(result, "usage", None):
-        try:
-            from django.contrib.auth import get_user_model
-            from django_core_micha.billing.services import record_ai_call
-            user = get_user_model().objects.filter(pk=user_id).first() if user_id is not None else None
-            usage = result.usage
-            record_ai_call(user=user, provider=provider, model=model,
-                input_tokens=int(getattr(usage,"input_tokens",0) or 0), output_tokens=int(getattr(usage,"output_tokens",0) or 0),
-                cache_tokens=int(getattr(usage,"cache_tokens",0) or 0), purpose="extraction", reference="")
-        except Exception:
-            import logging
-            logging.getLogger(__name__).error("Extraction billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
+    try:
+        _record_usage(response=result, provider=provider, model=model, user_id=user_id,
+                      purpose="extraction", reference=reference, source_id=source_id)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).error("Extraction billing cost hook failed (%s)", __import__("sys").exc_info()[0].__name__)
     return result

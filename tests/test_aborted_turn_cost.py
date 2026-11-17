@@ -119,9 +119,10 @@ def test_cancel_after_delta_settles_reserved_cost_and_records_aborted_turn(provi
     assert spent > 0 and reserved == 0
     from django_core_micha.billing.models import AICostRecord
     record = AICostRecord.objects.get(user=user, purpose="chat_aborted")
-    expected_input = max(1, (len('[{"role": "user", "content": "hello"}]'.encode()) + 1) // 2)
     from django_core_micha.extraction.cost_guard import estimate_cost_cents
-    assert record.provider == provider and record.input_tokens == expected_input and record.output_tokens == 8192
+    assert record.provider == provider and record.usage_status == "unresolved"
+    assert record.input_tokens == record.output_tokens == 0 and record.cost_usd_micros is None
+    expected_input = max(1, (len('[{"role": "user", "content": "hello"}]'.encode()) + 1) // 2)
     assert spent == estimate_cost_cents(model="gpt-4o", input_tokens=expected_input, output_tokens=8192)
 
 

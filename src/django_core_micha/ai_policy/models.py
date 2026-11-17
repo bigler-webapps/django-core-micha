@@ -11,6 +11,11 @@ class AIModelPolicy(models.Model):
     allowed = models.JSONField(default=dict)
     standard_source_id = models.CharField(max_length=192)
     standard_model_id = models.CharField(max_length=192)
+    # Stable public choices are persisted separately from their private routes.
+    families = models.JSONField(default=list, blank=True)
+    verified_execution = models.JSONField(default=list, blank=True)
+    default_provider = models.CharField(max_length=16, blank=True, default="")
+    default_family = models.CharField(max_length=16, blank=True, default="")
     applied_at = models.DateTimeField(auto_now=True)
     last_refresh_at = models.DateTimeField(null=True, blank=True)
 

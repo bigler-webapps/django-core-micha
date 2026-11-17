@@ -73,17 +73,22 @@ def get_cost_table():
     return _get_cost_table()
 
 
-def estimate_cost_cents(*, model: str, input_tokens: int, output_tokens: int) -> int:
+def estimate_cost_cents(*, model: str, input_tokens: int, output_tokens: int,
+                        cache_read_tokens: int = 0, cache_write_tokens: int = 0) -> int:
     """Estimate cost in integer cents, rounded up with a one-cent floor."""
     table = _get_cost_table()
     if isinstance(table, dict) and model in table:
         entry = table[model]
         cost_in = (input_tokens / 1000.0) * float(entry.get("input", _FALLBACK_COST_PER_1K_INPUT))
         cost_out = (output_tokens / 1000.0) * float(entry.get("output", _FALLBACK_COST_PER_1K_OUTPUT))
+        cost_read = (cache_read_tokens / 1000.0) * float(entry.get("cache_read", entry.get("input", _FALLBACK_COST_PER_1K_INPUT)))
+        cost_write = (cache_write_tokens / 1000.0) * float(entry.get("cache_write", entry.get("input", _FALLBACK_COST_PER_1K_INPUT)))
     else:
         cost_in = (input_tokens / 1000.0) * _FALLBACK_COST_PER_1K_INPUT
         cost_out = (output_tokens / 1000.0) * _FALLBACK_COST_PER_1K_OUTPUT
-    return max(1, int(cost_in + cost_out + 0.999))
+        cost_read = (cache_read_tokens / 1000.0) * _FALLBACK_COST_PER_1K_INPUT
+        cost_write = (cache_write_tokens / 1000.0) * _FALLBACK_COST_PER_1K_INPUT
+    return max(1, int(cost_in + cost_out + cost_read + cost_write + 0.999))
 
 
 def _today_key() -> str:
@@ -211,12 +216,12 @@ def reserve_for_extraction(*, user_id: int | None, request, model: str) -> _Rese
 
 
 def _response_cost_cents(*, response, model: str) -> int:
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return estimate_cost_cents(model=model, input_tokens=1000, output_tokens=1000)
-    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-    return estimate_cost_cents(model=model, input_tokens=input_tokens, output_tokens=output_tokens)
+    from .drivers._common import usage_from_response
+    usage = usage_from_response(response)
+    if not usage.reported:
+        return None
+    return estimate_cost_cents(model=model, input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens, cache_write_tokens=usage.cache_write_tokens)
 
 
 def _increment_day_counter(user_id: int, day: str, cents: int) -> int:
@@ -244,6 +249,8 @@ def settle_reservation(*, reservation: _Reservation | None, response, model: str
         return 0
     try:
         actual = _response_cost_cents(response=response, model=model)
+        if actual is None:
+            return 0  # keep the bounded reservation for later reconciliation
         total = _increment_day_counter(reservation.user_id, reservation.day, actual)
     except Exception:
         logger.exception("Could not settle AI extraction accounting")
@@ -315,7 +322,8 @@ def charge_user(user_id: int | None, cents: int) -> int:
 
 def charge_user_for_response(*, user_id: int | None, response, model: str) -> int:
     """Charge from a normalized or provider response's token usage."""
-    return charge_user(user_id, _response_cost_cents(response=response, model=model))
+    cents = _response_cost_cents(response=response, model=model)
+    return 0 if cents is None else charge_user(user_id, cents)
 
 
 def current_user_spend_cents(user_id: int) -> int:

@@ -39,6 +39,13 @@ class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reported: bool = True
+
+    @property
+    def cache_tokens(self) -> int:
+        return self.cache_read_tokens + self.cache_write_tokens
 
 
 @dataclass(frozen=True)

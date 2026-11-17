@@ -141,6 +141,7 @@ class ClaudeCliDriver:
         saw_init = False
         saw_result = False
         assistant_usage = {}
+        assistant_usage_reported = False
         last_context = [0]
         total = 0
         try:
@@ -157,7 +158,7 @@ class ClaudeCliDriver:
             await asyncio.wait_for(proc.stdin.drain(), get_limit("idle_timeout")); proc.stdin.close()
             await asyncio.wait_for(proc.stdin.wait_closed(), get_limit("idle_timeout"))
             async def read_events():
-                nonlocal saw_init, saw_result, total, assistant_usage
+                nonlocal saw_init, saw_result, total, assistant_usage, assistant_usage_reported
                 while True:
                     try: line = await asyncio.wait_for(proc.stdout.readline(), get_limit("idle_timeout"))
                     except asyncio.TimeoutError as exc: raise DriverError("timeout") from exc
@@ -192,6 +193,7 @@ class ClaudeCliDriver:
                         message = event.get("message") if isinstance(event.get("message"), dict) else {}
                         details = message.get("usage") or event.get("usage") or {}
                         if details:
+                            assistant_usage_reported = True
                             last_context[0] = sum(int(details.get(k, 0) or 0) for k in
                                 ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
                             for key, value in (("input_tokens", details.get("input_tokens", 0)),
@@ -214,7 +216,8 @@ class ClaudeCliDriver:
                             "cache_write_tokens": int(usage.get("cache_creation_input_tokens", 0) or 0)}
                         mapped = dict(mapped)
                         if last_context[0]: mapped["context_tokens"] = last_context[0]
-                        yield {"type": "usage", "usage": mapped}
+                        yield {"type": "usage", "usage": mapped,
+                               "usage_reported": assistant_usage_reported or bool(usage)}
                         if isinstance(event.get("structured_output"), dict):
                             yield {"type": "structured", "data": event["structured_output"]}
                         saw_result = True

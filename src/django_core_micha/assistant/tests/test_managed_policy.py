@@ -38,7 +38,7 @@ def managed(monkeypatch):
         yield
 
 
-def test_catalogue_and_chat_keep_duplicate_model_sources_distinct(managed):
+def test_legacy_managed_policy_does_not_expose_private_sources(managed):
     from django_core_micha.assistant.views import CatalogueView, ChatListCreateView
 
     user = get_user_model().objects.create_user(username="managed")
@@ -46,18 +46,15 @@ def test_catalogue_and_chat_keep_duplicate_model_sources_distinct(managed):
     request = factory.get("/")
     force_authenticate(request, user=user)
     catalogue = CatalogueView.as_view()(request).data
-    assert {entry["id"] for entry in catalogue["entries"]} == {"acct-a:same", "acct-b:same"}
-    assert {entry["id"]: entry["source_label"] for entry in catalogue["entries"]} == {
-        "acct-a:same": "Account A", "acct-b:same": "Account B",
-    }
+    assert catalogue["entries"] == []
     assert catalogue["policy"] == {"revision": 1}
-    assert catalogue["default"]["entry"] == "acct-a:same"
+    assert catalogue["default"] is None
     request = factory.post("/", {"driver": "openai_api", "model": "same", "effort": "low", "source_id": "acct-b"},
                            format="json")
     force_authenticate(request, user=user)
-    created = ChatListCreateView.as_view()(request).data
-    assert created["source_id"] == "acct-b"
-    assert created["selection"]["entry"] == "acct-b:same"
+    created = ChatListCreateView.as_view()(request)
+    assert created.status_code == 503
+    assert created.data["code"] == "not_configured"
 
 
 def test_revoked_saved_selection_uses_the_new_standard(managed):

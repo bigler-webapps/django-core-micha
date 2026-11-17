@@ -53,7 +53,7 @@ def test_managed_reader_dispatches_standard_with_source_credential(managed,monke
 
     assert reader.read_receipts(account,image_bytes())[0]["merchant"]=="Cafe"
     request,kwargs=calls[0]
-    assert kwargs=={"provider":"openai","api_key":"central-receipt-secret",
+    assert kwargs=={"provider":"openai","api_key":"central-receipt-secret","source_id":"central",
         "model":"managed-receipt-model","user_id":account.pk}
     assert request.effort == "high"
 
@@ -64,7 +64,7 @@ def test_managed_reader_dispatches_standard_with_source_credential(managed,monke
     })
     reader.read_receipts(account, image_bytes())
     assert calls[-1][1] == {
-        "provider": "openai", "api_key": "other-receipt-secret",
+        "provider": "openai", "api_key": "other-receipt-secret", "source_id": "other",
         "model": "other-receipt-model", "user_id": account.pk,
     }
 

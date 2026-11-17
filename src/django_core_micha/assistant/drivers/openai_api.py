@@ -98,6 +98,9 @@ class OpenAIDriver:
                      effort="medium", cancel_event=None, max_tool_calls=12, response_schema=None, **kwargs):
         if self.client is None:
             raise DriverError("not_configured")
+        billing_reference = str(kwargs.pop("billing_reference", "") or getattr(chat, "pk", "") or "")
+        billing_purpose = str(kwargs.pop("billing_purpose", "chat_aborted") or "chat_aborted")
+        billing_source_id = str(kwargs.pop("source_id", "") or "")
         tool_map = {t.name: t for t in tools}
         input_rows = list(messages)
         if system:
@@ -174,6 +177,7 @@ class OpenAIDriver:
                 input_estimate, output_estimate = estimate_tokens(prompt_bytes, DEFAULT_MAX_OUTPUT_TOKENS)
                 function_calls = {}
                 final_usage = None
+                completed_response = False
                 buffered_text = []
                 started = False
                 try:
@@ -217,6 +221,7 @@ class OpenAIDriver:
                                 "arguments": getattr(item, "arguments", "")}
                         elif kind == "response.completed":
                             response = getattr(event, "response", None)
+                            completed_response = response is not None
                             final_usage = getattr(response, "usage", None)
                             output = getattr(response, "output", []) or []
                             citations = []
@@ -272,11 +277,10 @@ class OpenAIDriver:
                             if execution is not None and buffered_text:
                                 from ..execution import redact_provider_refs
                                 yield {"type": "delta", "text": redact_provider_refs("".join(buffered_text), [container_id, *uploaded_ids, *citation_ids, *output_ids, *execution_records])}
-                    if final_usage is None:
+                    if not completed_response:
                         raise DriverError("invalid_output")
-                    settle_reservation(reservation=reservation, response=type("R", (), {"usage": type("U", (), {
-                        "input_tokens": getattr(final_usage, "input_tokens", 0),
-                        "output_tokens": getattr(final_usage, "output_tokens", 0)})()})(), model=model)
+                    settle_reservation(reservation=reservation,
+                        response=type("R", (), {"usage": final_usage})(), model=model)
                 except BaseException as exc:
                     if not started or _definitively_unbilled(exc):
                         release_unstarted(reservation)
@@ -284,22 +288,22 @@ class OpenAIDriver:
                         await charge_aborted(reservation, user=user, provider="openai_api",
                             model=model, input_tokens_estimate=input_estimate,
                             output_tokens_estimate=output_estimate,
-                            reference=str(getattr(chat, "pk", "") or ""), exc=exc)
+                            reference=billing_reference, purpose=billing_purpose,
+                            source_id=billing_source_id, exc=exc)
                     raise
-                if final_usage:
-                    def value(obj, key, default=0):
-                        return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
-                    input_tokens = int(value(final_usage, "input_tokens") or 0)
-                    details = value(final_usage, "input_tokens_details", {}) or {}
-                    cached = int(value(details, "cached_tokens") or 0)
-                    yield {"type": "usage", "usage": {"input_tokens": max(0, input_tokens - cached),
-                        "output_tokens": int(value(final_usage, "output_tokens") or 0),
-                        "cache_read_tokens": cached, "cache_write_tokens": 0,
-                        **({"execution_usd_micros": execution.reserved_usd_micros if execution_started and not execution_reported else 0} if execution is not None else {})}}
-                    if execution_started:
-                        execution_reported = True
-                        if session:
-                            session.cost_reported = True
+                from types import SimpleNamespace
+                from django_core_micha.extraction.drivers._common import usage_from_response
+                normalized_usage = usage_from_response(SimpleNamespace(usage=final_usage))
+                yield {"type": "usage", "usage": {"input_tokens": normalized_usage.input_tokens,
+                        "output_tokens": normalized_usage.output_tokens,
+                        "cache_read_tokens": normalized_usage.cache_read_tokens,
+                        "cache_write_tokens": normalized_usage.cache_write_tokens,
+                        **({"execution_usd_micros": execution.reserved_usd_micros if execution_started and not execution_reported else 0} if execution is not None else {})},
+                    "usage_reported": normalized_usage.reported}
+                if execution_started:
+                    execution_reported = True
+                    if session:
+                        session.cost_reported = True
                 if not function_calls:
                     return
                 for call in function_calls.values():

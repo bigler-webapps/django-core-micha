@@ -11,7 +11,8 @@ from rest_framework.views import APIView
 
 from .availability import availability
 from .catalogue import (default_entry, entries, entry_by_id, entry_id, entry_enabled, model_level,
-    row_source_id, row_source_label, selection_of, usable_entries, validate)
+    current_family_policy, row_source_id, row_source_label, selection_of, usable_entries,
+    validate, validate_family)
 from .hooks import availability_reason, can_access_scope, is_shared_scope, _hook
 from .access import can_view_chat, is_creator
 from .models import AssistantChat
@@ -19,6 +20,7 @@ from .history import summary_payload
 from .pagination import InvalidCursor, decode_cursor, encode_cursor
 from .turns import delete_session, reconcile_interrupted, turn_payload
 from django_core_micha.ai_policy.policy import current_policy, policy_enabled
+from django_core_micha.ai_policy.resolver import family_identity_for_route
 
 def _chat(user, chat_id):
     try: chat = AssistantChat.objects.get(pk=chat_id)
@@ -29,18 +31,52 @@ def _chat(user, chat_id):
 
 def _iso(value): return value.isoformat() if value else None
 def payload(chat):
+    if policy_enabled():
+        choice = _selection(chat)
+        result = {"id":str(chat.pk),"scope":chat.scope,"title":chat.title,"title_source":chat.title_source,
+            "archived_at":_iso(chat.archived_at),"effort":chat.selected_effort,"selection":choice,
+            "created_at":_iso(chat.created_at),"updated_at":_iso(chat.updated_at)}
+        if choice:
+            result.update({"provider": choice["provider"], "family": choice["family"]})
+        return result
     return {"id":str(chat.pk),"scope":chat.scope,"title":chat.title,"title_source":chat.title_source,
         "archived_at":_iso(chat.archived_at),"driver":chat.selected_driver,"model":chat.selected_model,
         "source_id":chat.selected_source_id or None,
         "effort":chat.selected_effort,"selection":_selection(chat),"created_at":_iso(chat.created_at),"updated_at":_iso(chat.updated_at)}
 
 def _selection(chat):
+    if current_family_policy():
+        provider, family = chat.selected_provider, chat.selected_family
+        if not provider or not family:
+            identity = family_identity_for_route(chat.selected_source_id, chat.selected_model,
+                                                 chat.selected_driver)
+            if identity:
+                provider, family = identity
+        if provider and family:
+            return {"entry":f"{provider}:{family}","provider":provider,"family":family,"effort":chat.selected_effort}
+        return None
+    if policy_enabled():
+        return None
     managed = policy_enabled()
     row = next((r for r in entries() if r.get("driver") == chat.selected_driver and r.get("model") == chat.selected_model
                 and (not managed or r.get("source_id") == chat.selected_source_id)), None)
     return selection_of(row,chat.selected_effort) if row else None
 
 def _problem(code, status_code=400): return Response({"code":code,"error":code},status=status_code)
+
+def _family_selection(value):
+    if not isinstance(value, dict) or set(value) - {"entry", "provider", "family", "effort"}:
+        raise ValueError("invalid_selection")
+    provider, family = value.get("provider"), value.get("family")
+    entry = value.get("entry")
+    if entry is not None:
+        if not isinstance(entry, str) or entry.count(":") != 1:
+            raise ValueError("invalid_selection")
+        entry_provider, entry_family = entry.split(":")
+        if provider not in (None, entry_provider) or family not in (None, entry_family):
+            raise ValueError("invalid_selection")
+        provider, family = entry_provider, entry_family
+    return provider, family, value.get("effort")
 def _cursor_context(kind,user,**extra): return {"kind":kind,"user":str(user.pk),**extra}
 
 def _shape(request,rows,context_tokens):
@@ -85,8 +121,15 @@ class CatalogueView(APIView):
             chat=_chat(request.user,chat_id)
             last=chat.turns.filter(state="completed").order_by("-sequence").first()
             context_tokens=last.context_tokens if last else 0
-        shaped=_shape(request,rows,context_tokens)
-        payload = {"default": selection_of(row) if row else None, "entries": shaped}
+        if policy_enabled() and current_family_policy():
+            shaped = [{"id":entry_id(item),"provider":item["provider"],"family":item["family"],
+                       "label":item["family_label"],"efforts":list(item["efforts"])} for item in rows]
+            payload = {"default": selection_of(row) if row else None, "entries": shaped}
+        elif policy_enabled():
+            payload = {"default": None, "entries": []}
+        else:
+            shaped=_shape(request,rows,context_tokens)
+            payload = {"default": selection_of(row) if row else None, "entries": shaped}
         if policy_enabled():
             state = current_policy()
             payload["policy"] = {"revision": state.revision if state else None}
@@ -139,6 +182,15 @@ class AdminLimitView(APIView):
         return _no_store(Response(_admin_limit()))
 
 def _admin_models(request):
+    if current_family_policy():
+        rows=usable_entries(request.user)
+        default=default_entry(request.user)
+        return {"default":selection_of(default) if default else None,
+                "entries":[{"id":entry_id(row),"provider":row["provider"],"family":row["family"],
+                    "label":row["family_label"],"efforts":list(row["efforts"]),"enabled":True,
+                    "provider_available":True} for row in rows]}
+    if policy_enabled():
+        return {"default":None,"entries":[]}
     from .limit import stored_default_entry
     from .availability import availability
     providers=availability().get("providers",{})
@@ -158,6 +210,7 @@ class AdminModelsView(APIView):
         if not _is_settings_admin(request.user): return _problem("forbidden",403)
         return _no_store(Response(_admin_models(request)))
     def patch(self, request):
+        if current_family_policy(): return _problem("not_configured",404)
         from .limit import disabled_entry_ids, save_config, stored_default_entry
         if not _is_settings_admin(request.user): return _problem("forbidden",403)
         body=request.data if isinstance(request.data,dict) else None
@@ -189,17 +242,23 @@ class AvailabilityView(APIView):
             scope=request.query_params.get("scope","")
             if not can_access_scope(request.user,scope): return _problem("not_found",404)
             reason=availability_reason(request.user,scope)
-            if reason: return Response({"status":"unavailable","reason":reason,"providers":result.get("providers",{})})
-        if policy_enabled():
+            if reason:
+                if policy_enabled():
+                    state = current_policy()
+                    return Response({"status":"unavailable", "reason":reason,
+                                     "policy":{"revision":state.revision if state else None}})
+                return Response({"status":"unavailable","reason":reason,"providers":result.get("providers",{})})
+        if current_family_policy():
             rows = usable_entries(request.user)
             state = current_policy()
-            drivers = {row["driver"] for row in rows}
-            result = {"status": "available" if drivers else "unavailable",
-                      "providers": {driver: "available" if driver in drivers else "not_configured"
-                                    for driver in result["providers"]},
+            result = {"status": "available" if rows else "unavailable",
                       "policy": {"revision": state.revision if state else None}}
-            if not drivers:
+            if not rows:
                 result["reason"] = "no_model_enabled" if state else "policy_unavailable"
+        elif policy_enabled():
+            state = current_policy()
+            result = {"status":"unavailable","reason":"policy_unavailable",
+                      "policy":{"revision":state.revision if state else None}}
         elif entries() and result.get("status") == "available" and not usable_entries(request.user):
             return Response({"status": "unavailable", "reason": "no_model_enabled", "providers": result.get("providers", {})})
         return Response(result)
@@ -226,7 +285,40 @@ class ChatListCreateView(APIView):
         nxt=encode_cursor({"updated_at":rows[-1].updated_at.isoformat(),"id":str(rows[-1].pk)},context) if more and rows else None
         return Response({"results":[payload(x) for x in rows],"next":nxt,"has_more":more})
     def post(self,request):
+        if policy_enabled() and not current_family_policy(): return _problem("not_configured",503)
         body=request.data if isinstance(request.data,dict) else {}
+        if current_family_policy():
+            if set(body)-{"title","scope","provider","family","effort","selection"}:
+                return _problem("invalid_request")
+            scope=body.get("scope","")
+            if not isinstance(scope,str) or len(scope)>255 or not can_access_scope(request.user,scope): return _problem("access_lost",403)
+            selection_body=body.get("selection")
+            if selection_body is not None:
+                if any(key in body for key in ("provider","family","effort")):
+                    return _problem("invalid_request")
+                try: provider, family, effort = _family_selection(selection_body)
+                except ValueError: return _problem("invalid_selection")
+            else:
+                provider, family, effort = body.get("provider"), body.get("family"), body.get("effort")
+            if (provider is None) != (family is None):
+                return _problem("invalid_selection")
+            picked = default_entry(request.user) if provider is None else None
+            if provider is None:
+                if picked is None: return _problem("not_configured")
+                provider, family = picked["provider"], picked["family"]
+            try:
+                validated = validate_family(provider, family, effort, request.user)
+            except ValueError:
+                return _problem("invalid_selection")
+            if effort is None:
+                effort = (validated.get("efforts") or ["medium"])[0]
+            title=body.get("title","New chat")
+            if not isinstance(title,str) or not title.strip() or len(title)>200: return _problem("invalid_title")
+            chat=AssistantChat.objects.create(owner=request.user,scope=scope,title=title.strip(),
+                title_source="user" if "title" in body else "automatic",selected_provider=provider,
+                selected_family=family,selected_driver=validated["driver"],selected_model=validated["model"],
+                selected_source_id=validated["source_id"],selected_effort=effort)
+            return Response(payload(chat),status=status.HTTP_201_CREATED)
         if set(body)-{"title","scope","driver","model","effort","source_id"}: return _problem("invalid_request")
         scope=body.get("scope","")
         if not isinstance(scope,str) or len(scope)>255 or not can_access_scope(request.user,scope): return _problem("access_lost",403)
@@ -256,7 +348,38 @@ class ChatDetailView(APIView):
     def get(self,request,chat_id): return Response(payload(_chat(request.user,chat_id)))
     def patch(self,request,chat_id):
         chat=_chat(request.user,chat_id); body=request.data if isinstance(request.data,dict) else {}
+        if policy_enabled() and not current_family_policy(): return _problem("not_configured",503)
         if chat.archived_at and body.get("archived") is not False: return _problem("archived",409)
+        if current_family_policy():
+            allowed={"title","archived","provider","family","effort","selection"}
+            if not body or set(body)-allowed: return _problem("invalid_request")
+            if "selection" in body:
+                picked=body["selection"]
+                if any(key in body for key in ("provider","family","effort")):
+                    return _problem("invalid_request")
+                try: provider, family, effort = _family_selection(picked)
+                except ValueError: return _problem("invalid_selection")
+                body={**{k:v for k,v in body.items() if k!="selection"},"provider":provider,"family":family,
+                      **({"effort":effort} if effort is not None else {})}
+            if "title" in body:
+                title=body["title"]
+                if not isinstance(title,str) or not title.strip() or len(title)>200: return _problem("invalid_title")
+                chat.title=title.strip(); chat.title_source="user"
+            if "archived" in body:
+                if type(body["archived"]) is not bool: return _problem("invalid_request")
+                chat.archived_at=timezone.now() if body["archived"] else None
+            if set(body)&{"provider","family","effort"}:
+                provider=body.get("provider",chat.selected_provider)
+                family=body.get("family",chat.selected_family)
+                effort=body.get("effort",chat.selected_effort)
+                if "effort" in body and effort is None: return _problem("invalid_selection")
+                try: validated=validate_family(provider,family,effort,request.user)
+                except ValueError: return _problem("invalid_selection")
+                chat.selected_provider,chat.selected_family=provider,family
+                chat.selected_driver,chat.selected_model=validated["driver"],validated["model"]
+                chat.selected_source_id=validated["source_id"]
+                chat.selected_effort=effort
+            chat.save(); return Response(payload(chat))
         allowed={"title","archived","driver","model","effort","selection"}
         if policy_enabled(): allowed.add("source_id")
         if not body or set(body)-allowed: return _problem("invalid_request")

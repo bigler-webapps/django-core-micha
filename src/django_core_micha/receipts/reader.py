@@ -24,7 +24,7 @@ def _managed_workload(user, provider, effort):
     rows = getattr(settings, "DCM_RECEIPTS_AI_POLICY_CATALOGUE", ()) or ()
     try:
         return resolve_workload(user, rows=rows, effort=effort,
-            eligible=lambda _user, row: row.get("driver") == driver)
+            workload="extraction", eligible=lambda _user, row: row.get("driver") == driver)
     except ValueError as exc:
         raise ReceiptError("provider_unavailable") from exc
 
@@ -73,11 +73,19 @@ def read_receipts(user,content:bytes,*,context=None,extension=None):
             if policy_enabled():
                 workload = _managed_workload(user, provider, effort)
                 model, key = workload.model, workload.credential
+                source_id = workload.source_id
+                provider = {"openai_api":"openai", "anthropic_api":"anthropic"}.get(workload.driver, "")
+                if not provider:
+                    raise ReceiptError("provider_unavailable")
             else:
                 model = getattr(settings, "DCM_RECEIPTS_MODEL", "gpt-6-luna")
                 key = getattr(settings, "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY", "")
+                source_id = ""
             req=ExtractionRequest(system_prompt=system,user_prompt=user_prompt,schema=build_schema(ext,bool(accounts)),max_output_tokens=int(getattr(settings,"DCM_RECEIPTS_MAX_OUTPUT_TOKENS",4000)),effort=effort,thinking={},image_bytes=prepared.image_bytes,image_mime_type=prepared.image_mime_type,pdf_text=prepared.pdf_text,upload_bytes=prepared.upload_bytes,upload_mime_type=prepared.upload_mime_type,upload_filename=prepared.upload_filename)
-            result=extract_document(req,provider=provider,api_key=key,model=model,user_id=user.pk)
+            call_options={"provider":provider,"api_key":key,"model":model,"user_id":user.pk}
+            if source_id:
+                call_options["source_id"]=source_id
+            result=extract_document(req,**call_options)
             payload=require_json_payload(result.raw_text,getattr(result,"raw_response",None))
     except ReceiptError:raise
     except AICostLimitExceeded as exc:raise ReceiptError("spend_cap_reached") from exc

@@ -65,6 +65,9 @@ class AnthropicDriver:
                      max_tokens=DEFAULT_MAX_OUTPUT_TOKENS, response_schema=None, **kwargs):
         if self.client is None:
             raise DriverError("not_configured")
+        billing_reference = str(kwargs.pop("billing_reference", "") or getattr(chat, "pk", "") or "")
+        billing_purpose = str(kwargs.pop("billing_purpose", "chat_aborted") or "chat_aborted")
+        billing_source_id = str(kwargs.pop("source_id", "") or "")
         rows = list(messages)
         specs = [{"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
                  for t in tool_specs(tools)]
@@ -285,18 +288,21 @@ class AnthropicDriver:
                         await charge_aborted(reservation, user=user, provider="anthropic_api",
                             model=model, input_tokens_estimate=input_estimate,
                             output_tokens_estimate=output_estimate,
-                            reference=str(getattr(chat, "pk", "") or ""), exc=exc)
+                            reference=billing_reference, purpose=billing_purpose,
+                            source_id=billing_source_id, exc=exc)
                     raise
                 usage = getattr(msg, "usage", None)
-                def value(obj, key):
-                    return obj.get(key, 0) if isinstance(obj, dict) else getattr(obj, key, 0)
+                from types import SimpleNamespace
+                from django_core_micha.extraction.drivers._common import usage_from_response
+                normalized_usage = usage_from_response(SimpleNamespace(usage=usage))
                 bill_execution = execution is not None and (bool(uploaded_ids) or execution_possible)
-                yield {"type": "usage", "usage": {"input_tokens": int(value(usage, "input_tokens") or 0),
-                    "output_tokens": int(value(usage, "output_tokens") or 0),
-                    "cache_read_tokens": int(value(usage, "cache_read_input_tokens") or 0),
-                    "cache_write_tokens": int(value(usage, "cache_creation_input_tokens") or 0),
+                yield {"type": "usage", "usage": {"input_tokens": normalized_usage.input_tokens,
+                    "output_tokens": normalized_usage.output_tokens,
+                    "cache_read_tokens": normalized_usage.cache_read_tokens,
+                    "cache_write_tokens": normalized_usage.cache_write_tokens,
                     **({"execution_usd_micros": execution.reserved_usd_micros if bill_execution and not execution_reported else 0,
-                        "execution_requests": reported_requests} if execution is not None else {})}}
+                        "execution_requests": reported_requests} if execution is not None else {})},
+                    "usage_reported": normalized_usage.reported}
                 if bill_execution:
                     execution_reported = True
                     if session:

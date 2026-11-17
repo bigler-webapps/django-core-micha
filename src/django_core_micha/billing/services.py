@@ -126,16 +126,119 @@ def tokens_for(rate_name,units):
     if rate_name not in rates: raise KeyError(rate_name)
     return units*rates[rate_name]
 
-def record_ai_call(*,user,provider,model,input_tokens,output_tokens,cache_tokens=0,cache_read_tokens=0,cache_write_tokens=0,purpose,reference="",extra_cost_usd_micros=0):
+def require_ai_usage_adapter(user_id, source_id, purpose):
+    """Deny a managed user call before dispatch when no tariff adapter exists."""
+    if user_id is None or not source_id:
+        return
+    from django_core_micha.ai_policy.policy import current_policy, policy_enabled
+    state = current_policy() if policy_enabled() else None
+    if not state or not state.families:
+        return
+    from django.utils.module_loading import import_string
+    name = "DCM_ASSISTANT_USAGE_HOOK" if purpose == "chat" else "DCM_AI_USAGE_SETTLEMENT_HOOK"
+    hook = getattr(settings, name, None)
     try:
-        from django_core_micha.ai_prices import price_usage
+        if isinstance(hook, str):
+            hook = import_string(hook)
+    except (ImportError, AttributeError):
+        hook = None
+    if not callable(hook):
+        raise ValueError("accounting_unavailable")
+
+def settle_ai_usage(record_id):
+    """Run the app's idempotent tariff adapter for a reported user operation."""
+    from django.utils.module_loading import import_string
+    identity = AICostRecord.objects.only("purpose", "reference").get(pk=record_id)
+    with transaction.atomic():
+        turn = None
+        if identity.purpose == "chat":
+            from django.apps import apps
+            if not apps.is_installed("django_core_micha.assistant"):
+                return False
+            from django_core_micha.assistant.models import AssistantTurn
+            # Turn finalization takes these locks in the same order.
+            turn = AssistantTurn.objects.select_for_update().select_related("chat").get(pk=identity.reference)
+        row = AICostRecord.objects.select_for_update().select_related("user").get(pk=record_id)
+        if row.settlement_status != "pending" or row.usage_status != "reported" or row.user_id is None:
+            return row.settlement_status == "settled"
+        if row.purpose == "chat":
+            from django_core_micha.assistant.hooks import _hook
+            hook = _hook("USAGE_HOOK")
+            if not hook:
+                return False
+            if (turn.sender_id or turn.chat.owner_id) != row.user_id or turn.source_id != row.source_id or turn.model != row.model:
+                raise ValueError("ai_cost_reference_route_changed")
+            from django_core_micha.ai_prices import price_usage
+            counts = {"input_tokens":row.input_tokens,"output_tokens":row.output_tokens,
+                      "cache_read_tokens":row.cache_read_tokens,"cache_write_tokens":row.cache_write_tokens}
+            usage = {**(turn.usage or {}), **counts}
+            usage["cost_usd_micros"] = price_usage(row.model, **counts) + int(usage.get("execution_usd_micros", 0) or 0)
+            turn.usage, turn.usage_reported = usage, True
+            turn.save(update_fields=("usage", "usage_reported"))
+            hook(turn.chat, row.user, turn, {"kind":"reply", **usage})
+        else:
+            hook = getattr(settings, "DCM_AI_USAGE_SETTLEMENT_HOOK", None)
+            if isinstance(hook, str):
+                hook = import_string(hook)
+            if not hook:
+                return False
+            # The adapter owns tariff, exemptions, account selection and refunds.
+            # Its reference is stable across retries and late usage reconciliation.
+            hook(row.user, row)
+        row.settlement_status = "settled"
+        row.save(update_fields=("settlement_status",))
+    return True
+
+def record_ai_call(*,user,provider,model,input_tokens=0,output_tokens=0,cache_tokens=0,cache_read_tokens=0,cache_write_tokens=0,purpose,reference="",extra_cost_usd_micros=0,source_id="",usage_reported=True):
+    try:
         read_tokens = int(cache_read_tokens or 0) + (int(cache_tokens or 0) if not cache_read_tokens and not cache_write_tokens else 0)
         write_tokens = int(cache_write_tokens or 0)
-        micros = price_usage(model, input_tokens=input_tokens, output_tokens=output_tokens,
-                             cache_read_tokens=read_tokens, cache_write_tokens=write_tokens)
-        micros += max(0, int(extra_cost_usd_micros or 0))
+        normalized_input = max(0,int(input_tokens)) if usage_reported else 0
+        normalized_output = max(0,int(output_tokens)) if usage_reported else 0
+        read_tokens = max(0, read_tokens) if usage_reported else 0
+        write_tokens = max(0, write_tokens) if usage_reported else 0
+        status = "reported" if usage_reported else "unresolved"
+        extra_micros = max(0, int(extra_cost_usd_micros or 0))
+        micros = extra_micros or None
+        if usage_reported:
+            from django_core_micha.ai_prices import price_usage
+            micros = price_usage(model, input_tokens=normalized_input, output_tokens=normalized_output,
+                                 cache_read_tokens=read_tokens, cache_write_tokens=write_tokens) + extra_micros
+            if source_id:
+                from django_core_micha.ai_policy.resolver import source_config
+                if (source_config(source_id) or {}).get("billing_source") == "subscription":
+                    micros = extra_micros
+        values = {"user":user,"provider":provider,"model":model,"source_id":str(source_id or "")[:192],
+            "input_tokens":normalized_input,"output_tokens":normalized_output,"cache_tokens":read_tokens+write_tokens,
+            "cache_read_tokens":read_tokens,"cache_write_tokens":write_tokens,
+            "cost_usd_micros":max(0,micros) if micros is not None else None,"usage_status":status,
+            "reference":reference,"purpose":purpose}
+        needs_settlement = bool(user is not None and source_id)
         with transaction.atomic():
-            return AICostRecord.objects.create(app=getattr(settings,"DCM_BILLING_APP",""),user=user,provider=provider,model=model,input_tokens=max(0,int(input_tokens)),output_tokens=max(0,int(output_tokens)),cache_tokens=max(0,read_tokens+write_tokens),cost_usd_micros=max(0,micros),purpose=purpose,reference=reference)
+            app = getattr(settings,"DCM_BILLING_APP","")
+            if reference:
+                row, created = AICostRecord.objects.get_or_create(app=app,purpose=purpose,operation_reference=reference,
+                    defaults={**values, "settlement_status": "pending" if needs_settlement else "not_required"})
+                if not created and row.usage_status == "unresolved" and usage_reported:
+                    identity = (row.user_id, row.provider, row.model, row.source_id)
+                    updated_identity = (values["user"].pk if values["user"] is not None else None,
+                        values["provider"], values["model"], values["source_id"])
+                    if identity != updated_identity:
+                        raise ValueError("ai_cost_reference_route_changed")
+                    for key,value in values.items(): setattr(row,key,value)
+                    row.save(update_fields=tuple(values))
+                elif not created and not (row.usage_status == status and all(getattr(row,key)==value for key,value in values.items())):
+                    raise ValueError("ai_cost_reference_reused")
+            else:
+                row = AICostRecord.objects.create(app=app,**values,
+                    settlement_status="pending" if needs_settlement else "not_required")
+        if row.settlement_status == "pending" and row.usage_status == "reported":
+            try:
+                settle_ai_usage(row.pk)
+                row.refresh_from_db()
+            except Exception:
+                log.error("Could not settle AI usage (%s)", __import__("sys").exc_info()[0].__name__)
+        return row
     except Exception:
         log.error("Could not record AI cost (%s)", __import__("sys").exc_info()[0].__name__)
         return None

@@ -55,6 +55,12 @@ For direct and receipt workloads inspect `src/django_core_micha/receipts/reader.
 
 Verify the existing policy payload, catalogue selection, receipt dispatch, user charging and execution contracts before mapping a compatible transition. Coordinate the managed provider/family-only picker with UCM. Record the resulting DCM release for BCO-UI-10 and HRAM-AI-6. Provider capability evidence must refer to the actual resolved model and source.
 
+## Completion
+
+DCM 3.32.0 provides stable managed family identities, revisioned private source/model mappings, source-bound execution attestations, usage normalization and retryable user settlement. The central policy authoring service must derive execution attestations from independently verified source/model capability; a caller-provided evidence string is not proof. Consumer adoption must configure the app's tariff adapter for managed direct workloads and verify it alongside existing chat tariffs. Those central and consumer integrations remain in BCO-UI-11 and BCO-UI-10; execution has no default attestation.
+
+Validation: 101 affected tests passed; the migration consistency check reported no changes. Independent OpenAI review: envelope and security `codex/gpt-6.1-terra`; regression, duplication and tests `codex/gpt-6-luna`. Two implementation review rounds; the accepted findings were corrected and affected tests rerun. The central attestation provenance, deployed app tariff adapters and live rollout remain consumer acceptance requirements.
+
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-17 in the Codex requirements chat: “Ich gebe alle drei WO frei.” Approved Envelope: `f083789`.

@@ -185,6 +185,36 @@ def model_supports_execution(entry):
     support = entry.get("code_execution") if isinstance(entry, dict) else None
     if not isinstance(support, dict) or support.get("enabled") is not True:
         return False
+    capabilities = entry.get("capabilities") if isinstance(entry, dict) else None
+    if isinstance(capabilities, (list, tuple, set)):
+        driver = entry.get("driver")
+        expected_tool = {"openai_api": "code_interpreter",
+                         "anthropic_api": "code_execution_20250825"}.get(driver)
+        expected_unit = {"openai_api": "openai_container_20m",
+                         "anthropic_api": "anthropic_execution_5m"}.get(driver)
+        memory = support.get("memory_limit", "1g")
+        model, source = entry.get("model"), entry.get("source_id")
+        checker = getattr(settings, "DCM_AI_EXECUTION_CAPABILITY_CHECK", None)
+        try:
+            from django_core_micha.ai_policy.policy import current_policy
+            policy = current_policy()
+            verified = bool(policy and any(
+                proof.get("source_id") == source and proof.get("model_id") == model and
+                proof.get("driver") == driver and proof.get("tool_version") == expected_tool and proof.get("evidence")
+                for proof in policy.verified_execution))
+            if isinstance(checker, str):
+                from django.utils.module_loading import import_string
+                checker = import_string(checker)
+            if checker and verified:
+                verified = checker(source, driver, model, expected_tool) is True
+        except Exception:
+            verified = False
+        return bool(verified
+            and "code_execution" in capabilities and expected_tool and support.get("tool_version") == expected_tool
+            and support.get("unit") == expected_unit and type(support.get("usd_micros")) is int
+            and support["usd_micros"] >= minimum_execution_rate(driver, memory)
+            and memory in _MEMORY_LIMITS and driver in {"openai_api", "anthropic_api"}
+            and isinstance(model, str) and source)
     if entry.get("model") not in VERIFIED_EXECUTION_MODELS.get(entry.get("driver"), set()):
         return False
     return not configuration_errors([entry])
@@ -225,7 +255,11 @@ async def prepare_execution(chat, user, turn, entry, *, authorize):
     support = entry.get("code_execution") if isinstance(entry, dict) else None
     if not isinstance(support, dict) or support.get("enabled") is not True:
         return None
-    if not model_supports_execution(entry):
+    from asgiref.sync import sync_to_async
+    if not await sync_to_async(model_supports_execution, thread_sensitive=True)(entry):
+        return None
+    if (turn.driver != entry.get("driver") or turn.model != entry.get("model") or
+            (entry.get("source_id") and turn.source_id != entry.get("source_id"))):
         return None
     if not execution_scope_is_private(chat.scope) or not await authorize():
         return None
@@ -237,12 +271,16 @@ async def prepare_execution(chat, user, turn, entry, *, authorize):
                         "anthropic_api": {"code_execution_20250825"}}
     if tool_version not in allowed_versions[driver]:
         return None
-    prices = getattr(settings, "DCM_ASSISTANT_EXECUTION_PRICING", None)
-    if not validate_price_table(prices):
-        return None
-    price = prices.get(f"{driver}:{turn.model}")
     expected_unit = "openai_container_20m" if driver == "openai_api" else "anthropic_execution_5m"
+    if isinstance(entry.get("capabilities"), (list, tuple, set)):
+        price = {"unit": support.get("unit"), "usd_micros": support.get("usd_micros")}
+    else:
+        prices = getattr(settings, "DCM_ASSISTANT_EXECUTION_PRICING", None)
+        if not validate_price_table(prices):
+            return None
+        price = prices.get(f"{driver}:{turn.model}")
     if (not price or price["unit"] != expected_unit or
+            type(price.get("usd_micros")) is not int or
             price["usd_micros"] < minimum_execution_rate(driver, support.get("memory_limit", "1g"))):
         return None
     hook = _hook("EXECUTION_POLICY")

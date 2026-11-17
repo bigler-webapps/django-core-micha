@@ -42,8 +42,16 @@ class StripeEvent(models.Model):
     event_id=models.CharField(max_length=255,unique=True); type=models.CharField(max_length=120); status=models.CharField(max_length=24); received_at=models.DateTimeField(default=timezone.now); processed_at=models.DateTimeField(null=True,blank=True); error_text=models.CharField(max_length=120,blank=True)
 class AICostRecord(models.Model):
     provider=models.CharField(max_length=80); model=models.CharField(max_length=120); user=models.ForeignKey(User,null=True,blank=True,on_delete=models.SET_NULL)
-    input_tokens=models.PositiveBigIntegerField(default=0); output_tokens=models.PositiveBigIntegerField(default=0); cache_tokens=models.PositiveBigIntegerField(default=0); cost_usd_micros=models.PositiveBigIntegerField()
-    purpose=models.CharField(max_length=120); reference=models.CharField(max_length=255,blank=True); app=models.CharField(max_length=80,blank=True,default="",db_index=True); created_at=models.DateTimeField(default=timezone.now)
+    source_id=models.CharField(max_length=192,blank=True,default="",db_index=True)
+    input_tokens=models.PositiveBigIntegerField(default=0); output_tokens=models.PositiveBigIntegerField(default=0)
+    cache_tokens=models.PositiveBigIntegerField(default=0); cache_read_tokens=models.PositiveBigIntegerField(default=0)
+    cache_write_tokens=models.PositiveBigIntegerField(default=0)
+    cost_usd_micros=models.PositiveBigIntegerField(null=True,blank=True)
+    usage_status=models.CharField(max_length=16,choices=(("reported","reported"),("unresolved","unresolved")),default="reported")
+    settlement_status=models.CharField(max_length=16,choices=(("pending","pending"),("settled","settled"),("not_required","not_required")),default="not_required")
+    purpose=models.CharField(max_length=120); reference=models.CharField(max_length=255,blank=True); operation_reference=models.CharField(max_length=255,null=True,blank=True); app=models.CharField(max_length=80,blank=True,default="",db_index=True); created_at=models.DateTimeField(default=timezone.now)
+    class Meta:
+        constraints=[models.UniqueConstraint(fields=("app","purpose","operation_reference"),condition=Q(operation_reference__isnull=False),name="dcm_bill_ai_cost_ref_unique")]
 
 class Purchase(models.Model):
     KINDS=[(x,x) for x in ("subscription","team_package","token_package")]
