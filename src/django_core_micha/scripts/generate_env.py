@@ -216,7 +216,7 @@ def generate_env(
     # project.yaml files without it keep their previous behaviour.
     #
     # Precedence among raw inputs: secrets < app_env < env_overrides (per-env wins).
-    # NOTE: platform-computed keys emitted via add() below (PROJECT_NAME,
+    # NOTE: platform-computed keys emitted via add() below (ENV_TYPE, PROJECT_NAME,
     # DJANGO_ALLOWED_HOSTS, CSRF_TRUSTED_URLS, TRAEFIK_ROUTER_RULE, PUBLIC_ORIGIN,
     # MASTER_BASE_URL, volume names, …) are authoritative and CANNOT be overridden
     # via app_env/env_overrides (DEBUG is the sole guarded exception). Keys starting
@@ -252,8 +252,7 @@ def generate_env(
             lines.append(f"{key}={value}")
             written_keys.add(key)
 
-    if env_name != "local":
-        add("ENV_TYPE", env_name)
+    add("ENV_TYPE", env_name)
     add("PROJECT_NAME", config.get("project_name", "Project"))
     add("COMPOSE_PROJECT_NAME", f"{config.get('project_name')}_{env_name}")
     add("CONTAINER_NAME_PREFIX", ctr_prefix)
