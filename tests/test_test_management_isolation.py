@@ -6,12 +6,57 @@ import pytest
 from django_core_micha.test_management.isolation import (
     IsolationFailure, basic_evidence, signature, validate_database_evidence, verify_marker,
 )
+from django_core_micha.test_management import isolated_entrypoint
 
 
 INSTANCE = UUID("8f7d1d14-4d4e-41f8-b5d0-f79d8c09d3a6")
 TOKEN = "synthetic-controller-token-" + "x" * 32
 MEDIA = "1 0 0:1 / /app/backend/media rw - ext4 /dev/sda rw"
 DATABASE = "2 0 0:2 / /var/lib/postgresql rw - ext4 /dev/sda rw"
+
+
+def test_isolated_server_prefers_daphne_and_falls_back_to_uvicorn(monkeypatch):
+    monkeypatch.setattr(isolated_entrypoint.shutil, "which", lambda name: f"/bin/{name}")
+    assert isolated_entrypoint.server_command() == ["daphne", "-b", "0.0.0.0", "-p", "8000", "backend.asgi:application"]
+    monkeypatch.setattr(isolated_entrypoint.shutil, "which", lambda name: "/bin/uvicorn" if name == "uvicorn" else None)
+    assert isolated_entrypoint.server_command() == ["uvicorn", "--host", "0.0.0.0", "--port", "8000", "backend.asgi:application"]
+    monkeypatch.setattr(isolated_entrypoint.shutil, "which", lambda name: None)
+    with pytest.raises(IsolationFailure):
+        isolated_entrypoint.server_command()
+
+
+def test_unverified_isolation_never_executes_a_server(monkeypatch):
+    entrypoint = isolated_entrypoint
+    monkeypatch.setenv("TEST_MANAGEMENT_BOOT_ID", "original")
+    monkeypatch.setattr(entrypoint.sys, "argv", ["isolated_entrypoint"])
+    monkeypatch.setattr(entrypoint, "basic_evidence", lambda *_: None)
+    monkeypatch.setattr(entrypoint.Path, "read_text", lambda *_args, **_kwargs: "mount-info")
+    monkeypatch.setattr(entrypoint, "_atomic_json", lambda *_: None)
+    monkeypatch.setattr(entrypoint, "process_start", lambda: "1")
+    clock = iter([0, 1, 302])
+    monkeypatch.setattr(entrypoint.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(entrypoint.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(entrypoint, "verify_marker", lambda: (_ for _ in ()).throw(IsolationFailure()))
+    monkeypatch.setattr(entrypoint.os, "execvp", lambda *_: pytest.fail("server launched before proof"))
+    with pytest.raises(SystemExit):
+        entrypoint.main()
+
+
+def test_verified_isolation_executes_uvicorn_fallback(monkeypatch):
+    entrypoint = isolated_entrypoint
+    monkeypatch.setenv("TEST_MANAGEMENT_BOOT_ID", "original")
+    monkeypatch.setattr(entrypoint.sys, "argv", ["isolated_entrypoint"])
+    monkeypatch.setattr(entrypoint, "basic_evidence", lambda *_: None)
+    monkeypatch.setattr(entrypoint.Path, "read_text", lambda *_args, **_kwargs: "mount-info")
+    monkeypatch.setattr(entrypoint, "_atomic_json", lambda *_: None)
+    monkeypatch.setattr(entrypoint, "process_start", lambda: "1")
+    monkeypatch.setattr(entrypoint, "verify_marker", lambda: None)
+    monkeypatch.setattr(entrypoint.shutil, "which", lambda name: "/bin/uvicorn" if name == "uvicorn" else None)
+    launched = []
+    monkeypatch.setattr(entrypoint.os, "execvp", lambda executable, args: (launched.append((executable, args)), (_ for _ in ()).throw(SystemExit(0))))
+    with pytest.raises(SystemExit):
+        entrypoint.main()
+    assert launched == [("uvicorn", ["uvicorn", "--host", "0.0.0.0", "--port", "8000", "backend.asgi:application"])]
 
 
 def env():

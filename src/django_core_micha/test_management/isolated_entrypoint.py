@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import time
 import uuid
@@ -62,6 +63,15 @@ def install_proof(address: str):
     verify_marker()
 
 
+def server_command():
+    """Use the consumer's installed ASGI server without changing isolation."""
+    if shutil.which("daphne"):
+        return ["daphne", "-b", "0.0.0.0", "-p", "8000", "backend.asgi:application"]
+    if shutil.which("uvicorn"):
+        return ["uvicorn", "--host", "0.0.0.0", "--port", "8000", "backend.asgi:application"]
+    raise IsolationFailure("No supported ASGI server is installed.")
+
+
 def main():
     try:
         if len(sys.argv) == 3 and sys.argv[1] == "install-proof":
@@ -85,9 +95,11 @@ def main():
         while time.monotonic() < deadline:
             try:
                 verify_marker()
-                os.execvp("daphne", ["daphne", "-b", "0.0.0.0", "-p", "8000", "backend.asgi:application"])
             except IsolationFailure:
                 time.sleep(0.5)
+                continue
+            command = server_command()
+            os.execvp(command[0], command)
         raise IsolationFailure("Isolation proof timed out.")
     except Exception:
         # Exception text may contain a DSN or other runtime configuration.
