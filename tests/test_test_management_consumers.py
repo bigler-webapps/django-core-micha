@@ -395,3 +395,129 @@ def _manifest_text(database_image):
         "networks": {"isolated": {"internal": True, "ipam": {"config": [{"subnet": "${TEST_MANAGEMENT_SUBNET:?missing isolated network subnet}"}]}}},
         "volumes": {"database": {}, "media": {}},
     })
+
+@pytest.mark.parametrize("args", [None, [], "x", {"LOWERcase": "0"}, {"API_TOKEN": "x"}, {"MONKEY": "x"}, {"AUTH_MODE": "x"}, {"TEST_MANAGEMENT_X": "x"}, {"DOCKER_X": "x"}, {"COMPOSE_X": "x"}, {"HTTP_PROXY": "x"}, {"https_proxy": "x"}, {"OK": "${VALUE}"}, {"OK": ""}, {"OK": 1}, {"OK": "x" * 41}, {f"ARG{i}": "x" for i in range(9)}])
+def test_build_args_bad_declaration_before_docker(tmp_path, monkeypatch, args):
+    root = app(tmp_path, "app", "alpha")
+    (root / "test-management.consumer.json").write_text(json.dumps({"version": 1, "identity": "alpha", "build_args": args}))
+    monkeypatch.setattr(starter, "_assert_local_docker", lambda *a: pytest.fail("Docker contacted"))
+    with pytest.raises(starter.IsolationError):
+        starter.consumer(root)  # declaration loading itself rejects, independent of any manifest
+    with pytest.raises(starter.IsolationError):
+        starter.start_isolated_instance(root, {"ENV_TYPE": "local"})
+
+
+def test_build_args_duplicate_and_forbidden_consumers(tmp_path):
+    root = app(tmp_path, "app", "alpha")
+    declaration = root / "test-management.consumer.json"
+    for raw in ('{"version":1,"identity":"alpha","build_args":{"X":"1","X":"2"}}',
+                '{"version":1,"identity":"alpha","mode":"synthetic-local","build_args":{}}',
+                '{"version":1,"identity":"alpha","build_args":{},"extra":1}'):
+        declaration.write_text(raw)
+        with pytest.raises(starter.IsolationError):
+            starter.consumer(root)
+    legacy = app(tmp_path, "innoservice", "innoservice")
+    (legacy / "test-management.consumer.json").write_text('{"version":1,"identity":"innoservice","build_args":{}}')
+    with pytest.raises(starter.IsolationError):
+        starter.consumer(legacy)
+
+
+def test_build_args_manifest_and_image_contract(tmp_path):
+    root = app(tmp_path, "app", "alpha")
+    declaration = root / "test-management.consumer.json"
+    manifest = root / "docker-compose.test-management.yml"
+    config = starter.yaml.safe_load(_manifest_text("postgres:18"))
+    old_image = starter.consumer_image("alpha", root)
+    manifest.write_text(starter.yaml.safe_dump(config))
+    starter.validate_compose_file(manifest, identity="alpha")
+    args = {"INSTALL_ENGINE": "0", "OPTION": "a-b.1"}
+    declaration.write_text(json.dumps({"version": 1, "identity": "alpha", "build_args": args}))
+    image = starter.consumer_image("alpha", root)
+    assert image != old_image and not starter._image_matches(old_image, "alpha", root)
+    declaration.write_text(json.dumps({"version": 1, "identity": "alpha", "build_args": dict(reversed(list(args.items())))}))
+    assert starter.consumer_image("alpha", root) == image
+    build = config["services"]["backend"]["build"]
+    for bad in (None, {"INSTALL_ENGINE": "0"}, {**args, "EXTRA": "1"}, {**args, "INSTALL_ENGINE": 0}, list(args)):
+        if bad is None:
+            build.pop("args", None)
+        else:
+            build["args"] = bad
+        manifest.write_text(starter.yaml.safe_dump(config))
+        with pytest.raises(starter.IsolationError):
+            starter.validate_compose_file(manifest, identity="alpha")
+    build["args"] = args
+    manifest.write_text(starter.yaml.safe_dump(config))
+    starter.validate_compose_file(manifest, identity="alpha")
+    assert starter._image_matches(image, "alpha", root)
+    declaration.write_text(json.dumps({"version": 1, "identity": "alpha"}))
+    assert starter.consumer_image("alpha", root) == old_image
+    with pytest.raises(starter.IsolationError):
+        starter.validate_compose_file(manifest, identity="alpha")
+
+
+def test_build_args_start_uses_literal_manifest(tmp_path, monkeypatch):
+    root = app(tmp_path, "app", "alpha")
+    args = {"INSTALL_ENGINE": "0"}
+    (root / "test-management.consumer.json").write_text(json.dumps({"version": 1, "identity": "alpha", "build_args": args}))
+    config = starter.yaml.safe_load(_manifest_text("postgres:18"))
+    config["services"]["backend"]["build"]["args"] = args
+    (root / "docker-compose.test-management.yml").write_text(starter.yaml.safe_dump(config))
+    monkeypatch.setattr(starter, "_assert_local_docker", lambda *a: None)
+    monkeypatch.setattr(starter.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1, stderr="no such volume"))
+    calls = []
+    monkeypatch.setattr(starter, "_run_private", lambda command, **kw: calls.append((command, kw)) or 0)
+    monkeypatch.setattr(starter, "_finish_start", lambda *a, **kw: {})
+    starter.start_isolated_instance(root, {"ENV_TYPE": "local", "BUILD_SECRET_TOKEN": "secret", "INSTALL_ENGINE": "1"})
+    command, kwargs = calls[0]
+    assert command[-3:] == ["up", "-d", "--build"] and "--build-arg" not in command
+    assert starter.yaml.safe_load((root / "docker-compose.test-management.yml").read_text())["services"]["backend"]["build"]["args"] == args
+    assert "secret" not in command
+    # Only the manifest's literal args reach the build; the arg-specific image name is what Compose receives.
+    assert kwargs["env"]["TEST_MANAGEMENT_IMAGE"] == starter.consumer_image("alpha", root)
+
+@pytest.mark.parametrize("changed", [{"INSTALL_ENGINE": "1"}, {"OTHER_NAME": "0"}, {"INSTALL_ENGINE": "0", "EXTRA": "1"}])
+def test_build_args_change_the_image_name(tmp_path, changed):
+    root = app(tmp_path, "app", "alpha")
+    declaration = root / "test-management.consumer.json"
+    names = set()
+    for args in ({"INSTALL_ENGINE": "0"}, changed):
+        declaration.write_text(json.dumps({"version": 1, "identity": "alpha", "build_args": args}))
+        names.add(starter.consumer_image("alpha", root))
+    assert len(names) == 2
+    declaration.write_text(json.dumps({"version": 1, "identity": "alpha", "build_args": {"INSTALL_ENGINE": "0"}}))
+    assert not starter._image_matches(next(iter(names - {starter.consumer_image("alpha", root)})), "alpha", root)
+
+
+def test_stop_with_build_args_checks_the_manifest_before_docker(tmp_path, monkeypatch):
+    root = app(tmp_path, "app", "alpha")
+    args = {"INSTALL_ENGINE": "0"}
+    (root / "test-management.consumer.json").write_text(json.dumps({"version": 1, "identity": "alpha", "build_args": args}))
+    (root / "frontend/build_current/index.html").unlink()
+    config = starter.yaml.safe_load(_manifest_text("postgres:18"))
+    config["services"]["backend"]["build"]["args"] = args
+    manifest = root / "docker-compose.test-management.yml"
+    manifest.write_text(starter.yaml.safe_dump(config))
+    project = "alpha-tm-" + "1" * 32
+    calls = []
+    monkeypatch.setattr(starter, "_assert_local_docker", lambda *_: calls.append("docker"))
+    monkeypatch.setattr(starter, "validate_runtime", lambda *a, **kw: calls.append("verified"))
+    monkeypatch.setattr(starter, "_run_private", lambda command, **kw: calls.append(command) or 0)
+    starter.stop_isolated_instance(root, project, {})
+    assert calls[:2] == ["docker", "verified"]
+    calls.clear()
+    config["services"]["backend"]["build"]["args"] = {"INSTALL_ENGINE": "1"}
+    manifest.write_text(starter.yaml.safe_dump(config))
+    with pytest.raises(starter.IsolationError):
+        starter.stop_isolated_instance(root, project, {})
+    assert calls == []
+
+
+def test_build_args_declaration_does_not_make_a_non_declaring_app_eligible(tmp_path):
+    root = app(tmp_path, "other-app", None)
+    config = starter.yaml.safe_load(_manifest_text("postgres:18"))
+    config["services"]["backend"]["build"]["args"] = {"INSTALL_ENGINE": "0"}
+    (root / "docker-compose.test-management.yml").write_text(starter.yaml.safe_dump(config))
+    with pytest.raises(starter.IsolationError):
+        starter.consumer(root)
+    with pytest.raises(starter.IsolationError):
+        starter.consumer_image("other", root)

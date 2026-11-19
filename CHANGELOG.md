@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.39.0] — 2026-11-19
+
+- DCM-DX-13 lets an app's `test-management.consumer.json` declare an optional `build_args` object (at most 8 literal string entries, strict name and value patterns; credential-shaped, `TEST_MANAGEMENT_`, `DOCKER_`, `COMPOSE_` and proxy names are rejected) for the isolated test image build. The Compose backend `build` must carry exactly these literal `args`; with the field, the image name additionally depends on a hash of the arguments. Start, resume, stop and relay verify the declaration against the manifest and the image name. Innoservice and the synthetic fixture cannot declare the field; consumers without it are unchanged.
+
 ## [3.38.0] — 2026-11-19
 
 - DCM-DX-12 lets an app's `test-management.consumer.json` declare an optional `database` flavour for the isolated local test center: `postgresql` (default, image `postgres:18`) or `postgis` (image `postgis/postgis:18-3.6`). The declaration, the Compose manifest and the running containers must agree for start, resume, stop and relay. Innoservice and the synthetic fixture stay plain PostgreSQL and cannot declare the field; no other value or image string is accepted. Existing consumers need no change.

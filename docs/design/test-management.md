@@ -39,6 +39,22 @@ use a name derived from the resolved checkout directory, so identical slugs in
 different directories do not share images. Other applications must provide the
 declaration.
 
+The optional `build_args` object contains at most eight literal string entries,
+for example `"build_args": {"INSTALL_ENGINE": "0"}`. Names must match
+`^[A-Z][A-Z0-9_]{0,39}$` and values `^[A-Za-z0-9._-]{1,40}$`.
+Names containing `TOKEN`, `SECRET`, `KEY`, `PASSWORD`, `PASSWD`,
+`CREDENTIAL`, or `AUTH`, beginning with `TEST_MANAGEMENT_`, `DOCKER_`, or
+`COMPOSE_`, or equal to `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY` (any case)
+are reserved. Innoservice and synthetic-local fixtures cannot declare this
+field. The backend build mapping must contain exactly these literal arguments;
+an empty or absent object requires the original build mapping without `args`.
+Secrets, targets, extra contexts and environment-sourced arguments are not supported.
+Non-empty arguments add a hash of their sorted canonical JSON to the checkout-scoped
+image name; existing names remain unchanged without arguments. Runtime checks use
+this name as evidence of the declared build arguments, since Docker image config
+does not record build arguments. Restore the original declaration and manifest
+to manage an instance built with different arguments.
+
 The optional `database` field is `postgresql` (the default, image
 `postgres:18`) or `postgis` (image `postgis/postgis:18-3.6`). For example:
 `{"version": 1, "identity": "example-app", "database": "postgis"}`.

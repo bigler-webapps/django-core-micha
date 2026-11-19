@@ -35,7 +35,7 @@ _DATABASE_IMAGES = {"postgresql": "postgres:18", "postgis": "postgis/postgis:18-
 _PROJECT = re.compile(r"^([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-tm-([0-9a-f]{32})$")
 
 
-def _load_consumer(cwd: Path, *, stop_only=False, include_database=False):
+def _load_consumer(cwd: Path, *, stop_only=False, include_database=False, include_build_args=False):
     """Load a versioned, deliberately small app-owned declaration."""
     try:
         cwd = cwd.resolve(strict=True)
@@ -44,6 +44,7 @@ def _load_consumer(cwd: Path, *, stop_only=False, include_database=False):
             raise ValueError
         synthetic_local = False
         database = "postgresql"
+        build_args = {}
         if declaration.exists():
             if declaration.is_symlink() or declaration.resolve().parent != cwd:
                 raise ValueError
@@ -51,8 +52,19 @@ def _load_consumer(cwd: Path, *, stop_only=False, include_database=False):
             if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
                 raise ValueError
             fields = {"version", "identity"}
-            if not fields <= set(data) or set(data) - fields - {"mode", "database"}:
+            if not fields <= set(data) or set(data) - fields - {"mode", "database", "build_args"}:
                 raise ValueError
+            if "build_args" in data:
+                build_args = data["build_args"]
+                if not isinstance(build_args, dict) or len(build_args) > 8:
+                    raise ValueError
+                for name, value in build_args.items():
+                    if (not re.fullmatch(r"[A-Z][A-Z0-9_]{0,39}", name) or
+                            any(word in name for word in ("TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH")) or
+                            name.startswith(("TEST_MANAGEMENT_", "DOCKER_", "COMPOSE_")) or
+                            name.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} or
+                            not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", value)):
+                        raise ValueError
             if "mode" in data:
                 if data["mode"] != "synthetic-local":
                     raise ValueError
@@ -67,6 +79,8 @@ def _load_consumer(cwd: Path, *, stop_only=False, include_database=False):
             if identity == "innoservice" and cwd.name.lower() != "innoservice":
                 raise ValueError
             if "database" in data and (synthetic_local or identity == "innoservice" or cwd.name.lower() == "innoservice"):
+                raise ValueError
+            if "build_args" in data and (synthetic_local or identity == "innoservice" or cwd.name.lower() == "innoservice"):
                 raise ValueError
             if synthetic_local and (identity == "innoservice" or cwd.name.lower() == "innoservice"):
                 raise ValueError
@@ -84,6 +98,8 @@ def _load_consumer(cwd: Path, *, stop_only=False, include_database=False):
             path = cwd / relative
             if not path.exists() or not path.resolve().is_relative_to(cwd):
                 raise ValueError
+        if include_build_args:
+            return cwd, identity, synthetic_local, database, build_args
         if include_database:
             return cwd, identity, synthetic_local, database
         return cwd, identity, synthetic_local
@@ -122,7 +138,14 @@ def project_instance(project: str, identity: str):
 
 def consumer_image(identity, cwd):
     directory = os.path.normcase(str(cwd.resolve())).encode("utf-8")
-    return f"{identity}-test-management-{hashlib.sha256(directory).hexdigest()}:local"
+    _, declared_identity, _, _, build_args = _load_consumer(cwd, stop_only=True, include_build_args=True)
+    if declared_identity != identity:
+        raise IsolationError("Consumer identity does not match the declaration.")
+    suffix = ""
+    if build_args:
+        canonical = json.dumps(build_args, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        suffix = "-" + hashlib.sha256(canonical).hexdigest()
+    return f"{identity}-test-management-{hashlib.sha256(directory).hexdigest()}{suffix}:local"
 
 
 def _image_matches(actual, identity, cwd):
@@ -309,14 +332,15 @@ def validate_stopped_instance(project: str, inspect=_docker_json, *, identity="i
         raise IsolationError("The stopped instance ownership could not be verified.") from exc
 
 
-def validate_compose_file(path: Path, *, identity="innoservice") -> None:
+def validate_compose_file(path: Path, *, identity="innoservice", stop_only=False) -> None:
     """Reject a manifest that could reuse ordinary storage or expose a service."""
     try:
         declaration = path.parent / "test-management.consumer.json"
         synthetic_local = False
         database_image = _DATABASE_IMAGES["postgresql"]
+        build_args = {}
         if declaration.is_symlink() or declaration.exists():
-            cwd, declared_identity, synthetic_local, database = _load_consumer(path.parent, include_database=True)
+            cwd, declared_identity, synthetic_local, database, build_args = _load_consumer(path.parent, stop_only=stop_only, include_build_args=True)
             database_image = _DATABASE_IMAGES[database]
             if declared_identity != identity or path.resolve() != (cwd / "docker-compose.test-management.yml").resolve():
                 raise ValueError
@@ -337,7 +361,10 @@ def validate_compose_file(path: Path, *, identity="innoservice") -> None:
         if set(db) != {"image", "environment", "volumes", "healthcheck", "networks"}:
             raise ValueError
         image = "innoservice-test-management:local" if identity == "innoservice" else "${TEST_MANAGEMENT_IMAGE:?missing isolated image}"
-        if backend["image"] != image or backend["build"] != {"context": ".", "dockerfile": "backend/Dockerfile"}:
+        build = {"context": ".", "dockerfile": "backend/Dockerfile"}
+        if build_args:
+            build["args"] = build_args
+        if backend["image"] != image or backend["build"] != build:
             raise ValueError
         if backend["command"] != ["python", "-m", "django_core_micha.test_management.isolated_entrypoint"]:
             raise ValueError
@@ -644,7 +671,10 @@ def stop_isolated_instance(cwd: Path, project: str, inherited_env=None):
     """Stop only the verified instance; preserve its data for explicit recovery."""
     # Stopping an owned runtime must remain possible after source/build changes.
     # No Compose parsing or synthetic code execution is needed for this operation.
-    cwd, identity, _ = _load_consumer(cwd, stop_only=True)
+    cwd, identity, _, _, build_args = _load_consumer(cwd, stop_only=True, include_build_args=True)
+    if build_args:
+        # Only consumers with declared build arguments: the manifest must still carry exactly them.
+        validate_compose_file(cwd / "docker-compose.test-management.yml", identity=identity, stop_only=True)
     project_instance(project, identity)
     env = dict(os.environ if inherited_env is None else inherited_env)
     if env.get("ENV_TYPE") and env["ENV_TYPE"].lower() != "local":
