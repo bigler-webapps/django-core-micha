@@ -539,6 +539,18 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
             if execution is not None:
                 kwargs["execution"] = execution
                 kwargs["authorize"] = access_ok
+                async def refresh_execution():
+                    if cancel_event and cancel_event.is_set():
+                        raise DriverError("cancelled")
+                    if not await access_ok():
+                        raise DriverError("access_lost")
+                    refreshed = await prepare_execution(
+                        current, user, turn, model_entry, authorize=access_ok)
+                    if refreshed is None:
+                        raise DriverError("execution_unavailable")
+                    from dataclasses import replace
+                    return replace(refreshed, session=execution.session)
+                kwargs["refresh_execution"] = refresh_execution
         structured = bool(getattr(settings, "DCM_ASSISTANT_STRUCTURED_TURNS", False))
         execution_deadline = asyncio.get_running_loop().time() + execution.max_execution_seconds if execution else None
         async def collect_round(call_kwargs):
@@ -593,7 +605,10 @@ async def run_turn(chat, user, message, emit, cancel_event=None, authorize=None,
                             from .execution import _limits
                             caps = _limits()
                             if (sum(len(item.get("data", [])) for item in execution_results) > caps["max_execution_output_files"] or
-                                    len(json.dumps(execution_results, ensure_ascii=False).encode("utf-8")) > caps["max_execution_output_total_bytes"] + caps["max_execution_text_bytes"] * 2 * execution.max_continuations):
+                                    len(json.dumps(execution_results, ensure_ascii=False).encode("utf-8")) >
+                                    caps["max_execution_output_total_bytes"] +
+                                    caps["max_execution_text_bytes"] * 2 * execution.max_continuations +
+                                    512 * (caps["max_execution_output_files"] + execution.max_continuations)):
                                 raise DriverError("execution_output_invalid")
                     elif event.get("type") == "session": session_id = event.get("session_id")
                     elif event.get("type") == "init": saw_init = True

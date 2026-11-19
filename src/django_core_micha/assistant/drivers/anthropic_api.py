@@ -18,29 +18,133 @@ def _execution_cents(config):
     return max(1, math.ceil(config.reserved_usd_micros / 10_000))
 
 
-async def _download_files(client, file_ids, input_ids):
-    from ..execution import _limits, validate_outputs
+async def _download_files(client, file_ids, input_ids, session):
+    from ..execution import _limits, read_bounded_response, validate_outputs
     caps = _limits()
     rows = []
     seen = set(input_ids)
+    seen.update(session.provider_file_ids)
+    slots = max(0, caps["max_execution_output_files"] - session.output_file_count)
+    cleanup_limit = (caps["max_execution_files"] +
+        caps["max_execution_output_files"] * 2)
+    omitted_files = 0
+    omitted_bytes = 0
+    total_remaining = max(0, caps["max_execution_output_total_bytes"] - session.output_bytes)
+    processing_error = None
+    cleanup_tracking_exhausted = False
+
+    def track_for_cleanup(file_id):
+        if file_id in seen:
+            return True
+        if len(session.provider_file_ids) >= cleanup_limit:
+            return False
+        session.provider_file_ids.append(file_id)
+        seen.add(file_id)
+        return True
+
+    async def delete_excess(file_id):
+        nonlocal cleanup_tracking_exhausted
+        try:
+            async with asyncio.timeout(3):
+                await client.beta.files.delete(file_id, betas=["files-api-2025-04-14"])
+        except Exception:
+            # Keep failed deletions in the bounded final-cleanup list when possible.
+            if track_for_cleanup(file_id):
+                return
+            # At capacity, make one last bounded attempt and fail closed if it also fails.
+            try:
+                async with asyncio.timeout(3):
+                    await client.beta.files.delete(file_id, betas=["files-api-2025-04-14"])
+            except Exception:
+                cleanup_tracking_exhausted = True
+                log.warning("Hosted execution output cleanup retry failed driver=anthropic_api")
+
     for file_id in file_ids:
         if not isinstance(file_id, str) or file_id in seen:
             continue
-        seen.add(file_id)
-        if len(rows) >= caps["max_execution_output_files"]:
-            raise DriverError("execution_output_invalid")
-        metadata = await client.beta.files.retrieve_metadata(file_id, betas=["files-api-2025-04-14"])
-        name = _get(metadata, "filename") or _get(metadata, "name") or ""
-        media_type = _get(metadata, "mime_type") or "application/octet-stream"
-        size = _get(metadata, "size_bytes") or _get(metadata, "bytes")
-        if type(size) is not int or size <= 0 or size > caps["max_execution_output_file_bytes"]:
-            raise DriverError("execution_output_invalid")
-        response = await client.beta.files.download(file_id, betas=["files-api-2025-04-14"])
-        content = response.read()
-        if hasattr(content, "__await__"):
-            content = await content
-        rows.append({"name": str(name), "media_type": str(media_type), "content": bytes(content)})
-    return validate_outputs(rows)
+        if processing_error is not None:
+            omitted_files += 1
+            omitted_bytes = None
+            await delete_excess(file_id)
+            continue
+        if len(rows) >= slots:
+            omitted_files += 1
+            omitted_bytes = None
+            await delete_excess(file_id)
+            continue
+        if not track_for_cleanup(file_id):
+            omitted_files += 1
+            omitted_bytes = None
+            await delete_excess(file_id)
+            continue
+        try:
+            metadata = await client.beta.files.retrieve_metadata(file_id, betas=["files-api-2025-04-14"])
+            name = _get(metadata, "filename") or _get(metadata, "name") or ""
+            media_type = _get(metadata, "mime_type") or "application/octet-stream"
+            size = _get(metadata, "size_bytes")
+            if size is None:
+                size = _get(metadata, "bytes")
+            if type(size) is not int or size < 0:
+                raise DriverError("execution_output_invalid")
+            extension = str(name).rsplit(".", 1)[-1].lower()
+            if ((extension == "csv" and media_type not in {"text/csv", "application/csv"}) or
+                    (extension == "json" and media_type != "application/json") or
+                    (extension == "txt" and media_type != "text/plain") or
+                    extension not in {"csv", "json", "txt"}):
+                raise DriverError("execution_output_invalid")
+            read_limit = min(caps["max_execution_output_file_bytes"], total_remaining)
+            if total_remaining <= 0 or (extension == "json" and total_remaining < 4):
+                omitted_files += 1
+                if omitted_bytes is not None:
+                    omitted_bytes += size
+                continue
+            if extension == "json" and size > read_limit:
+                content, read_truncated = b"", True
+            else:
+                async with client.beta.files.with_streaming_response.download(
+                        file_id, betas=["files-api-2025-04-14"]) as response:
+                    content, read_truncated = await read_bounded_response(response, read_limit)
+            read_truncated = read_truncated or size > len(content)
+            rows.append({"name": str(name), "media_type": str(media_type), "content": content,
+                "source_size": size, "read_truncated": read_truncated})
+            total_remaining = max(0, total_remaining - len(content))
+        except Exception as exc:
+            if processing_error is None:
+                processing_error = (exc if isinstance(exc, DriverError)
+                    else DriverError("execution_output_invalid"))
+    if cleanup_tracking_exhausted:
+        raise DriverError("execution_output_invalid")
+    if processing_error is not None:
+        raise processing_error from None
+    bounded, truncation = validate_outputs(rows, session=session, omitted_files=omitted_files,
+        omitted_bytes=omitted_bytes,
+        return_summary=True)
+    return bounded, truncation
+
+
+async def _upload_execution_inputs(client, config, authorize=None, refresh=None, cancel_event=None):
+    from ..execution import mark_execution_dataset_uploaded, pending_execution_datasets, refresh_execution_config
+    uploaded_ids = []
+    while True:
+        if cancel_event and cancel_event.is_set():
+            raise DriverError("cancelled")
+        config = await refresh_execution_config(config, refresh)
+        pending = pending_execution_datasets(config.session, config.datasets)
+        if not pending:
+            return uploaded_ids, config
+        dataset = pending[0]
+        if authorize and not await authorize():
+            raise DriverError("access_lost")
+        if cancel_event and cancel_event.is_set():
+            raise DriverError("cancelled")
+        uploaded = await client.beta.files.upload(file=(dataset.name, dataset.content, dataset.media_type),
+            betas=["files-api-2025-04-14"], expires_in_seconds=3600)
+        file_id = str(uploaded.id)
+        uploaded_ids.append(file_id)
+        config.session.input_file_ids.append(file_id)
+        config.session.provider_file_ids.append(file_id)
+        mark_execution_dataset_uploaded(config.session, dataset)
+        config.session.possible_charge = True
 
 
 def _blocks(value):
@@ -74,6 +178,7 @@ class AnthropicDriver:
         tool_map = {t.name: t for t in tools}
         execution = kwargs.pop("execution", None)
         authorize = kwargs.pop("authorize", None)
+        refresh_execution = kwargs.pop("refresh_execution", None)
         session = execution.session if execution is not None else None
         uploaded_ids = list(session.input_file_ids) if session else []
         provider_file_ids = list(session.provider_file_ids) if session else []
@@ -104,29 +209,19 @@ class AnthropicDriver:
                         if type(exc).__name__ == "AICostLimitExceeded":
                             raise DriverError("quota_exceeded") from exc
                         raise DriverError("accounting_unavailable") from exc
-                if not container_id and not session.input_file_ids:
-                    for dataset in execution.datasets:
-                        if authorize and not await authorize():
-                            raise DriverError("access_lost")
-                        uploaded = await self.client.beta.files.upload(
-                            file=(dataset.name, dataset.content, dataset.media_type),
-                            betas=["files-api-2025-04-14"], expires_in_seconds=3600)
-                        uploaded_ids.append(str(uploaded.id))
-                        provider_file_ids.append(str(uploaded.id))
-                        session.input_file_ids = list(uploaded_ids)
-                        session.provider_file_ids = list(provider_file_ids)
-                    session.input_file_ids = list(uploaded_ids)
-                    session.provider_file_ids = list(provider_file_ids)
-                    if authorize and not await authorize():
-                        raise DriverError("access_lost")
-                if uploaded_ids and not container_id:
+                new_upload_ids, execution = await _upload_execution_inputs(
+                    self.client, execution, authorize, refresh_execution, cancel_event)
+                uploaded_ids = list(session.input_file_ids)
+                provider_file_ids = list(session.provider_file_ids)
+                attach_ids = uploaded_ids if not container_id else new_upload_ids
+                if attach_ids:
                     last = rows[-1] if rows and rows[-1].get("role") == "user" else None
                     if last:
                         content = last.get("content", "")
                         blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
-                        last["content"] = blocks + [{"type": "container_upload", "file_id": file_id} for file_id in uploaded_ids]
+                        last["content"] = blocks + [{"type": "container_upload", "file_id": file_id} for file_id in attach_ids]
                     else:
-                        rows.append({"role": "user", "content": [{"type": "container_upload", "file_id": file_id} for file_id in uploaded_ids]})
+                        rows.append({"role": "user", "content": [{"type": "container_upload", "file_id": file_id} for file_id in attach_ids]})
             pauses = 0
             while True:
                 if cancel_event and cancel_event.is_set():
@@ -216,27 +311,35 @@ class AnthropicDriver:
                                     stderr = _get(result, "stderr", "")
                                     return_code = _get(result, "return_code", 0)
                                     status = "completed" if return_code == 0 else "failed"
-                                    file_ids = []
-                                    for artifact in _blocks(_get(result, "content")):
-                                        if _get(artifact, "type") in {"file", "file_reference"}:
-                                            file_id = _get(artifact, "file_id")
-                                            if isinstance(file_id, str):
-                                                file_ids.append(file_id)
-                                                provider_file_ids.append(file_id)
-                                                if session and file_id not in session.provider_file_ids:
-                                                    session.provider_file_ids.append(file_id)
-                                    data = await _download_files(self.client, file_ids, uploaded_ids)
-                                    from ..execution import _limits, normalize_text, redact_provider_refs
+                                    file_ids = (_get(artifact, "file_id") for artifact in _blocks(_get(result, "content"))
+                                        if _get(artifact, "type") in {"file", "file_reference"})
+                                    data, file_truncation = await _download_files(
+                                        self.client, file_ids, session.input_file_ids, session)
+                                    provider_file_ids = list(session.provider_file_ids)
+                                    from ..execution import _limits, bounded_text, bounded_text_parts, redact_provider_refs
                                     code_info = execution_code.get(use_id, {})
                                     input_value = code_info.get("input", {})
                                     code = _get(input_value, "command") or _get(input_value, "code") or ""
                                     code = str(code) if code else json.dumps(input_value, ensure_ascii=False, sort_keys=True)
-                                    output_text = str(stdout) + ("\n" + str(stderr) if stderr else "")
-                                    if not output_text and isinstance(result, (str, dict)):
-                                        output_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-                                    record = {"code": normalize_text(code, _limits()["max_execution_text_bytes"]),
-                                        "status": status, "output_text": normalize_text(output_text, _limits()["max_execution_text_bytes"]),
+                                    code, code_meta = bounded_text(code, _limits()["max_execution_text_bytes"])
+                                    output_parts = [str(stdout)] + ([str(stderr)] if stderr else [])
+                                    if not stdout and not stderr and isinstance(result, (str, dict)):
+                                        output_parts = [result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)]
+                                    output_text, output_meta = bounded_text_parts(
+                                        output_parts, _limits()["max_execution_text_bytes"], separator="\n")
+                                    record = {"code": code,
+                                        "status": status, "output_text": output_text,
                                         "data": data}
+                                    truncation = {"truncated": bool(file_truncation["truncated"] or
+                                        code_meta["truncated"] or output_meta["truncated"]),
+                                        "omitted_files": file_truncation["omitted_files"],
+                                        "omitted_bytes": file_truncation["omitted_bytes"]}
+                                    if code_meta["truncated"]:
+                                        truncation["code"] = code_meta
+                                    if output_meta["truncated"]:
+                                        truncation["output_text"] = output_meta
+                                    if truncation["truncated"]:
+                                        record["truncation"] = truncation
                                     record = redact_provider_refs(record, [container_id, use_id, *provider_file_ids])
                                     yield {"type": "execution", "record": record}
                                     execution_possible = True
@@ -335,8 +438,18 @@ class AnthropicDriver:
                     yield {"type": "tool", "phase": "start", "name": tool.name, "label": tool.label}
                     content, sources = await invoke_tool(tool, user, chat, arguments, "cloud")
                     yield {"type": "tool", "phase": "end", "name": tool.name, "label": tool.label, "sources": sources}
-                    rows.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": block_id,
-                        "content": content}]})
+                    refreshed_ids = []
+                    if execution is not None:
+                        refreshed_ids, execution = await _upload_execution_inputs(
+                            self.client, execution, authorize, refresh_execution, cancel_event)
+                        uploaded_ids = list(session.input_file_ids)
+                        provider_file_ids = list(session.provider_file_ids)
+                        if refreshed_ids:
+                            execution_possible = True
+                    result_blocks = [{"type": "tool_result", "tool_use_id": block_id, "content": content}]
+                    result_blocks.extend({"type": "container_upload", "file_id": file_id}
+                        for file_id in refreshed_ids)
+                    rows.append({"role": "user", "content": result_blocks})
         except DriverError as exc:
             if session and execution_possible:
                 session.possible_charge = True

@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.35.0] — 2026-11-19
+
+- DCM-CHAT-22 refreshes authorized execution datasets after app-tool calls within the same assistant turn for the OpenAI and Anthropic hosted execution adapters, failing closed when access, authorization or the dataset snapshot changes. Supported CSV, JSON and text execution outputs are returned in a bounded, valid form with additive machine-readable truncation metadata (`truncated`, `omitted_bytes`, `truncation_reason`; per execution record `truncation`). An oversized JSON output is reported with `data: null` and truncation metadata. Output CSV is now parsed strictly. Consumers must display the truncation metadata.
+- DCM-PERF-5 reduces repeated Docker CLI inspection in the isolated local test relay while keeping per-request validation fail-closed.
+
 ## [3.34.0] — 2026-11-19
 
 - DCM-DX-11 adds private, one-time capture and claim of real local password-reset links for owned accounts in active isolated test-management runs. The normal application confirmation flow, password policy, MFA and non-test delivery remain in use.

@@ -5,6 +5,7 @@ transfer a particular dataset. This module only accepts that decision through
 the trusted server-side hook and applies the shared transport and size limits.
 """
 import csv
+import hashlib
 import io
 import inspect
 import json
@@ -20,7 +21,8 @@ from .hooks import _hook
 from .limits import get_limit
 
 log = logging.getLogger(__name__)
-_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\.(?:csv|json)\Z", re.I)
+_INPUT_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\.(?:csv|json)\Z", re.I)
+_OUTPUT_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\.(?:csv|json|txt)\Z", re.I)
 _MEMORY_LIMITS = {"1g", "4g", "16g", "64g"}
 ANTHROPIC_RETENTION_POLICY = "code_execution_up_to_30_days_non_zdr"
 # Provider documentation confirms these exact model/tool combinations. Unknown
@@ -57,7 +59,11 @@ class ExecutionSession:
     """Provider references kept only for the lifetime of one Assistant turn."""
     container_id: str | None = None
     input_file_ids: list = field(default_factory=list)
+    container_file_ids: list = field(default_factory=list)
     provider_file_ids: list = field(default_factory=list)
+    dataset_manifest: dict = field(default_factory=dict)
+    output_file_count: int = 0
+    output_bytes: int = 0
     reservation: object = None
     reservation_attempted: bool = False
     possible_charge: bool = False
@@ -227,7 +233,7 @@ def _validate_dataset(item, caps):
         row = Dataset(**item)
     else:
         raise DriverError("execution_input_invalid")
-    if (not isinstance(row.name, str) or not _FILENAME.fullmatch(row.name) or
+    if (not isinstance(row.name, str) or not _INPUT_FILENAME.fullmatch(row.name) or
             not isinstance(row.data_class, str) or not row.data_class.strip() or
             not isinstance(row.content, bytes) or not row.content or
             len(row.content) > caps["max_execution_file_bytes"]):
@@ -248,6 +254,41 @@ def _validate_dataset(item, caps):
         except (UnicodeDecodeError, ValueError) as exc:
             raise DriverError("execution_input_invalid") from exc
     return row
+
+
+def _dataset_fingerprint(dataset):
+    digest = hashlib.sha256(dataset.content).hexdigest()
+    return (dataset.data_class, dataset.media_type, digest)
+
+
+def pending_execution_datasets(session, datasets):
+    """Return new inputs; refuse snapshots that revoke or replace sent data."""
+    incoming = {}
+    for dataset in datasets:
+        if dataset.name in incoming:
+            raise DriverError("execution_input_invalid")
+        incoming[dataset.name] = dataset
+    manifest = session.dataset_manifest
+    if not set(manifest).issubset(incoming):
+        raise DriverError("execution_unavailable")
+    pending = []
+    for name, dataset in incoming.items():
+        fingerprint = _dataset_fingerprint(dataset)
+        if name in manifest:
+            if manifest[name] != fingerprint:
+                raise DriverError("execution_unavailable")
+        else:
+            pending.append(dataset)
+    return pending
+
+
+def mark_execution_dataset_uploaded(session, dataset):
+    """Remember the exact trusted dataset snapshot transferred to this analysis."""
+    fingerprint = _dataset_fingerprint(dataset)
+    existing = session.dataset_manifest.get(dataset.name)
+    if existing is not None and existing != fingerprint:
+        raise DriverError("execution_unavailable")
+    session.dataset_manifest[dataset.name] = fingerprint
 
 
 async def prepare_execution(chat, user, turn, entry, *, authorize):
@@ -323,11 +364,120 @@ async def prepare_execution(chat, user, turn, entry, *, authorize):
         price["usd_micros"] * math.ceil(max_seconds / unit_seconds), datasets)
 
 
-def normalize_text(value, limit):
+async def refresh_execution_config(current, refresh):
+    """Recheck trusted execution policy while retaining this analysis session."""
+    if refresh is None:
+        return current
+    updated = await refresh()
+    fields = ("provider", "model", "tool_version", "memory_limit", "max_execution_seconds",
+        "max_continuations", "reserved_usd_micros")
+    if (not isinstance(updated, ExecutionConfig) or updated.session is not current.session or
+            any(getattr(updated, field) != getattr(current, field) for field in fields)):
+        raise DriverError("execution_unavailable")
+    return updated
+
+
+def bounded_text(value, limit):
+    """Return valid UTF-8 text bounded by bytes and exact omission metadata."""
     if not isinstance(value, str):
-        return ""
-    raw = value.encode("utf-8", errors="replace")
-    return raw[:limit].decode("utf-8", errors="ignore")
+        return "", {"truncated": False, "omitted_bytes": 0}
+    parts = []
+    kept = 0
+    omitted = 0
+    truncated = False
+    for char in value:
+        codepoint = ord(char)
+        size = _utf8_char_size(codepoint)
+        safe_char = "?" if 0xD800 <= codepoint <= 0xDFFF else char
+        if not truncated and kept + size <= limit:
+            parts.append(safe_char)
+            kept += size
+        else:
+            truncated = True
+            omitted += size
+    return "".join(parts), {"truncated": omitted > 0, "omitted_bytes": omitted}
+
+
+def _utf8_char_size(codepoint):
+    if 0xD800 <= codepoint <= 0xDFFF:
+        return 1
+    if codepoint <= 0x7F:
+        return 1
+    if codepoint <= 0x7FF:
+        return 2
+    if codepoint <= 0xFFFF:
+        # Lone surrogates use the encoder's one-byte replacement character.
+        return 3
+    return 4
+
+
+def _utf8_size(value):
+    """Count UTF-8 bytes without allocating an encoded copy of provider text."""
+    return sum(_utf8_char_size(ord(char)) for char in value)
+
+
+def bounded_text_parts(values, limit, *, separator=""):
+    """Bound joined provider text without first allocating the joined value."""
+    parts = []
+    kept = 0
+    omitted = 0
+    first = True
+    truncated = False
+
+    def append(value):
+        nonlocal kept, omitted, truncated
+        value = value if isinstance(value, str) else str(value)
+        if truncated:
+            omitted += _utf8_size(value)
+            return
+        text, metadata = bounded_text(value, max(0, limit - kept))
+        parts.append(text)
+        kept += _utf8_size(text)
+        omitted += metadata["omitted_bytes"]
+        truncated = metadata["truncated"]
+
+    for value in values:
+        if not first and separator:
+            append(separator)
+        append(value)
+        first = False
+    return "".join(parts), {"truncated": omitted > 0, "omitted_bytes": omitted}
+
+
+def normalize_text(value, limit):
+    return bounded_text(value, limit)[0]
+
+
+async def read_bounded_response(response, limit):
+    """Read at most limit + 1 bytes from an SDK's asynchronous response stream."""
+    method = getattr(response, "iter_bytes", None) or getattr(response, "aiter_bytes", None)
+    if method is None:
+        raise DriverError("execution_output_invalid")
+    chunk_size = max(1, min(64 * 1024, limit + 1))
+    try:
+        iterator = method(chunk_size)
+    except TypeError:
+        iterator = method()
+    if inspect.isawaitable(iterator):
+        iterator = await iterator
+    content = bytearray()
+    truncated = False
+    async for chunk in iterator:
+        if not isinstance(chunk, (bytes, bytearray, memoryview)):
+            raise DriverError("execution_output_invalid")
+        remaining = limit + 1 - len(content)
+        if remaining <= 0:
+            truncated = True
+            break
+        if len(chunk) > remaining:
+            content.extend(chunk[:remaining])
+            truncated = True
+            break
+        content.extend(chunk)
+        if len(content) > limit:
+            truncated = True
+            break
+    return bytes(content[:limit]), truncated
 
 
 def redact_provider_refs(value, provider_ids):
@@ -345,43 +495,194 @@ def redact_provider_refs(value, provider_ids):
     return value
 
 
-def validate_output_file(name, media_type, content, caps):
-    """Return inert, bounded CSV/JSON output; reject everything else."""
-    if (not isinstance(name, str) or not _FILENAME.fullmatch(name) or
-            not isinstance(content, bytes) or not content or
-            len(content) > caps["max_execution_output_file_bytes"]):
+def _decode_bounded_utf8(content, *, allow_incomplete=False):
+    try:
+        return content.decode("utf-8-sig"), content
+    except UnicodeDecodeError as exc:
+        if (allow_incomplete and exc.end == len(content) and
+                exc.reason == "unexpected end of data"):
+            prefix = content[:exc.start]
+            return prefix.decode("utf-8-sig"), prefix
+        raise DriverError("execution_output_invalid") from exc
+
+
+class _TrackingCsvLines:
+    def __init__(self, text):
+        self._stream = io.StringIO(text, newline="")
+        self.position = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self._stream.readline()
+        if line == "":
+            raise StopIteration
+        self.position += len(line)
+        return line
+
+
+def _last_complete_csv_boundary(text):
+    quoted = False
+    index = 0
+    boundary = 0
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            if quoted and index + 1 < len(text) and text[index + 1] == '"':
+                index += 2
+                continue
+            quoted = not quoted
+        elif char in "\r\n" and not quoted:
+            if char == "\r" and index + 1 < len(text) and text[index + 1] == "\n":
+                index += 1
+            boundary = index + 1
+        index += 1
+    return boundary
+
+
+def _payload_bytes(value):
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    return len(json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+
+
+def validate_output_file(name, media_type, content, caps, *, source_size=None,
+                         read_truncated=False, aggregate_limit=None):
+    """Return a valid bounded CSV, JSON, or text representation."""
+    if (not isinstance(name, str) or not _OUTPUT_FILENAME.fullmatch(name) or
+            not isinstance(content, bytes)):
         raise DriverError("execution_output_invalid")
     suffix = name.rsplit(".", 1)[-1].lower()
+    file_limit = caps["max_execution_output_file_bytes"]
+    limit = file_limit if aggregate_limit is None else min(file_limit, max(0, aggregate_limit))
+    file_truncated = read_truncated or len(content) > file_limit
+    content_truncated = file_truncated or len(content) > limit
+    raw = content[:limit]
+    reported_size = source_size if type(source_size) is int and source_size >= 0 else None
+    if reported_size is None and not read_truncated:
+        reported_size = len(content)
+    reason = "file_limit" if file_truncated else "aggregate_limit"
     if suffix == "csv" and media_type in {"text/csv", "application/csv"}:
         try:
-            decoded = content.decode("utf-8-sig")
-            rows = list(csv.reader(io.StringIO(decoded)))
-            if len(rows) > 100_000 or any(len(row) > 1000 for row in rows):
-                raise ValueError
-            safe = decoded
-        except (UnicodeDecodeError, csv.Error, ValueError) as exc:
+            decoded, _valid_raw = _decode_bounded_utf8(raw, allow_incomplete=content_truncated)
+            if content_truncated:
+                decoded = decoded[:_last_complete_csv_boundary(decoded)]
+            lines = _TrackingCsvLines(decoded)
+            reader = csv.reader(lines, strict=True)
+            row_count = 0
+            row_limit = False
+            kept_position = 0
+            while True:
+                try:
+                    row = next(reader)
+                except StopIteration:
+                    break
+                if len(row) > 1000:
+                    raise ValueError
+                row_count += 1
+                if row_count <= 100_000:
+                    kept_position = lines.position
+                if row_count > 100_000:
+                    row_limit = True
+                    break
+            if row_limit:
+                safe = decoded[:kept_position]
+                content_truncated = True
+                reason = "row_limit"
+            else:
+                safe = decoded
+        except (UnicodeDecodeError, csv.Error, ValueError, RecursionError) as exc:
             raise DriverError("execution_output_invalid") from exc
     elif suffix == "json" and media_type == "application/json":
+        if content_truncated:
+            safe = None
+        else:
+            try:
+                decoded = content.decode("utf-8-sig")
+                safe = json.loads(decoded, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("invalid constant")))
+                encoded = json.dumps(safe, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                if len(encoded.encode("utf-8")) > file_limit:
+                    safe = None
+                    content_truncated = True
+                    reason = "file_limit"
+            except (UnicodeDecodeError, ValueError, TypeError, RecursionError) as exc:
+                raise DriverError("execution_output_invalid") from exc
+        if aggregate_limit is not None and _payload_bytes(safe) > aggregate_limit:
+            safe = None
+            content_truncated = True
+            reason = "aggregate_limit"
+    elif suffix == "txt" and media_type == "text/plain":
         try:
-            safe = json.loads(content)
-            encoded = json.dumps(safe, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        except (UnicodeDecodeError, ValueError, TypeError) as exc:
-            raise DriverError("execution_output_invalid") from exc
-        if len(encoded.encode("utf-8")) > caps["max_execution_output_file_bytes"]:
-            raise DriverError("execution_output_invalid")
+            decoded, _valid_raw = _decode_bounded_utf8(raw, allow_incomplete=content_truncated)
+        except DriverError:
+            raise
+        safe, _text_meta = bounded_text(decoded, limit)
+        if _text_meta["truncated"]:
+            content_truncated = True
+        if aggregate_limit is not None and _payload_bytes(safe) > aggregate_limit:
+            safe, _text_meta = bounded_text(safe, aggregate_limit)
+            content_truncated = True
+            reason = "aggregate_limit"
     else:
         raise DriverError("execution_output_invalid")
-    return {"name": name, "media_type": media_type, "data": safe}
+    result = {"name": name, "media_type": media_type, "data": safe}
+    payload_size = _payload_bytes(safe)
+    if content_truncated:
+        kept_bytes = len(safe.encode("utf-8")) if isinstance(safe, str) else 0
+        omitted = max(0, reported_size - kept_bytes) if reported_size is not None else None
+        result.update({"truncated": True, "omitted_bytes": omitted,
+            "truncation_reason": reason})
+    return result, payload_size
 
 
-def validate_outputs(files):
+def validate_outputs(files, *, session=None, omitted_files=0, omitted_bytes=0,
+                     return_summary=False):
     caps = _limits()
-    if (not isinstance(files, list) or len(files) > caps["max_execution_output_files"] or
-            any(not isinstance(file, dict) or set(file) != {"name", "media_type", "content"} for file in files)):
+    if not isinstance(files, list):
         raise DriverError("execution_output_invalid")
-    result = [validate_output_file(**file, caps=caps) for file in files]
-    total = sum(len((row["data"] if isinstance(row["data"], str) else
-                     json.dumps(row["data"], ensure_ascii=False)).encode("utf-8")) for row in result)
-    if total > caps["max_execution_output_total_bytes"]:
-        raise DriverError("execution_output_invalid")
-    return result
+    already_counted = session.output_file_count if session else 0
+    already_bytes = session.output_bytes if session else 0
+    file_slots = max(0, caps["max_execution_output_files"] - already_counted)
+    total_remaining = max(0, caps["max_execution_output_total_bytes"] - already_bytes)
+    result = []
+    summary = {"truncated": False, "omitted_files": max(0, int(omitted_files)),
+        "omitted_bytes": None if omitted_bytes is None else max(0, int(omitted_bytes))}
+    if summary["omitted_files"]:
+        summary["truncated"] = True
+    for file in files:
+        if (not isinstance(file, dict) or
+                not {"name", "media_type", "content"}.issubset(file) or
+                set(file) - {"name", "media_type", "content", "source_size", "read_truncated"}):
+            raise DriverError("execution_output_invalid")
+        if (not isinstance(file["name"], str) or not isinstance(file["media_type"], str) or
+                not isinstance(file["content"], bytes)):
+            raise DriverError("execution_output_invalid")
+        content = file["content"]
+        size = len(content)
+        if len(result) >= file_slots or total_remaining <= 0:
+            summary["truncated"] = True
+            summary["omitted_files"] += 1
+            if summary["omitted_bytes"] is not None:
+                summary["omitted_bytes"] += size
+            continue
+        if file["name"].lower().endswith(".json") and total_remaining < 4:
+            summary["truncated"] = True
+            summary["omitted_files"] += 1
+            if summary["omitted_bytes"] is not None:
+                summary["omitted_bytes"] += size
+            continue
+        row, used = validate_output_file(**file, caps=caps,
+            aggregate_limit=total_remaining)
+        result.append(row)
+        total_remaining = max(0, total_remaining - used)
+        if row.get("truncated"):
+            summary["truncated"] = True
+            if summary["omitted_bytes"] is not None and type(row.get("omitted_bytes")) is int:
+                summary["omitted_bytes"] += row["omitted_bytes"]
+            elif row.get("omitted_bytes") is None:
+                summary["omitted_bytes"] = None
+        if session:
+            session.output_file_count += 1
+            session.output_bytes += used
+    return (result, summary) if return_summary else result

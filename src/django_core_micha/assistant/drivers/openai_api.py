@@ -25,15 +25,25 @@ def get_limit_execution_text():
     return get_limit("max_output_bytes")
 
 
-async def _upload_execution_inputs(client, config, authorize=None):
+async def _upload_execution_inputs(client, config, authorize=None, refresh=None, cancel_event=None):
+    from ..execution import mark_execution_dataset_uploaded, pending_execution_datasets, refresh_execution_config
     file_ids = []
     try:
-        for dataset in config.datasets:
+        while True:
+            if cancel_event and cancel_event.is_set():
+                raise DriverError("cancelled")
+            config = await refresh_execution_config(config, refresh)
+            pending = pending_execution_datasets(config.session, config.datasets)
+            if not pending:
+                return file_ids, config
+            dataset = pending[0]
             if authorize and not await authorize():
                 raise DriverError("access_lost")
+            if cancel_event and cancel_event.is_set():
+                raise DriverError("cancelled")
             uploaded = await client.files.create(file=(dataset.name, dataset.content, dataset.media_type), purpose="assistants")
             file_ids.append(str(uploaded.id))
-        return file_ids
+            mark_execution_dataset_uploaded(config.session, dataset)
     except BaseException:
         for file_id in file_ids:
             try:
@@ -42,6 +52,35 @@ async def _upload_execution_inputs(client, config, authorize=None):
             except Exception:
                 log.warning("Hosted execution input cleanup failed driver=openai_api")
         raise
+
+
+async def _upload_refreshed_execution_inputs(client, config, container_id, authorize=None, refresh=None,
+                                            cancel_event=None):
+    from ..execution import mark_execution_dataset_uploaded, pending_execution_datasets, refresh_execution_config
+    uploaded_ids = []
+    while True:
+        if cancel_event and cancel_event.is_set():
+            raise DriverError("cancelled")
+        config = await refresh_execution_config(config, refresh)
+        pending = pending_execution_datasets(config.session, config.datasets)
+        if not pending:
+            return uploaded_ids
+        dataset = pending[0]
+        if authorize and not await authorize():
+            raise DriverError("access_lost")
+        if cancel_event and cancel_event.is_set():
+            raise DriverError("cancelled")
+        uploaded = await client.containers.files.create(
+            container_id, file=(dataset.name, dataset.content, dataset.media_type))
+        returned_container = _get(uploaded, "container_id")
+        if returned_container != container_id:
+            raise DriverError("security_violation")
+        file_id = str(_get(uploaded, "id") or "")
+        if not file_id:
+            raise DriverError("execution_output_invalid")
+        config.session.container_file_ids.append(file_id)
+        mark_execution_dataset_uploaded(config.session, dataset)
+        uploaded_ids.append(file_id)
 
 
 async def _cleanup_execution(client, container_id, file_ids):
@@ -58,36 +97,58 @@ async def _cleanup_execution(client, container_id, file_ids):
         except Exception: log_provider_error("openai_api", "execution_cleanup", Exception("file cleanup failed"))
 
 
-async def _download_execution_files(client, container_id, outputs, input_ids):
-    from ..execution import _limits, validate_outputs
+async def _download_execution_files(client, container_id, outputs, input_ids, session):
+    from ..execution import _limits, read_bounded_response, validate_outputs
     caps = _limits()
     file_ids = []
+    seen = set(input_ids)
+    omitted_files = 0
     for output in outputs:
         if _get(output, "type") in {"files", "file"}:
             rows = _get(output, "files", []) or [_get(output, "file", output)]
             for row in rows:
                 file_id = _get(row, "file_id") or _get(row, "id")
-                if isinstance(file_id, str) and file_id not in input_ids and file_id not in file_ids:
+                if not isinstance(file_id, str) or file_id in seen:
+                    continue
+                if len(file_ids) < max(0, caps["max_execution_output_files"] - session.output_file_count):
+                    seen.add(file_id)
                     file_ids.append(file_id)
-    if len(file_ids) > caps["max_execution_output_files"]:
-        raise DriverError("execution_output_invalid")
+                else:
+                    omitted_files += 1
     files = []
+    omitted_bytes = None if omitted_files else 0
+    total_remaining = max(0, caps["max_execution_output_total_bytes"] - session.output_bytes)
     for file_id in file_ids:
         metadata = await client.containers.files.retrieve(file_id, container_id=container_id)
         path = _get(metadata, "path") or _get(metadata, "name") or ""
         name = PurePosixPath(path).name
         if _get(metadata, "container_id", container_id) != container_id or _get(metadata, "source", "assistant") != "assistant":
             raise DriverError("execution_output_invalid")
-        media_type = {"csv": "text/csv", "json": "application/json"}.get(name.rsplit(".", 1)[-1].lower(), "")
-        size = _get(metadata, "bytes") or _get(metadata, "size")
-        if type(size) is not int or size <= 0 or size > caps["max_execution_output_file_bytes"]:
+        media_type = {"csv": "text/csv", "json": "application/json", "txt": "text/plain"}.get(name.rsplit(".", 1)[-1].lower(), "")
+        size = _get(metadata, "bytes")
+        if size is None:
+            size = _get(metadata, "size")
+        if type(size) is not int or size < 0:
             raise DriverError("execution_output_invalid")
-        body = await client.containers.files.content.retrieve(file_id, container_id=container_id)
-        content = body.read()
-        if hasattr(content, "__await__"):
-            content = await content
-        files.append({"name": str(name or ""), "media_type": str(media_type or ""), "content": bytes(content)})
-    return validate_outputs(files), file_ids
+        read_limit = min(caps["max_execution_output_file_bytes"], total_remaining)
+        if total_remaining <= 0 or (name.lower().endswith(".json") and total_remaining < 4):
+            omitted_files += 1
+            if omitted_bytes is not None:
+                omitted_bytes += size
+            continue
+        if name.lower().endswith(".json") and size > read_limit:
+            content, read_truncated = b"", True
+        else:
+            async with client.containers.files.content.with_streaming_response.retrieve(
+                    file_id, container_id=container_id) as body:
+                content, read_truncated = await read_bounded_response(body, read_limit)
+        read_truncated = read_truncated or size > len(content)
+        files.append({"name": str(name or ""), "media_type": str(media_type or ""),
+            "content": content, "source_size": size, "read_truncated": read_truncated})
+        total_remaining = max(0, total_remaining - len(content))
+    bounded, truncation = validate_outputs(files, session=session, omitted_files=omitted_files,
+        omitted_bytes=omitted_bytes, return_summary=True)
+    return bounded, file_ids, truncation
 
 
 class OpenAIDriver:
@@ -109,6 +170,7 @@ class OpenAIDriver:
                   "parameters": t["parameters"], "strict": True} for t in tool_specs(tools)]
         execution = kwargs.pop("execution", None)
         authorize = kwargs.pop("authorize", None)
+        refresh_execution = kwargs.pop("refresh_execution", None)
         session = execution.session if execution is not None else None
         container_id = session.container_id if session else None
         uploaded_ids = list(session.input_file_ids) if session else []
@@ -137,7 +199,8 @@ class OpenAIDriver:
                             raise DriverError("quota_exceeded") from exc
                         raise DriverError("accounting_unavailable") from exc
                 if not session.container_id:
-                    uploaded_ids = await _upload_execution_inputs(self.client, execution, authorize)
+                    uploaded_ids, execution = await _upload_execution_inputs(
+                        self.client, execution, authorize, refresh_execution, cancel_event)
                     session.input_file_ids = list(uploaded_ids)
                     if authorize and not await authorize():
                         raise DriverError("access_lost")
@@ -165,6 +228,8 @@ class OpenAIDriver:
                     uploaded_ids = list(session.input_file_ids)
                     execution_possible = session.possible_charge
                     execution_started = session.possible_charge
+                    await _upload_refreshed_execution_inputs(
+                        self.client, execution, container_id, authorize, refresh_execution, cancel_event)
                 input_rows.insert(0, {"role": "system", "content": (
                     "Use the hosted code interpreter only for bounded analysis. When returning generated data files, "
                     "write only CSV or JSON files as analysis outputs; do not create or return executable content.")})
@@ -237,9 +302,11 @@ class OpenAIDriver:
                             citation_files = []
                             citation_ids = []
                             output_ids = []
+                            citation_truncation = None
                             if citations:
-                                citation_files, citation_ids = await _download_execution_files(
-                                    self.client, container_id, [{"type": "files", "files": citations}], uploaded_ids)
+                                citation_files, citation_ids, citation_truncation = await _download_execution_files(
+                                    self.client, container_id, [{"type": "files", "files": citations}],
+                                    [*uploaded_ids, *session.container_file_ids], session)
                             for item in output:
                                 if getattr(item, "type", None) == "function_call":
                                     function_calls[item.id] = {"id": item.call_id, "name": item.name,
@@ -255,21 +322,45 @@ class OpenAIDriver:
                                             raise DriverError("execution_limit")
                                         if getattr(item, "container_id", container_id) != container_id:
                                             raise DriverError("security_violation")
-                                        from ..execution import _limits, normalize_text, redact_provider_refs
+                                        from ..execution import _limits, bounded_text, bounded_text_parts, redact_provider_refs
                                         call_outputs = list(getattr(item, "outputs", []) or [])
-                                        logs = "\n".join(str(_get(row, "logs", "")) for row in call_outputs if _get(row, "type") == "logs")
-                                        files, file_ids = await _download_execution_files(self.client, container_id, call_outputs, uploaded_ids)
+                                        logs, logs_meta = bounded_text_parts(
+                                            (str(_get(row, "logs", "")) for row in call_outputs if _get(row, "type") == "logs"),
+                                            _limits()["max_execution_text_bytes"], separator="\n")
+                                        files, file_ids, file_truncation = await _download_execution_files(
+                                            self.client, container_id, call_outputs,
+                                            [*uploaded_ids, *session.container_file_ids], session)
+                                        truncation = {"truncated": False, "omitted_files": 0, "omitted_bytes": 0}
+                                        merged = [file_truncation]
+                                        if citation_truncation is not None:
+                                            merged.append(citation_truncation)
+                                            citation_truncation = None
+                                        for part in merged:
+                                            truncation["truncated"] |= part["truncated"]
+                                            truncation["omitted_files"] += part["omitted_files"]
+                                            if truncation["omitted_bytes"] is not None and part["omitted_bytes"] is not None:
+                                                truncation["omitted_bytes"] += part["omitted_bytes"]
+                                            else:
+                                                truncation["omitted_bytes"] = None
                                         output_ids.extend(file_ids)
                                         code = getattr(item, "code", "") or execution_code_deltas.get(call_id, "")
+                                        code, code_meta = bounded_text(str(code), _limits()["max_execution_text_bytes"])
                                         if citation_files:
                                             files.extend(citation_files)
                                             citation_files = []
-                                        if len(files) > _limits()["max_execution_output_files"] or len(json.dumps(files, ensure_ascii=False).encode("utf-8")) > _limits()["max_execution_output_total_bytes"]:
-                                            raise DriverError("execution_output_invalid")
-                                        record = {"code": normalize_text(str(code), _limits()["max_execution_text_bytes"]),
-                                            "status": "completed" if getattr(item, "status", "completed") == "completed" else "failed", "output_text": normalize_text(logs, _limits()["max_execution_text_bytes"]),
+                                        if logs_meta["truncated"]:
+                                            truncation["truncated"] = True
+                                            truncation["output_text"] = logs_meta
+                                        if code_meta["truncated"]:
+                                            truncation["truncated"] = True
+                                            truncation["code"] = code_meta
+                                        record = {"code": code,
+                                            "status": "completed" if getattr(item, "status", "completed") == "completed" else "failed", "output_text": logs,
                                             "data": files}
-                                        record = redact_provider_refs(record, [container_id, call_id, *uploaded_ids, *file_ids, *citation_ids])
+                                        if truncation["truncated"]:
+                                            record["truncation"] = truncation
+                                        record = redact_provider_refs(record, [container_id, call_id, *uploaded_ids,
+                                            *session.container_file_ids, *file_ids, *citation_ids])
                                         yield {"type": "execution", "record": record}
                                         input_rows.append(item.model_dump(exclude_none=True))
                             if citation_files:
@@ -314,6 +405,9 @@ class OpenAIDriver:
                     yield {"type": "tool", "phase": "start", "name": tool.name, "label": tool.label}
                     content, sources = await invoke_tool(tool, user, chat, arguments_json(call["arguments"]), "cloud")
                     yield {"type": "tool", "phase": "end", "name": tool.name, "label": tool.label, "sources": sources}
+                    if execution is not None:
+                        await _upload_refreshed_execution_inputs(
+                            self.client, execution, container_id, authorize, refresh_execution, cancel_event)
                     input_rows.extend([{"type": "function_call", "call_id": call["id"], "name": call["name"],
                         "arguments": call["arguments"]}, {"type": "function_call_output", "call_id": call["id"], "output": content}])
         except DriverError as exc:
