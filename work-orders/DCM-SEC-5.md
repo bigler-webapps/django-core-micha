@@ -110,3 +110,12 @@ Tier 3, shared core, not infra lane: implementer per config (Codex Luna), review
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-19 (chat message "Beide freigeben", covering DCM-SEC-5 and webapp-ops-scripts OPS-BAK-1).
+
+## Completion
+
+- Implementation: codex/gpt-6.1-terra, medium; configured level routing selected Terra. The implementer's first test run failed collection and it corrected the setup afterward.
+- Orchestrator check: `.venv-test/Scripts/python.exe -m pytest tests/test_security_notifications.py tests/test_authn_audit.py tests/test_invite_link_lifetime.py tests/test_client_ip.py tests/test_account_rate_limits.py -q` — 59 passed.
+- An earlier review attempt launched from the implementer session produced no results and was set aside (`review-DCM-SEC-5-r1-void`); it counts as no review.
+- Independent review (codex/gpt-6.1-terra, gpt-6-luna; lenses envelope, regression, duplication, tests, sec_review): round 1 raised 2 test-strength defects (reset/invite and passkey tests asserted only the recipient), both accepted and fixed (subject assertions). Round 2 (closing): envelope, regression, duplication, sec_review no findings; tests raised 2 more test-strength defects (password change/set, TOTP), accepted and fixed in the same way without a third pass. Strengthened assertions exposed a test-setup bug (plain save() cannot make a password unusable because of `prevent_password_wipe`), fixed.
+- Orchestrator checks: diff matches Part A; the two credential paths outside allauth (`PasswordResetConfirmView.post`, `PasskeyViewSet.destroy`) now notify; no other found. An invited new user receives the "Password Set" notice. Final scoped run: 59 passed.
+- Release 3.36.0 (CHANGELOG + pyproject).

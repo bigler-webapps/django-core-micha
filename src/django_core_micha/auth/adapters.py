@@ -36,6 +36,13 @@ class InvitationOnlySocialAdapter(DefaultSocialAccountAdapter):
         return verified
 
 class CoreAccountAdapter(DefaultAccountAdapter):
+    def send_notification_mail(self, template_prefix, user, context=None, email=None):
+        try:
+            return super().send_notification_mail(template_prefix, user, context, email)
+        except Exception as exc:
+            logger.warning("Security notification %s failed: %s", template_prefix, type(exc).__name__)
+            return None
+
     def get_client_ip(self, request):
         client_ip = resolve_client_ip(request)
         if client_ip is None:

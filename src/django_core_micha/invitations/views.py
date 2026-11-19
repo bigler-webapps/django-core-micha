@@ -6,6 +6,7 @@ from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
 
 from allauth.account.models import EmailAddress
+from allauth.account.adapter import get_adapter
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
@@ -200,6 +201,7 @@ class PasswordResetConfirmView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        had_password = user.has_usable_password()
         user.set_password(new_pw)
         user.save()
 
@@ -213,6 +215,9 @@ class PasswordResetConfirmView(APIView):
         if not email_obj.verified:
             email_obj.verified = True
             email_obj.save(update_fields=["verified"])
+
+        template = "account/email/password_reset" if had_password else "account/email/password_set"
+        get_adapter(request).send_notification_mail(template, user)
 
         registration_completed.send(
             sender=self.__class__,

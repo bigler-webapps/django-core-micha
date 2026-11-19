@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.36.0] — 2026-11-19
+
+- DCM-SEC-5 enables allauth security notification emails for account changes by default. Apps start sending these after their next core bump; working mail delivery (`EMAIL_PROVIDER` and its key) is required. Set `ACCOUNT_EMAIL_NOTIFICATIONS = False` to opt out. Delivery failures do not block the account change.
+
 ## [3.35.0] — 2026-11-19
 
 - DCM-CHAT-22 refreshes authorized execution datasets after app-tool calls within the same assistant turn for the OpenAI and Anthropic hosted execution adapters, failing closed when access, authorization or the dataset snapshot changes. Supported CSV, JSON and text execution outputs are returned in a bounded, valid form with additive machine-readable truncation metadata (`truncated`, `omitted_bytes`, `truncation_reason`; per execution record `truncation`). An oversized JSON output is reported with `data: null` and truncation metadata. Output CSV is now parsed strictly. Consumers must display the truncation metadata.

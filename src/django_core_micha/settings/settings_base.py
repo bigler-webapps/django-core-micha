@@ -391,6 +391,8 @@ ACCOUNT_LOGIN_METHODS = {'email'}
 ACCOUNT_SIGNUP_FIELDS = ['email*']
 ACCOUNT_UNIQUE_EMAIL = True
 ACCOUNT_EMAIL_VERIFICATION = "optional"
+# Apps may opt out by setting this to False.
+ACCOUNT_EMAIL_NOTIFICATIONS = True
 
 # S212 — Brute-Force + Credential-Stuffing-Mitigation via allauth built-in rate limiter.
 # Backed by Django cache. Disabled locally so dev/test flows are not disrupted and

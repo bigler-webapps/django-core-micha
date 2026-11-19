@@ -21,6 +21,7 @@ from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, Va
 
 from allauth.mfa.models import Authenticator
 from allauth.account.models import EmailAddress
+from allauth.account.adapter import get_adapter
 
 from django_core_micha.invitations.mixins import InviteActionsMixin
 from django_core_micha.invitations.access_codes import validate_access_code_or_error
@@ -874,6 +875,7 @@ class PasskeyViewSet(viewsets.ViewSet):
     def destroy(self, request, pk=None):
         obj = get_object_or_404(Authenticator, pk=pk, user=request.user, type=Authenticator.Type.WEBAUTHN)
         obj.delete()
+        get_adapter(request).send_notification_mail("mfa/email/webauthn_removed", request.user)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
