@@ -8,7 +8,7 @@ from django.db import transaction
 from django.utils.module_loading import import_string
 
 from .activation import TestManagementError, ensure_instance
-from .models import TestAccount, TestFixture, TestInstance, TestRun
+from .models import TestAccount, TestFixture, TestInstance, TestRun, TestMailMessage
 
 
 def adapter():
@@ -158,6 +158,7 @@ def delete_account(instance, run_handle: str, account_handle: str) -> None:
             account = TestAccount.objects.get(run=run, handle=account_handle, status__in=[TestAccount.Status.ACTIVE, TestAccount.Status.CLEANUP_FAILED])
         except (TestAccount.DoesNotExist, ValueError):
             raise TestManagementError("account_not_found", "The account handle is not owned by this run.", 404)
+        TestMailMessage.objects.filter(account=account).update(link="", status=TestMailMessage.Status.DISCARDED)
         try:
             with transaction.atomic():
                 adapter().delete_account(run=run, account=account)
@@ -206,6 +207,7 @@ def _finish_run(instance, handle: str, operation: str) -> TestRun:
     # make a partially completed cleanup look like a healthy active run.
     with transaction.atomic():
         run = _run(instance, handle, allow_recoverable=True, lock=True)
+        TestMailMessage.objects.filter(run=run).update(link="", status=TestMailMessage.Status.DISCARDED)
         run.status = TestRun.Status.RECOVERABLE
         run.recovery_reason = "cleanup"
         run.save(update_fields=["status", "recovery_reason", "updated_at"])
@@ -229,3 +231,27 @@ def _finish_run(instance, handle: str, operation: str) -> TestRun:
     if failure:
         raise TestManagementError("cleanup_failed", "Run cleanup failed and is recoverable.", 500) from failure
     return run
+
+
+def claim_recovery_message(instance, run_handle, account_handle):
+    def missing():
+        return TestManagementError("recovery_message_not_found", "The recovery message is unavailable.", 404)
+
+    with transaction.atomic():
+        TestInstance.objects.select_for_update().get(pk=instance.pk)
+        try:
+            account = get_account(instance, run_handle, account_handle, lock=True)
+        except TestManagementError:
+            raise missing() from None
+        if account.run.status != TestRun.Status.ACTIVE:
+            raise missing()
+        message = TestMailMessage.objects.select_for_update().filter(
+            run=account.run, account=account, kind="password_reset", status=TestMailMessage.Status.CAPTURED,
+        ).first()
+        if not message or not message.link:
+            raise missing()
+        result = {"handle": str(message.handle), "link": message.link}
+        message.link = ""
+        message.status = TestMailMessage.Status.CLAIMED
+        message.save(update_fields=["link", "status", "updated_at"])
+        return result

@@ -6,7 +6,7 @@ from .activation import TestManagementError, authorize_request
 from .serializers import AccountCreateSerializer, AccountUpdateSerializer, FixtureCreateSerializer, RunCreateSerializer
 from .services import (
     account_payload, create_account, create_run, delete_account, discovery, get_account,
-    prepare_fixture, _finish_run, update_account,
+    prepare_fixture, _finish_run, update_account, claim_recovery_message,
 )
 from .models import TestAccount, TestFixture
 
@@ -95,6 +95,8 @@ class RecoverView(RunActionView):
                 obj = _run(request.test_management_instance, run, allow_recoverable=True, lock=True)
                 if obj.status != obj.Status.RECOVERABLE or obj.recovery_reason != "restart":
                     raise TestManagementError("recovery_not_available", "Only an interrupted run can be recovered; failed cleanup must be retried.", 409)
+                from .models import TestMailMessage
+                TestMailMessage.objects.filter(run=obj).update(link="", status=TestMailMessage.Status.DISCARDED)
                 state = adapter().recover_run(run=obj)
                 obj.status = obj.Status.ACTIVE
                 obj.recovery_reason = ""
@@ -157,5 +159,13 @@ class FixtureView(ManagementView):
         try:
             fixture = prepare_fixture(request.test_management_instance, run, serializer.validated_data)
             return Response({"handle": str(fixture.handle), "name": fixture.name, "state": fixture.state}, status=201)
+        except Exception as exc:
+            return _error(exc)
+
+
+class RecoveryMessageView(ManagementView):
+    def post(self, request, run, account):
+        try:
+            return Response(claim_recovery_message(request.test_management_instance, run, account))
         except Exception as exc:
             return _error(exc)

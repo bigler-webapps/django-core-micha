@@ -10,7 +10,7 @@ from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone
 
-from .models import TestInstance, TestRun
+from .models import TestInstance, TestRun, TestMailMessage
 from .isolation import IsolationFailure, validate_database_evidence, verify_marker
 
 
@@ -97,6 +97,7 @@ def ensure_instance() -> TestInstance:
         if instance.status != TestInstance.Status.ACTIVE or instance.expires_at <= timezone.now():
             raise TestManagementError("test_management_controller_expired", "The controller authorization has expired.", 401)
         if not created and instance.boot_id != boot_id:
+            TestMailMessage.objects.filter(run__instance=instance).update(link="", status=TestMailMessage.Status.DISCARDED)
             TestRun.objects.filter(instance=instance, status__in=[TestRun.Status.ACTIVE, TestRun.Status.RESET]).update(
                 status=TestRun.Status.RECOVERABLE, recovery_reason="restart")
             instance.boot_id = boot_id

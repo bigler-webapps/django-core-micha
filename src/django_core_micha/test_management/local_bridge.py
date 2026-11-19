@@ -18,6 +18,7 @@ _ROUTES = (
     (re.compile(rf"^/api/test-management/runs/{_UUID}/(?:recover|reset|close)/$"), {"POST"}),
     (re.compile(rf"^/api/test-management/runs/{_UUID}/accounts/$"), {"GET", "POST"}),
     (re.compile(rf"^/api/test-management/runs/{_UUID}/accounts/{_UUID}/$"), {"GET", "PATCH", "DELETE"}),
+    (re.compile(rf"^/api/test-management/runs/{_UUID}/accounts/{_UUID}/recovery-message/$"), {"POST"}),
     (re.compile(rf"^/api/test-management/runs/{_UUID}/fixtures/$"), {"POST"}),
 )
 _MAX_BYTES = 1024 * 1024

@@ -14,6 +14,10 @@ Target `C:/Users/Micha Bigler/Documents/webapps/django-core-micha`. See `src/dja
 
 Implementer preamble: This work order is the complete scope. Do not stage, commit, push or review your own changes; report tests and blockers to the orchestrator.
 
+## Completion
+
+Landed as `7922449` (published as 3.33.1). Real Maana run on 2026-11-19 with the installed 3.33.1 pin: the isolated backend now starts under uvicorn after the isolation proof, becomes ready, accepts controller account creation and normal login, and run close stops the instance (`Application shutdown complete`). A first attempt failed only because Maana's untracked isolated settings set `EMAIL_BACKEND` next to `MAILERS` (Django 6.1); that line was removed. The journey still stops at the operator benefit-code creation (403); this is the Maana adapter's permission mapping and stays with MAANA-APP-44.
+
 ## Part C — Orchestrator only
 
 STOP — this section is not an instruction to the implementer.

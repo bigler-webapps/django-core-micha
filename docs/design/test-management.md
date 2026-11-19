@@ -117,3 +117,41 @@ the same stopped instance with `run-dev --test-management --test-management-resu
 explicit recovery before further changes; recovery verifies owned resources.
 Stopping or resuming does not delete volumes. Local results do not constitute
 staging acceptance and do not bypass application MFA.
+
+## Local password recovery
+
+DCM 3.34.0 extends the declared DCM-DX-8 consumer contract with a private,
+one-time way for the trusted test client to retrieve a reset link from the
+isolated local instance. The application still generates and validates the
+ordinary reset link and applies its normal password policy and MFA flow.
+
+When test management is enabled, the rendered reset message is captured at the
+local delivery boundary only when its user primary key matches exactly one
+active account owned by the active run in the current isolated instance. The
+message stores only a handle and link; subject and body are not retained. A
+newer reset for that account discards the prior link. No email is sent outside
+the isolated instance.
+
+The trusted client claims the message through the controller bridge with
+`POST /api/test-management/runs/<run>/accounts/<account>/recovery-message/`.
+The response contains `handle` and `link` once. Missing, claimed, discarded,
+closed, wrong-run and non-owned messages use the same `recovery_message_not_found`
+response. The controller route remains loopback-only and rejects browser-originated
+requests; the browser relay continues to block all `/api/test-management` paths.
+
+For a password-recovery test, the client starts a run and creates an account
+through the app's adapter, then requests recovery from the app's real signed-out
+password-reset UI using that account's synthetic address. The trusted test client
+claims the link, keeps it and the reset token in memory, and completes the app's
+own confirmation form. The user then signs in through the normal app UI with the
+new password. The management API never impersonates the user or sets a password
+directly.
+
+The link, token and passwords must stay in trusted client memory. Do not print or
+persist them in logs, test output, evidence, screenshots, traces or videos, even
+when a request or assertion fails. Clear the client state when the run closes.
+The server blanks and discards the stored link on claim, run reset/close, account
+deletion and run recovery after restart. In an enabled test center, capture
+failure leaves the ordinary non-enumerating reset response unchanged and never
+falls back to logging the URL. With test management disabled or absent, ordinary
+local behavior is unchanged.

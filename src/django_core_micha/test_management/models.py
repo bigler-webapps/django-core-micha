@@ -94,3 +94,19 @@ class TestFixture(models.Model):
                 name="dcm_tm_fixture_run_idempotency",
             ),
         ]
+
+
+class TestMailMessage(models.Model):
+    class Status(models.TextChoices):
+        CAPTURED = "captured", "Captured"
+        CLAIMED = "claimed", "Claimed"
+        DISCARDED = "discarded", "Discarded"
+
+    run = models.ForeignKey(TestRun, on_delete=models.CASCADE, related_name="mail_messages")
+    account = models.ForeignKey(TestAccount, on_delete=models.CASCADE, related_name="mail_messages")
+    handle = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    kind = models.CharField(max_length=32, default="password_reset")
+    link = models.TextField(blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.CAPTURED)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)

@@ -1,3 +1,4 @@
+from django.apps import apps
 from django.conf import settings
 from django.core.mail import EmailMessage
 import logging
@@ -46,6 +47,23 @@ def send_invite_or_reset_email(*, user, url, is_new_user: bool) -> None:
         subject, body = email_texts.render_reset_email(user, url)
 
     if getattr(settings, "ENV_TYPE", "") == "local":
+        if not is_new_user:
+            capture_enabled = (
+                getattr(settings, "TEST_MANAGEMENT_ENABLED", False) is True
+                and apps.is_installed("django_core_micha.test_management")
+            )
+            try:
+                from django_core_micha.test_management.mail_capture import capture_password_reset
+                captured = capture_password_reset(user, url, body=body)
+            except Exception:
+                logger.warning("test_management_mail_capture_failed")
+                captured = False
+            if captured:
+                logger.info("[LOCAL] Password reset message captured")
+                return
+            if capture_enabled:
+                # In an isolated run, never fall back to logging the private reset URL.
+                return
         logger.info(
             "[LOCAL] Invite/Reset-Mail an %s: %s",
             user.email,

@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.34.0] — 2026-11-19
+
+- DCM-DX-11 adds private, one-time capture and claim of real local password-reset links for owned accounts in active isolated test-management runs. The normal application confirmation flow, password policy, MFA and non-test delivery remain in use.
+
 ## [3.32.0] — 2026-11-17
 
 - DCM-CHAT-21 adds stable managed provider/family selections, private source and version resolution, revisioned execution capability evidence, and source-attributed usage with retryable settlement. Managed consumers need a family-aware central policy and app tariff adapter; unmanaged catalogue paths remain available.

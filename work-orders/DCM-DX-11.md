@@ -48,6 +48,14 @@ Start at the workspace root, run the hook canary and use the absolute targets be
 
 STOP here if you are the implementer. The Orchestrator owns the mapping, release/pin compatibility check, independent Tier 3 security and general reviews, affected auth and permission tests, and the local browser run. Record installed versions, commands, redacted outcomes and cleanup in Completion. Recheck any concurrently changed integration seams before dispatch.
 
+## Completion
+
+dcm part landed as 3.34.0 (private capture at the local reset-mail boundary, one-time claim route `recovery-message/`, discard on claim/reset/close/delete/recovery/restart, bridge allowlist, docs, changelog). Innoservice part (client helpers, real-UI spec with the installed 3.34.0, throttle/unknown-address/cross-run checks, log and evidence hygiene) is NOT done and keeps this WO open.
+
+Evidence: affected set 158 passed, 2 skipped on the tree before the final test addition; `test_test_management_mail_capture.py` 17 passed, 2 skipped (the two PostgreSQL row-lock concurrency tests run only in the isolated instance); makemigrations check clean. Real-flow test claims a really rendered and generated link and sets the password through `PasswordResetConfirmView`: new password works, old fails, a second account is unchanged, the consumed link is rejected.
+
+Process notes: the first Codex implementer (gpt-6-luna, effort max) ran away (3.5 MB output, no RESULT) and was stopped; its diff was read in full and kept. A second, unidentified actor ran an implementer (gpt-6.1-terra) and review rounds in the same tree concurrently; its scratch review directories were set aside as invalid and the review re-run by the Orchestrator. Review: round 1 and closing round 2 on envelope, regression, duplication, tests, sec_review; 4 raised, 4 accepted (link taken from the rendered body, INFO log assertion, real confirmation flow test fixed; Innoservice client and acceptance carried), worst accepted: defect. No blocker.
+
 ## Gate record
 
 The operator requested preparation and commit of this work order on 2026-11-19.
