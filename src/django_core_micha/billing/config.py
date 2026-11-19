@@ -41,7 +41,7 @@ def load_billing_config():
     if not isinstance(raw, dict) or set(raw) - {"app","currency","plans","token_rates","contract"} or not {"app","currency","plans","token_rates"} <= set(raw): raise ValueError("billing.yaml must contain app, currency, plans, token_rates, and optional contract")
     app = getattr(settings, "DCM_BILLING_APP", "")
     if not app or raw["app"] != app: raise ValueError("billing.yaml app must match DCM_BILLING_APP")
-    if raw["currency"] != "usd": raise ValueError("only usd currency is supported")
+    if raw["currency"] not in ("usd", "chf"): raise ValueError("only usd and chf currencies are supported")
     if not isinstance(raw["plans"], list) or not raw["plans"]: raise ValueError("plans must be a non-empty list")
     plans, keys = [], set()
     for item in raw["plans"]:
@@ -84,7 +84,7 @@ def load_billing_config():
         guard=contract.get("transition_guard_days",7)
         if type(guard) is not int or not 1 <= guard <= 60: raise ValueError("contract.transition_guard_days must be 1..60")
         contract={"terms_version":contract["terms_version"],"seller":contract["seller"],"withdrawal_refund":contract.get("withdrawal_refund","prorated"),"public_declarations":contract.get("public_declarations",False),"transition_guard_days":guard}
-    return BillingConfig(app,"usd",tuple(plans),rates,contract)
+    return BillingConfig(app,raw["currency"],tuple(plans),rates,contract)
 
 def _hook(setting):
     value = getattr(settings,setting,None)

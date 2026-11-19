@@ -31,7 +31,7 @@ def _stripe():
     return stripe
 
 
-def stripe_fingerprint(plan, currency="usd"):
+def stripe_fingerprint(plan, currency):
     fields = {"amount_cents": plan.amount_cents, "currency": currency, "interval": plan.interval,
               "kind": plan.kind, "tax_code": plan.tax_code}
     return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -513,6 +513,15 @@ def _invoice_plan_key(invoice):
     return ""
 
 
+def _contract_currency(contract):
+    """Currency a payment of this contract is recorded in when the invoice names none: the one the contract was paid in
+    (a catalogue currency change must not relabel an existing contract), else the catalogue currency."""
+    if contract.purchase_id and contract.purchase.currency: return contract.purchase.currency
+    first=contract.payments.order_by("paid_at","pk").first()
+    if first and first.currency: return first.currency
+    return load_billing_config().currency
+
+
 def _record_contract_payment(contract,invoice,billing_reason):
     invoice_id=invoice.get("id") or ""
     if invoice_id and ContractPayment.objects.filter(stripe_invoice_id=invoice_id).exists(): return ContractPayment.objects.get(stripe_invoice_id=invoice_id)
@@ -524,7 +533,7 @@ def _record_contract_payment(contract,invoice,billing_reason):
     timestamp=((invoice.get("status_transitions") or {}).get("paid_at") or invoice.get("created"))
     return ContractPayment.objects.create(contract=contract,stripe_invoice_id=invoice_id,
         stripe_payment_intent_id=str(payment_intent),stripe_charge_id=str(charge),amount_paid_cents=paid,
-        currency=(invoice.get("currency") or "usd").lower(),paid_at=_utc(timestamp) or timezone.now(),billing_reason=billing_reason)
+        currency=(invoice.get("currency") or _contract_currency(contract)).lower(),paid_at=_utc(timestamp) or timezone.now(),billing_reason=billing_reason)
 
 
 def _withdrawal_purchase_pk(app, *candidates):
