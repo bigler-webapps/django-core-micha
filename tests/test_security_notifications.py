@@ -113,11 +113,13 @@ def test_allauth_password_change_and_set(user, existing):
     assert ("Password Changed" if existing else "Password Set") in mail.outbox[0].subject
 
 
-def test_totp_activation_and_deactivation(user):
+def test_totp_activation_and_deactivation(user, django_capture_on_commit_callbacks):
     request = request_for(user)
     form = SimpleNamespace(secret="JBSWY3DPEHPK3PXP")
     with patch("allauth.mfa.totp.internal.flows.raise_if_reauthentication_required"), context.request_context(request):
-        authenticator, _ = totp_flows.activate_totp(request, form)
+        # Newer allauth sends the activation notice from a transaction.on_commit callback.
+        with django_capture_on_commit_callbacks(execute=True):
+            authenticator, _ = totp_flows.activate_totp(request, form)
         assert len(mail.outbox) == 1
         assert mail.outbox[0].to == [user.email]
         assert "Authenticator App Activated" in mail.outbox[0].subject
