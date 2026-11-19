@@ -61,7 +61,10 @@ def test_proxy_checks_runtime_before_forwarding(tmp_path, monkeypatch, valid):
     handler.send_header = lambda *args: None
     handler.end_headers = lambda: None
     monkeypatch.setattr(local_proxy, "validate_compose_file", lambda *args, **kwargs: None)
+    snapshot = object()
+    monkeypatch.setattr(local_proxy, "_runtime_snapshot", lambda *args: snapshot)
     def runtime(*args, **kwargs):
+        assert kwargs["inspect"] is snapshot
         if not valid:
             raise starter.IsolationError("unverified")
     monkeypatch.setattr(local_proxy, "validate_runtime", runtime)
@@ -219,7 +222,7 @@ def test_manifest_contract_supports_legacy_and_declared_consumer(tmp_path):
 
 
 @pytest.mark.parametrize("identity", ["alpha", "beta"])
-def test_runtime_and_stopped_instance_verify_actual_resources(tmp_path, identity):
+def test_runtime_and_stopped_instance_verify_actual_resources(tmp_path, identity, monkeypatch):
     root = app(tmp_path, identity, identity)
     project = identity + "-tm-" + "1" * 32
     backend, db, network = project + "-backend-1", project + "-db-1", project + "_isolated"
@@ -252,10 +255,19 @@ def test_runtime_and_stopped_instance_verify_actual_resources(tmp_path, identity
     inspect = lambda name, expression: values[name, expression]
     mountinfo = lambda name: "1 2 3:4 / /app/backend/media rw - ext4 /dev/test rw\n1 2 3:4 / /var/lib/postgresql rw - ext4 /dev/test rw"
     assert starter.validate_runtime(project, inspect, mountinfo, identity=identity, cwd=root)[1] == "10.1.2.3"
+    import re
+    def batch_inspect(command, **kwargs):
+        fields = re.findall(r"\{\{json ([^}]+)\}\}", command[3])
+        return SimpleNamespace(stdout="\n".join(json.dumps([values[name, field] for field in fields]) for name in command[4:]))
+    monkeypatch.setattr(local_proxy.subprocess, "run", batch_inspect)
+    snapshot = local_proxy._runtime_snapshot(project)
+    assert starter.validate_runtime(project, inspect=snapshot, mountinfo=mountinfo, identity=identity, cwd=root)[1] == "10.1.2.3"
     original_source = values[backend, ".Mounts"][0]["Source"]
     values[backend, ".Mounts"][0]["Source"] = str(tmp_path / "foreign/backend")
     with pytest.raises(starter.IsolationError):
         starter.validate_runtime(project, inspect, mountinfo, identity=identity, cwd=root)
+    with pytest.raises(starter.IsolationError):
+        starter.validate_runtime(project, inspect=local_proxy._runtime_snapshot(project), mountinfo=mountinfo, identity=identity, cwd=root)
     values[backend, ".Mounts"][0]["Source"] = original_source
     values[network, ".Labels"]["com.docker.compose.project"] = "foreign"
     with pytest.raises(starter.IsolationError):

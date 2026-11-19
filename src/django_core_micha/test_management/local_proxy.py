@@ -38,6 +38,46 @@ class QuietServer(ThreadingHTTPServer):
         return
 
 
+def _runtime_snapshot(project):
+    """Read only the fields used by validate_runtime, once per resource group."""
+    container_fields = (".Config.Labels", ".Config.Image", ".State.Running", ".HostConfig.Privileged",
+                        ".NetworkSettings.Networks", ".Id", ".Mounts", ".NetworkSettings.Ports",
+                        ".HostConfig.PortBindings")
+    groups = (
+        ((f"{project}-backend-1", f"{project}-db-1"), container_fields),
+        ((f"{project}_isolated",), (".Internal", ".Labels", ".Containers")),
+        ((f"{project}_media", f"{project}_database"), (".Labels", ".Driver", ".Scope", ".Options")),
+    )
+    values = {}
+    for names, fields in groups:
+        # Do not inspect complete objects: container config may contain secrets.
+        template = "[" + ",".join("{{json " + field + "}}" for field in fields) + "]"
+        try:
+            result = subprocess.run(["docker", "inspect", "--format", template, *names],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                    encoding="utf-8", timeout=15, check=True, shell=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise IsolationError("Unable to inspect isolated runtime.") from exc
+        rows = result.stdout.splitlines()
+        if len(rows) != len(names):
+            raise IsolationError("Incomplete isolated runtime inspection.")
+        for name, row in zip(names, rows):
+            try:
+                data = json.loads(row)
+            except ValueError as exc:
+                raise IsolationError("Invalid isolated runtime inspection.") from exc
+            if not isinstance(data, list) or len(data) != len(fields):
+                raise IsolationError("Invalid isolated runtime inspection.")
+            values.update({(name, field): value for field, value in zip(fields, data)})
+
+    def inspect(name, expression):
+        try:
+            return values[name, expression]
+        except KeyError:
+            raise IsolationError("Unexpected isolated runtime inspection.") from None
+    return inspect
+
+
 def handler_for(project, cwd):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -64,7 +104,7 @@ def handler_for(project, cwd):
                 checked_cwd, identity = consumer(cwd)
                 project_instance(project, identity)
                 validate_compose_file(checked_cwd / "docker-compose.test-management.yml", identity=identity)
-                validate_runtime(project, identity=identity, cwd=checked_cwd)
+                validate_runtime(project, inspect=_runtime_snapshot(project), identity=identity, cwd=checked_cwd)
                 command = ["docker", "compose", "-p", project, "-f", "docker-compose.test-management.yml", "exec", "-T",
                            "backend", "python", "-m", "django_core_micha.test_management.http_relay"]
                 result = subprocess.run(command, cwd=str(cwd), env=compose_env(project, cwd), input=json.dumps(message),
