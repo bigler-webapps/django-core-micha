@@ -37,7 +37,9 @@ def _atomic_json(path, data):
     os.replace(temporary, path)
 
 
-def install_proof(address: str):
+def install_proof(address: str, database: str = "postgresql"):
+    if database not in ("postgresql", "postgis"):
+        raise IsolationFailure("Invalid database flavour.")
     mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
     instance, token = basic_evidence(os.environ, mountinfo)
     deadline = time.monotonic() + 30
@@ -58,7 +60,9 @@ def install_proof(address: str):
     if PROOF_PATH.is_symlink():
         raise IsolationFailure("Invalid isolation proof path.")
     proof = {"instance": str(instance), "database_ip": address, "boot_id": boot_id,
-             "signature": signature(instance, address, token, boot_id)}
+             "signature": signature(instance, address, token, boot_id, database)}
+    if database == "postgis":
+        proof["database"] = database
     _atomic_json(PROOF_PATH, proof)
     verify_marker()
 
@@ -76,6 +80,10 @@ def main():
     try:
         if len(sys.argv) == 3 and sys.argv[1] == "install-proof":
             install_proof(sys.argv[2])
+            print("isolation proof installed")
+            return
+        if len(sys.argv) == 4 and sys.argv[1] == "install-proof" and sys.argv[3] == "postgis":
+            install_proof(sys.argv[2], "postgis")
             print("isolation proof installed")
             return
         if len(sys.argv) != 1:

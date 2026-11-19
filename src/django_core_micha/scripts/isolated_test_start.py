@@ -523,18 +523,23 @@ def _start_loopback_proxy(project, cwd, env):
 def _finish_start(project, instance, compose, cwd, env, *, identity, renew=False):
     inspect = lambda name, expression: _docker_json(name, expression, env=env)
     mountinfo = lambda name: _mountinfo(name, env=env)
+    _, declared_identity, _, database = _load_consumer(cwd, include_database=True)
+    if declared_identity != identity:
+        raise IsolationError("Consumer identity does not match the declaration.")
     _, database_ip = validate_runtime(project, inspect=inspect, mountinfo=mountinfo, identity=identity, cwd=cwd)
+    if inspect(f"{project}-db-1", ".Config.Image") != _DATABASE_IMAGES[database]:
+        raise IsolationError("The database image does not match the declared flavour.")
     for command in (["chown", "1000:1000", "/app/backend/media"], ["chmod", "0700", "/app/backend/media"]):
         if _run_private(compose + ["exec", "-T", "--user", "0", "backend"] + command, cwd=cwd, env=env):
             raise IsolationError("The isolated media volume could not be prepared.")
-    if _run_private(compose + ["exec", "-T", "backend", "python", "-m", "django_core_micha.test_management.isolated_entrypoint", "install-proof", database_ip], cwd=cwd, env=env):
+    if _run_private(compose + ["exec", "-T", "backend", "python", "-m", "django_core_micha.test_management.isolated_entrypoint", "install-proof", database_ip] + (["postgis"] if database == "postgis" else []), cwd=cwd, env=env):
         raise IsolationError("The database isolation preflight failed.")
     if _run_private(compose + ["exec", "-T", "backend", "python", "manage.py", "migrate", "--noinput"], cwd=cwd, env=env, timeout=300, heartbeat=True):
         raise IsolationError("The isolated database migration failed.")
     if renew and _run_private(compose + ["exec", "-T", "backend", "python", "manage.py", "renew_test_controller"], cwd=cwd, env=env):
         raise IsolationError("The isolated controller could not be renewed.")
     _, final_ip = validate_runtime(project, inspect=inspect, mountinfo=mountinfo, identity=identity, cwd=cwd)
-    if final_ip != database_ip:
+    if final_ip != database_ip or inspect(f"{project}-db-1", ".Config.Image") != _DATABASE_IMAGES[database]:
         raise IsolationError("The isolated runtime changed during startup.")
     proxy, port = _start_loopback_proxy(project, cwd, env)
     url = f"http://127.0.0.1:{port}/api/healthz"

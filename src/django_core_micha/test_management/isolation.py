@@ -48,11 +48,16 @@ def process_start() -> str:
     return Path("/proc/1/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
 
 
-def signature(instance, address: str, token: str, boot_id: str) -> str:
-    return hmac.new(token.encode(), f"{instance}:{address}:{boot_id}".encode(), hashlib.sha256).hexdigest()
+def signature(instance, address: str, token: str, boot_id: str, database="postgresql") -> str:
+    if database not in ("postgresql", "postgis"):
+        raise ValueError("Invalid database flavour.")
+    message = f"{instance}:{address}:{boot_id}"
+    if database == "postgis":
+        message += ":postgis"
+    return hmac.new(token.encode(), message.encode(), hashlib.sha256).hexdigest()
 
 
-def verify_marker(env=None, mountinfo=None, proof_path=PROOF_PATH, boot_path=BOOT_PATH, start_tick=None):
+def verify_marker(env=None, mountinfo=None, proof_path=PROOF_PATH, boot_path=BOOT_PATH, start_tick=None, *, include_database=False):
     env = os.environ if env is None else env
     try:
         mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8") if mountinfo is None else mountinfo
@@ -67,13 +72,20 @@ def verify_marker(env=None, mountinfo=None, proof_path=PROOF_PATH, boot_path=BOO
         if env.get("TEST_MANAGEMENT_BOOT_ID") and env["TEST_MANAGEMENT_BOOT_ID"] != boot_id:
             raise ValueError
         data = json.loads(proof_path.read_text(encoding="utf-8"))
-        if set(data) != {"instance", "database_ip", "boot_id", "signature"} or data["instance"] != str(instance) or data["boot_id"] != boot_id:
+        fields = {"instance", "database_ip", "boot_id", "signature"}
+        if set(data) == fields:
+            database = "postgresql"
+        elif set(data) == fields | {"database"} and data["database"] == "postgis":
+            database = "postgis"
+        else:
+            raise ValueError
+        if data["instance"] != str(instance) or data["boot_id"] != boot_id:
             raise ValueError
         address = str(ipaddress.ip_address(data["database_ip"]))
         if (not ipaddress.ip_address(address).is_private or ipaddress.ip_address(address).is_loopback or
-                not hmac.compare_digest(data["signature"], signature(instance, address, token, boot_id))):
+                not hmac.compare_digest(data["signature"], signature(instance, address, token, boot_id, database))):
             raise ValueError
-        return instance, address
+        return (instance, address, database) if include_database else (instance, address)
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, json.JSONDecodeError) as exc:
         raise IsolationFailure("The local isolation proof is invalid.") from exc
 

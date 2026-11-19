@@ -63,6 +63,12 @@ synthetic-local fixture cannot declare this field. The manifest and running
 container must match the declaration for every lifecycle and relay operation,
 including stop. An instance started with another flavour can be stopped again
 after the declaration is restored.
+The starter verifies the running database image against the declaration before
+signing the per-boot isolation proof. A PostGIS proof includes the signed
+`postgis` flavour and requires Django's `django.contrib.gis.db.backends.postgis`
+engine. Plain proofs omit the flavour and require
+`django.db.backends.postgresql`; existing plain proofs remain valid. Settings or
+environment values cannot select the proven flavour, and mismatches are refused.
 The PostGIS tag is the hram local image, confirmed on Docker Hub on
 2026-11-19. Its [Dockerfile](https://github.com/postgis/docker-postgis/blob/master/18-3.6/Dockerfile)
 uses the PostgreSQL 18 base; it retains the `/var/lib/postgresql` volume layout

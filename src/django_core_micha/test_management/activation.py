@@ -50,10 +50,11 @@ def validate_configuration() -> Activation:
     except (TypeError, ValueError) as exc:
         raise TestManagementError("test_management_instance_invalid", "The isolated instance identifier is invalid.") from exc
     try:
-        proof_instance, database_ip = verify_marker()
+        proof_instance, database_ip, flavour = verify_marker(include_database=True)
         database = settings.DATABASES["default"]
+        engines = {"postgresql": "django.db.backends.postgresql", "postgis": "django.contrib.gis.db.backends.postgis"}
         if (proof_instance != instance_id or not hmac.compare_digest(token, os.environ.get("TEST_MANAGEMENT_CONTROLLER_TOKEN", "")) or
-                database.get("ENGINE") != "django.db.backends.postgresql" or database.get("USER") != "test_management" or
+                database.get("ENGINE") != engines[flavour] or database.get("USER") != "test_management" or
                 str(database.get("PORT")) != "5432" or database.get("HOST") != "db" or database.get("NAME") != f"dcm_tm_{instance_id.hex}" or
                 str(settings.MEDIA_ROOT) != "/app/backend/media" or settings.DEBUG is not False or
                 settings.SESSION_ENGINE != "django.contrib.sessions.backends.db" or

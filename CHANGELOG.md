@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.40.0] — 2026-11-19
+
+- DCM-DX-14 lets the isolated test center's per-request activation check accept `django.contrib.gis.db.backends.postgis` for an instance that declared the `postgis` flavour (DCM-DX-12). The starter writes the flavour into the HMAC-signed per-boot isolation proof after verifying the running database image; the check selects exactly one allowed engine from that proven flavour, never from settings or environment. Plain instances still require `django.db.backends.postgresql`, mismatches fail closed, and proofs and containers from earlier versions stay valid and mean plain.
+
 ## [3.39.0] — 2026-11-19
 
 - DCM-DX-13 lets an app's `test-management.consumer.json` declare an optional `build_args` object (at most 8 literal string entries, strict name and value patterns; credential-shaped, `TEST_MANAGEMENT_`, `DOCKER_`, `COMPOSE_` and proxy names are rejected) for the isolated test image build. The Compose backend `build` must carry exactly these literal `args`; with the field, the image name additionally depends on a hash of the arguments. Start, resume, stop and relay verify the declaration against the manifest and the image name. Innoservice and the synthetic fixture cannot declare the field; consumers without it are unchanged.
