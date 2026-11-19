@@ -30,10 +30,12 @@ class IsolationError(ValueError):
 
 
 _IDENTITY = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+_DATABASE_IMAGES = {"postgresql": "postgres:18", "postgis": "postgis/postgis:18-3.6"}
+
 _PROJECT = re.compile(r"^([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-tm-([0-9a-f]{32})$")
 
 
-def _load_consumer(cwd: Path, *, stop_only=False):
+def _load_consumer(cwd: Path, *, stop_only=False, include_database=False):
     """Load a versioned, deliberately small app-owned declaration."""
     try:
         cwd = cwd.resolve(strict=True)
@@ -41,6 +43,7 @@ def _load_consumer(cwd: Path, *, stop_only=False):
         if declaration.is_symlink():
             raise ValueError
         synthetic_local = False
+        database = "postgresql"
         if declaration.exists():
             if declaration.is_symlink() or declaration.resolve().parent != cwd:
                 raise ValueError
@@ -48,16 +51,22 @@ def _load_consumer(cwd: Path, *, stop_only=False):
             if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
                 raise ValueError
             fields = {"version", "identity"}
-            if set(data) == fields | {"mode"}:
+            if not fields <= set(data) or set(data) - fields - {"mode", "database"}:
+                raise ValueError
+            if "mode" in data:
                 if data["mode"] != "synthetic-local":
                     raise ValueError
                 synthetic_local = True
-            elif set(data) != fields:
-                raise ValueError
+            if "database" in data:
+                database = data["database"]
+                if not isinstance(database, str) or database not in _DATABASE_IMAGES:
+                    raise ValueError
             identity = data["identity"]
             if not isinstance(identity, str) or len(identity) > 30 or not _IDENTITY.fullmatch(identity):
                 raise ValueError
             if identity == "innoservice" and cwd.name.lower() != "innoservice":
+                raise ValueError
+            if "database" in data and (synthetic_local or identity == "innoservice" or cwd.name.lower() == "innoservice"):
                 raise ValueError
             if synthetic_local and (identity == "innoservice" or cwd.name.lower() == "innoservice"):
                 raise ValueError
@@ -75,9 +84,20 @@ def _load_consumer(cwd: Path, *, stop_only=False):
             path = cwd / relative
             if not path.exists() or not path.resolve().is_relative_to(cwd):
                 raise ValueError
+        if include_database:
+            return cwd, identity, synthetic_local, database
         return cwd, identity, synthetic_local
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise IsolationError("Invalid or missing test-management consumer declaration.") from exc
+
+
+def _database_image(cwd, identity, *, stop_only=False):
+    if cwd is None:
+        return _DATABASE_IMAGES["postgresql"]
+    _, declared_identity, _, database = _load_consumer(cwd, stop_only=stop_only, include_database=True)
+    if declared_identity != identity:
+        raise IsolationError("Consumer identity does not match the declaration.")
+    return _DATABASE_IMAGES[database]
 
 
 def consumer(cwd: Path):
@@ -180,9 +200,12 @@ def _has_mount(mountinfo: str, target: str) -> bool:
 def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo, *, identity="innoservice", cwd=None):
     """Verify actual per-instance volumes, loopback binding and exclusive network.
 
+    The database image must equal the declared flavour, for every caller including stop.
+
     Docker inspection is restricted to named non-secret fields; container
     environments and Compose-expanded configuration are never inspected.
     """
+    database_image = _database_image(cwd, identity, stop_only=True)
     project_instance(project, identity)
     backend, db = f"{project}-backend-1", f"{project}-db-1"
     network = f"{project}_isolated"
@@ -191,7 +214,7 @@ def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo, *
             labels = inspect(name, ".Config.Labels")
             _verify_directory(labels, cwd)
             if (labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != service or
-                    not (_image_matches(inspect(name, ".Config.Image"), identity, cwd) if service == "backend" else inspect(name, ".Config.Image") == "postgres:18") or inspect(name, ".State.Running") is not True or
+                    not (_image_matches(inspect(name, ".Config.Image"), identity, cwd) if service == "backend" else inspect(name, ".Config.Image") == database_image) or inspect(name, ".State.Running") is not True or
                     inspect(name, ".HostConfig.Privileged") is not False):
                 raise IsolationError("Container identity or state failed verification.")
             networks = inspect(name, ".NetworkSettings.Networks")
@@ -248,6 +271,7 @@ def validate_runtime(project: str, inspect=_docker_json, mountinfo=_mountinfo, *
 
 def validate_stopped_instance(project: str, inspect=_docker_json, *, identity="innoservice", cwd=None) -> None:
     """Refuse to resume a live backend or a project with foreign volumes."""
+    database_image = _database_image(cwd, identity, stop_only=True)
     project_instance(project, identity)
     backend, db = f"{project}-backend-1", f"{project}-db-1"
     try:
@@ -255,7 +279,7 @@ def validate_stopped_instance(project: str, inspect=_docker_json, *, identity="i
             labels = inspect(name, ".Config.Labels")
             _verify_directory(labels, cwd)
             if (labels.get("com.docker.compose.project") != project or labels.get("com.docker.compose.service") != service or
-                    not (_image_matches(inspect(name, ".Config.Image"), identity, cwd) if service == "backend" else inspect(name, ".Config.Image") == "postgres:18") or inspect(name, ".HostConfig.Privileged") is not False):
+                    not (_image_matches(inspect(name, ".Config.Image"), identity, cwd) if service == "backend" else inspect(name, ".Config.Image") == database_image) or inspect(name, ".HostConfig.Privileged") is not False):
                 raise ValueError
         if inspect(backend, ".State.Running") is not False:
             raise IsolationError("The instance is still running; refusing to take it over.")
@@ -290,8 +314,10 @@ def validate_compose_file(path: Path, *, identity="innoservice") -> None:
     try:
         declaration = path.parent / "test-management.consumer.json"
         synthetic_local = False
+        database_image = _DATABASE_IMAGES["postgresql"]
         if declaration.is_symlink() or declaration.exists():
-            cwd, declared_identity, synthetic_local = _load_consumer(path.parent)
+            cwd, declared_identity, synthetic_local, database = _load_consumer(path.parent, include_database=True)
+            database_image = _DATABASE_IMAGES[database]
             if declared_identity != identity or path.resolve() != (cwd / "docker-compose.test-management.yml").resolve():
                 raise ValueError
         config = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -323,7 +349,7 @@ def validate_compose_file(path: Path, *, identity="innoservice") -> None:
             raise ValueError
         if backend["networks"] != ["isolated"] or db["networks"] != ["isolated"]:
             raise ValueError
-        if backend["depends_on"] != {"db": {"condition": "service_healthy"}} or db["image"] != "postgres:18":
+        if backend["depends_on"] != {"db": {"condition": "service_healthy"}} or db["image"] != database_image:
             raise ValueError
         if backend["environment"] != {
             "DJANGO_SETTINGS_MODULE": "backend.local_test_management_settings",

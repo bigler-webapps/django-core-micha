@@ -39,6 +39,19 @@ use a name derived from the resolved checkout directory, so identical slugs in
 different directories do not share images. Other applications must provide the
 declaration.
 
+The optional `database` field is `postgresql` (the default, image
+`postgres:18`) or `postgis` (image `postgis/postgis:18-3.6`). For example:
+`{"version": 1, "identity": "example-app", "database": "postgis"}`.
+No image names or other database values are accepted. Innoservice and the
+synthetic-local fixture cannot declare this field. The manifest and running
+container must match the declaration for every lifecycle and relay operation,
+including stop. An instance started with another flavour can be stopped again
+after the declaration is restored.
+The PostGIS tag is the hram local image, confirmed on Docker Hub on
+2026-11-19. Its [Dockerfile](https://github.com/postgis/docker-postgis/blob/master/18-3.6/Dockerfile)
+uses the PostgreSQL 18 base; it retains the `/var/lib/postgresql` volume layout
+and `pg_isready`, so the existing mount and healthcheck contract is unchanged.
+
 A fixed disposable synthetic consumer can be created with
 `python -m django_core_micha.scripts.synthetic_test_fixture`. This prints the path
 of a fresh operating-system temporary directory. Run `run-dev --test-management`

@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.38.0] — 2026-11-19
+
+- DCM-DX-12 lets an app's `test-management.consumer.json` declare an optional `database` flavour for the isolated local test center: `postgresql` (default, image `postgres:18`) or `postgis` (image `postgis/postgis:18-3.6`). The declaration, the Compose manifest and the running containers must agree for start, resume, stop and relay. Innoservice and the synthetic fixture stay plain PostgreSQL and cannot declare the field; no other value or image string is accepted. Existing consumers need no change.
+
 ## [3.37.0] — 2026-11-19
 
 - DCM-BILL-14 lets an app's `billing.yaml` declare `currency: chf` besides `usd` (anything else is still rejected). The catalogue currency applies to every plan: plan sync, checkout, stored prices, contract summaries, reminders and the public catalogue use it, and a changed catalogue currency creates new price versions in Stripe. `stripe_fingerprint(plan, currency)` now requires the currency (no `usd` default). An invoice that names no currency is recorded in the currency the contract was paid in, else the catalogue currency. dcm never converts amounts; AI cost accounting stays in USD.

@@ -221,13 +221,14 @@ def test_manifest_contract_supports_legacy_and_declared_consumer(tmp_path):
         starter.validate_compose_file(manifest, identity="innoservice")
 
 
-@pytest.mark.parametrize("identity", ["alpha", "beta"])
-def test_runtime_and_stopped_instance_verify_actual_resources(tmp_path, identity, monkeypatch):
+@pytest.mark.parametrize("identity,database,image", [("alpha", "postgresql", "postgres:18"), ("beta", "postgis", "postgis/postgis:18-3.6")])
+def test_runtime_and_stopped_instance_verify_actual_resources(tmp_path, identity, database, image, monkeypatch):
     root = app(tmp_path, identity, identity)
+    (root / "test-management.consumer.json").write_text(json.dumps({"version": 1, "identity": identity, "database": database}))
     project = identity + "-tm-" + "1" * 32
     backend, db, network = project + "-backend-1", project + "-db-1", project + "_isolated"
     values = {}
-    for name, service, image in ((backend, "backend", starter.consumer_image(identity, root)), (db, "db", "postgres:18")):
+    for name, service, image in ((backend, "backend", starter.consumer_image(identity, root)), (db, "db", image)):
         values[name, ".Config.Labels"] = {"com.docker.compose.project": project, "com.docker.compose.service": service,
                                            "com.docker.compose.project.working_dir": str(root)}
         values[name, ".Config.Image"] = image
@@ -262,6 +263,15 @@ def test_runtime_and_stopped_instance_verify_actual_resources(tmp_path, identity
     monkeypatch.setattr(local_proxy.subprocess, "run", batch_inspect)
     snapshot = local_proxy._runtime_snapshot(project)
     assert starter.validate_runtime(project, inspect=snapshot, mountinfo=mountinfo, identity=identity, cwd=root)[1] == "10.1.2.3"
+    for bad_image in ("postgres:18" if database == "postgis" else "postgis/postgis:18-3.6", "postgis/postgis:18-3.5", "postgis/postgis@sha256:" + "a" * 64, "foreign:18"):
+        values[db, ".Config.Image"] = bad_image
+        with pytest.raises(starter.IsolationError):
+            starter.validate_runtime(project, inspect, mountinfo, identity=identity, cwd=root)
+        values[backend, ".State.Running"] = False
+        with pytest.raises(starter.IsolationError):
+            starter.validate_stopped_instance(project, inspect, identity=identity, cwd=root)
+        values[backend, ".State.Running"] = True
+    values[db, ".Config.Image"] = image
     original_source = values[backend, ".Mounts"][0]["Source"]
     values[backend, ".Mounts"][0]["Source"] = str(tmp_path / "foreign/backend")
     with pytest.raises(starter.IsolationError):
@@ -289,3 +299,99 @@ def test_runtime_and_stopped_instance_verify_actual_resources(tmp_path, identity
     values[backend, ".State.Running"] = True
     with pytest.raises(starter.IsolationError):
         starter.validate_runtime(project, inspect, mountinfo, identity=identity, cwd=root)
+
+
+@pytest.mark.parametrize("value,expected", [(None, "postgres:18"), ("postgresql", "postgres:18"), ("postgis", "postgis/postgis:18-3.6")])
+def test_database_declaration_allowed(tmp_path, value, expected):
+    root = app(tmp_path, "test-app", "alpha")
+    declaration = {"version": 1, "identity": "alpha"}
+    if value is not None:
+        declaration["database"] = value
+    (root / "test-management.consumer.json").write_text(json.dumps(declaration))
+    assert starter._database_image(root, "alpha") == expected
+
+
+@pytest.mark.parametrize("extra", [{"database": "unknown"}, {"database": 1}, {"database": []}, {"database": "postgis/postgis:18-3.6"}, {"image": "postgis/postgis:18-3.6"}, {"database": "postgis", "image": "postgres:18"}])
+def test_database_declaration_rejected_before_docker(tmp_path, monkeypatch, extra):
+    root = app(tmp_path, "test-app", "alpha")
+    (root / "test-management.consumer.json").write_text(json.dumps({"version": 1, "identity": "alpha", **extra}))
+    monkeypatch.setattr(starter, "_assert_local_docker", lambda *args: pytest.fail("Docker contacted"))
+    with pytest.raises(starter.IsolationError):
+        starter.start_isolated_instance(root, {})
+
+
+@pytest.mark.parametrize("database", ["postgis", "postgresql"])
+@pytest.mark.parametrize("identity,mode", [("innoservice", None), ("alpha", "synthetic-local")])
+def test_database_declaration_forbidden_for_legacy_and_synthetic(tmp_path, identity, mode, database):
+    root = app(tmp_path, identity, identity)
+    data = {"version": 1, "identity": identity, "database": database}
+    if mode:
+        data["mode"] = mode
+    (root / "test-management.consumer.json").write_text(json.dumps(data))
+    with pytest.raises(starter.IsolationError):
+        starter.consumer(root)
+
+
+@pytest.mark.parametrize("database,image", [("postgresql", "postgres:18"), ("postgis", "postgis/postgis:18-3.6")])
+def test_database_manifest_matches_declaration(tmp_path, database, image):
+    root = app(tmp_path, "test-app", "alpha")
+    (root / "test-management.consumer.json").write_text(json.dumps({"version": 1, "identity": "alpha", "database": database}))
+    manifest = root / "docker-compose.test-management.yml"
+    manifest.write_text(_manifest_text(image), encoding="utf-8")
+    starter.validate_compose_file(manifest, identity="alpha")
+    for bad in ("postgres:18" if database == "postgis" else "postgis/postgis:18-3.6", "postgis/postgis:18-3.5", "postgis/postgis@sha256:" + "a" * 64, "foreign:18"):
+        manifest.write_text(_manifest_text(bad), encoding="utf-8")
+        with pytest.raises(starter.IsolationError):
+            starter.validate_compose_file(manifest, identity="alpha")
+
+
+def test_postgis_declaration_does_not_make_a_non_declaring_app_eligible(tmp_path):
+    root = app(tmp_path, "other-app", None)
+    (root / "docker-compose.test-management.yml").write_text(_manifest_text("postgis/postgis:18-3.6"), encoding="utf-8")
+    with pytest.raises(starter.IsolationError):
+        starter.consumer(root)
+    with pytest.raises(starter.IsolationError):
+        starter.validate_runtime("other-tm-" + "1" * 32, lambda *_: pytest.fail("Docker contacted"), identity="other", cwd=root)
+
+
+def _manifest_text(database_image):
+    import yaml
+
+    return yaml.safe_dump({
+        "services": {
+            "backend": {
+                "image": "${TEST_MANAGEMENT_IMAGE:?missing isolated image}",
+                "build": {"context": ".", "dockerfile": "backend/Dockerfile"},
+                "command": ["python", "-m", "django_core_micha.test_management.isolated_entrypoint"],
+                "env_file": [".env"],
+                "environment": {
+                    "DJANGO_SETTINGS_MODULE": "backend.local_test_management_settings",
+                    "ENV_TYPE": "${ENV_TYPE:?missing original environment identity}",
+                    "DB_HOST": "db", "DB_PORT": "5432", "DB_NAME": "${TEST_MANAGEMENT_DATABASE:?missing isolated database name}",
+                    "DB_USER": "test_management", "DB_PASSWORD": "${TEST_MANAGEMENT_DATABASE_PASSWORD:?missing isolated database password}",
+                    "DJANGO_SECRET_KEY": "${TEST_MANAGEMENT_DJANGO_SECRET:?missing isolated application secret}",
+                    "TEST_MANAGEMENT_INSTANCE_ID": "${TEST_MANAGEMENT_INSTANCE_ID:?missing instance ID}",
+                    "TEST_MANAGEMENT_CONTROLLER_TOKEN": "${TEST_MANAGEMENT_CONTROLLER_TOKEN:?missing controller token}",
+                    "FRONTEND_BUILD_DIR": "/app/frontend_host/build_current",
+                    "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
+                },
+                "volumes": ["./backend:/app/backend:ro", "./frontend/build_current:/app/frontend_host/build_current:ro",
+                            {"type": "volume", "source": "media", "target": "/app/backend/media", "volume": {"nocopy": True}}],
+                "depends_on": {"db": {"condition": "service_healthy"}},
+                "networks": ["isolated"],
+            },
+            "db": {
+                "image": database_image,
+                "environment": {
+                    "POSTGRES_DB": "${TEST_MANAGEMENT_DATABASE:?missing isolated database name}",
+                    "POSTGRES_USER": "test_management",
+                    "POSTGRES_PASSWORD": "${TEST_MANAGEMENT_DATABASE_PASSWORD:?missing isolated database password}",
+                },
+                "volumes": [{"type": "volume", "source": "database", "target": "/var/lib/postgresql", "volume": {"nocopy": True}}],
+                "healthcheck": {"test": ["CMD-SHELL", "pg_isready -U test_management -d $${POSTGRES_DB}"], "interval": "2s", "timeout": "2s", "retries": 30},
+                "networks": ["isolated"],
+            },
+        },
+        "networks": {"isolated": {"internal": True, "ipam": {"config": [{"subnet": "${TEST_MANAGEMENT_SUBNET:?missing isolated network subnet}"}]}}},
+        "volumes": {"database": {}, "media": {}},
+    })
