@@ -58,4 +58,6 @@ Tier 3: all lenses, `sec_reviewer` (billing). Release as a minor version; MAANA-
 
 ## Gate record
 
-Gate #1: pending operator approval in the Maana Expertenchat (session local_cbfc9d51-5217-42a4-99ba-27a315c854ce).
+Gate #1 approved by the operator 2026-11-19 in the Maana Expertenchat (session
+local_cbfc9d51-5217-42a4-99ba-27a315c854ce): "Ja, beide freigeben und beauftragen", after choosing "Erst CHF-Probe",
+"Umgerechnet, gerundet" and "Keine laufenden Abos".
