@@ -64,3 +64,5 @@ To be filled by the Orchestrator.
 To be filled by the Orchestrator.
 
 ## Gate record
+
+Gate #1 approved by the operator 2026-11-19 (chat message "Beide freigeben", covering DCM-SEC-5 and webapp-ops-scripts OPS-BAK-1).
