@@ -28,5 +28,5 @@ jobs:
         env:
           PYTHONPATH: .
         run: |
-          pip install -e ".[test,ai,extraction,push,scripts,billing,receipts]"
+          pip install -e ".[test,ai,extraction,push,scripts,billing,receipts,reimbursements]"
           pytest -q

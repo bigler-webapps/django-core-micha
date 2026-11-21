@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.41.2] — 2026-11-21
+
+- DCM-DX-16 adds the `pgvector` database flavour for isolated local acceptance, using `pgvector/pgvector:pg18` and the PostgreSQL backend with the existing isolation proof checks.
+- DCM-CI-3 aligns CI and publish test dependencies by including the `reimbursements` extra.
+
 ## [3.41.1] — 2026-11-21
 
 - DCM-NOTIF-30 follow-up: `resolve_channels` now drops an enabled email or push channel the recipient cannot receive on (push without a `PushSubscription`, email without an address), also when the opt-in is on. Before, such a delivery was recorded as sent although nothing was transmitted. In-app channels are unchanged. Apps whose tests opt a user into push without a subscription must create one.
