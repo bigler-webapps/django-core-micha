@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.41.1] — 2026-11-21
+
+- DCM-NOTIF-30 follow-up: `resolve_channels` now drops an enabled email or push channel the recipient cannot receive on (push without a `PushSubscription`, email without an address), also when the opt-in is on. Before, such a delivery was recorded as sent although nothing was transmitted. In-app channels are unchanged. Apps whose tests opt a user into push without a subscription must create one.
+
 ## [3.41.0] — 2026-11-21
 
 - DCM-NOTIF-30 makes notification delivery outcomes real. Email delivery reports `accepted`, `failed`, `not_attempted` or `uncertain` per recipient; `notify` stores that outcome instead of marking every send as sent, and `dispatch_result` exposes it (`dispatch` still returns a boolean). Todo digest claims carry a `claim_token` (migration `0011`) and move through claimed, sending, sent, failed, not_attempted and uncertain; only failed or not-attempted rows retry, `recover_digest_claim` settles a confirmed-dead worker, and the digest body lists only occurrences still eligible after claiming. The canonical inbox pages by a signed keyset cursor, `POST /api/notifications/feed/mark-all-seen/` marks everything seen and returns the reconciled `unread_count` (`capabilities.mark_all_seen` in the feed), and a `notification.inbox_changed` realtime message invalidates open inboxes. `GET`/`PATCH /api/notifications/preferences/channel-matrix/` expose per-category channel choices (inherit, enabled, disabled) for pairs an app declares with `register_editable_channel_pair`. Apps overriding `_send_email` or patching `api.dispatch` must adopt the new return types.

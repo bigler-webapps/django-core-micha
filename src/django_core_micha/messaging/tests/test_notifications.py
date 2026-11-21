@@ -16,7 +16,7 @@ from django_core_micha.messaging.notifications import (
 from django_core_micha.messaging.policy import MembershipSnapshot, register_messaging_policy, unregister_messaging_policy
 from django_core_micha.messaging.services import send_message
 from django_core_micha.notifications.dispatch import _push_preview_enabled
-from django_core_micha.notifications.models import Notification, NotificationPreference
+from django_core_micha.notifications.models import Notification, NotificationPreference, PushSubscription
 from django_core_micha.notifications.types import get_notification_type
 
 
@@ -130,6 +130,7 @@ def test_notify_message_push_title_is_sender_name_and_body_is_the_message_text(d
     users[0].first_name, users[0].last_name = "Jamie", "Lee"
     users[0].save()
     NotificationPreference.objects.create(user=users[1], push_opt_in=True)
+    PushSubscription.objects.create(user=users[1], endpoint='https://push.test/m1', p256dh='k', auth='a')
     sent = _capture_push(monkeypatch)
 
     message, _ = send_message(actor=users[0], conversation=conversation, body="see you tomorrow")
@@ -148,6 +149,7 @@ def test_notify_message_unknown_sender_falls_back_to_the_unknown_sender_title(do
     app, conversation, users = domain
     register_messaging_notification_type(app.app_key)
     NotificationPreference.objects.create(user=users[1], push_opt_in=True)
+    PushSubscription.objects.create(user=users[1], endpoint='https://push.test/m2', p256dh='k', auth='a')
     sent = _capture_push(monkeypatch)
 
     message, _ = send_message(actor=users[0], conversation=conversation, body="hi")
@@ -165,6 +167,7 @@ def test_notify_message_body_is_truncated_at_the_conversation_excerpt_length(dom
     app, conversation, users = domain
     register_messaging_notification_type(app.app_key)
     NotificationPreference.objects.create(user=users[1], push_opt_in=True)
+    PushSubscription.objects.create(user=users[1], endpoint='https://push.test/m3', p256dh='k', auth='a')
     sent = _capture_push(monkeypatch)
 
     long_text = "x" * (CONVERSATION_EXCERPT_LENGTH + 50)
@@ -185,6 +188,7 @@ def test_notify_message_body_at_or_under_the_limit_gets_no_ellipsis(domain, monk
     app, conversation, users = domain
     register_messaging_notification_type(app.app_key)
     NotificationPreference.objects.create(user=users[1], push_opt_in=True)
+    PushSubscription.objects.create(user=users[1], endpoint='https://push.test/m4', p256dh='k', auth='a')
     sent = _capture_push(monkeypatch)
 
     exact_text = "y" * CONVERSATION_EXCERPT_LENGTH
@@ -200,6 +204,7 @@ def test_notify_message_attachment_only_send_gets_a_kind_fallback_body(domain, m
     app, conversation, users = domain
     register_messaging_notification_type(app.app_key)
     NotificationPreference.objects.create(user=users[1], push_opt_in=True)
+    PushSubscription.objects.create(user=users[1], endpoint='https://push.test/m5', p256dh='k', auth='a')
     sent = _capture_push(monkeypatch)
 
     message, _ = send_message(actor=users[0], conversation=conversation, body="")
@@ -219,6 +224,7 @@ def test_notify_message_soft_deleted_message_never_leaks_its_old_text(domain, mo
     app, conversation, users = domain
     register_messaging_notification_type(app.app_key)
     NotificationPreference.objects.create(user=users[1], push_opt_in=True)
+    PushSubscription.objects.create(user=users[1], endpoint='https://push.test/m6', p256dh='k', auth='a')
     sent = _capture_push(monkeypatch)
 
     message, _ = send_message(actor=users[0], conversation=conversation, body="a secret I shouldn't send")
@@ -237,6 +243,7 @@ def test_notify_message_does_not_leak_between_two_independent_sends(domain, monk
     app, conversation, users = domain
     register_messaging_notification_type(app.app_key)
     NotificationPreference.objects.create(user=users[1], push_opt_in=True)
+    PushSubscription.objects.create(user=users[1], endpoint='https://push.test/m7', p256dh='k', auth='a')
     sent = _capture_push(monkeypatch)
 
     first, _ = send_message(actor=users[0], conversation=conversation, body="first message")
@@ -256,6 +263,7 @@ def test_notify_message_preview_off_hides_sender_and_text_but_keeps_the_push_act
     users[0].first_name, users[0].last_name = "Jamie", "Lee"
     users[0].save()
     NotificationPreference.objects.create(user=users[1], push_opt_in=True, push_preview_opt_in=False)
+    PushSubscription.objects.create(user=users[1], endpoint='https://push.test/m8', p256dh='k', auth='a')
     sent = _capture_push(monkeypatch)
 
     message, _ = send_message(actor=users[0], conversation=conversation, body="sensitive body text")

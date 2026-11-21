@@ -16,6 +16,7 @@ from django_core_micha.notifications.models import (
     NotificationCategorySubscription,
     NotificationDelivery,
     NotificationPreference,
+    PushSubscription,
 )
 from django_core_micha.notifications.router import resolve_channels
 from django_core_micha.notifications.serializers import NotificationPreferenceSerializer
@@ -83,6 +84,21 @@ def test_active_type_resolves_to_chosen_channel_and_to_none_when_all_opted_out()
     opted_out_user = make_user("reach-opted-out")
     NotificationPreference.objects.create(user=opted_out_user, email_opt_in=False, push_opt_in=False)
     assert resolve_channels(ntype, opted_out_user) == []
+
+
+@pytest.mark.django_db
+def test_enabled_push_without_subscription_and_email_without_address_are_not_resolved():
+    ntype = make_active_type("ops.unavailable_channels")
+    user = make_user("push-no-subscription", email="")
+    NotificationPreference.objects.create(user=user, email_opt_in=True, push_opt_in=True)
+    assert resolve_channels(ntype, user) == []
+
+    PushSubscription.objects.create(user=user, endpoint="https://push.example.test/1", p256dh="k", auth="a")
+    assert resolve_channels(ntype, user) == ["push"]
+
+    with_address = make_user("email-with-address")
+    NotificationPreference.objects.create(user=with_address, email_opt_in=True, push_opt_in=True)
+    assert resolve_channels(ntype, with_address) == ["email"]  # address kept, push dropped (no subscription)
 
 
 # --- Test 2: active-without-passive produces no chip and no feed entry ----------------

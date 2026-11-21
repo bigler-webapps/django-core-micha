@@ -16,6 +16,7 @@ from django_core_micha.notifications.models import (
     Notification,
     NotificationDelivery,
     NotificationPreference,
+    PushSubscription,
     NotificationRecipient,
 )
 from django_core_micha.notifications.text_registry import SUPPORTED_LANGUAGES
@@ -371,6 +372,7 @@ def test_push_dispatcher_hides_preview_body_but_keeps_the_sender_name_in_the_tit
         username="preview-off-e2e", email="preview-off-e2e@example.test", password="password"
     )
     NotificationPreference.objects.create(user=user, push_opt_in=True, push_preview_opt_in=False)
+    PushSubscription.objects.create(user=user, endpoint="https://push.test/preview-off", p256dh="k", auth="a")
     sent = []
     monkeypatch.setattr(dispatch_module, "_send_push", lambda **kwargs: sent.append(kwargs))
 

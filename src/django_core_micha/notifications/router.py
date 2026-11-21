@@ -33,7 +33,9 @@ def resolve_channels(ntype, user, override=None) -> list[str]:
     for channel in base:
         enabled = is_channel_enabled(user, ntype.category, channel)
         force = ntype.critical and channel in eligible
-        if enabled or (force and _is_technically_available(user, channel)):
+        # An enabled external channel the recipient cannot receive on (push without a
+        # subscription, email without an address) is undeliverable, never a recorded "sent".
+        if (enabled or force) and _is_technically_available(user, channel):
             if channel not in effective:
                 effective.append(channel)
     return effective
