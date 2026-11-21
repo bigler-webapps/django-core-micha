@@ -49,11 +49,11 @@ def process_start() -> str:
 
 
 def signature(instance, address: str, token: str, boot_id: str, database="postgresql") -> str:
-    if database not in ("postgresql", "postgis"):
+    if database not in ("postgresql", "postgis", "pgvector"):
         raise ValueError("Invalid database flavour.")
     message = f"{instance}:{address}:{boot_id}"
-    if database == "postgis":
-        message += ":postgis"
+    if database != "postgresql":
+        message += f":{database}"
     return hmac.new(token.encode(), message.encode(), hashlib.sha256).hexdigest()
 
 
@@ -75,8 +75,8 @@ def verify_marker(env=None, mountinfo=None, proof_path=PROOF_PATH, boot_path=BOO
         fields = {"instance", "database_ip", "boot_id", "signature"}
         if set(data) == fields:
             database = "postgresql"
-        elif set(data) == fields | {"database"} and data["database"] == "postgis":
-            database = "postgis"
+        elif set(data) == fields | {"database"} and data["database"] in ("postgis", "pgvector"):
+            database = data["database"]
         else:
             raise ValueError
         if data["instance"] != str(instance) or data["boot_id"] != boot_id:

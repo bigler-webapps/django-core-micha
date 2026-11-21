@@ -56,7 +56,8 @@ does not record build arguments. Restore the original declaration and manifest
 to manage an instance built with different arguments.
 
 The optional `database` field is `postgresql` (the default, image
-`postgres:18`) or `postgis` (image `postgis/postgis:18-3.6`). For example:
+`postgres:18`), `postgis` (image `postgis/postgis:18-3.6`), or `pgvector`
+(image `pgvector/pgvector:pg18`). For example:
 `{"version": 1, "identity": "example-app", "database": "postgis"}`.
 No image names or other database values are accepted. Innoservice and the
 synthetic-local fixture cannot declare this field. The manifest and running
@@ -66,7 +67,8 @@ after the declaration is restored.
 The starter verifies the running database image against the declaration before
 signing the per-boot isolation proof. A PostGIS proof includes the signed
 `postgis` flavour and requires Django's `django.contrib.gis.db.backends.postgis`
-engine. Plain proofs omit the flavour and require
+engine. A pgvector proof includes the signed `pgvector` flavour and requires
+`django.db.backends.postgresql`. Plain proofs omit the flavour and also require
 `django.db.backends.postgresql`; existing plain proofs remain valid. Settings or
 environment values cannot select the proven flavour, and mismatches are refused.
 The PostGIS tag is the hram local image, confirmed on Docker Hub on

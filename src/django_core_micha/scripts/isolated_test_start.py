@@ -30,7 +30,7 @@ class IsolationError(ValueError):
 
 
 _IDENTITY = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
-_DATABASE_IMAGES = {"postgresql": "postgres:18", "postgis": "postgis/postgis:18-3.6"}
+_DATABASE_IMAGES = {"postgresql": "postgres:18", "postgis": "postgis/postgis:18-3.6", "pgvector": "pgvector/pgvector:pg18"}
 
 _PROJECT = re.compile(r"^([a-z][a-z0-9]*(?:-[a-z0-9]+)*)-tm-([0-9a-f]{32})$")
 
@@ -532,7 +532,7 @@ def _finish_start(project, instance, compose, cwd, env, *, identity, renew=False
     for command in (["chown", "1000:1000", "/app/backend/media"], ["chmod", "0700", "/app/backend/media"]):
         if _run_private(compose + ["exec", "-T", "--user", "0", "backend"] + command, cwd=cwd, env=env):
             raise IsolationError("The isolated media volume could not be prepared.")
-    if _run_private(compose + ["exec", "-T", "backend", "python", "-m", "django_core_micha.test_management.isolated_entrypoint", "install-proof", database_ip] + (["postgis"] if database == "postgis" else []), cwd=cwd, env=env):
+    if _run_private(compose + ["exec", "-T", "backend", "python", "-m", "django_core_micha.test_management.isolated_entrypoint", "install-proof", database_ip] + ([database] if database != "postgresql" else []), cwd=cwd, env=env):
         raise IsolationError("The database isolation preflight failed.")
     if _run_private(compose + ["exec", "-T", "backend", "python", "manage.py", "migrate", "--noinput"], cwd=cwd, env=env, timeout=300, heartbeat=True):
         raise IsolationError("The isolated database migration failed.")

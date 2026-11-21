@@ -52,7 +52,7 @@ def validate_configuration() -> Activation:
     try:
         proof_instance, database_ip, flavour = verify_marker(include_database=True)
         database = settings.DATABASES["default"]
-        engines = {"postgresql": "django.db.backends.postgresql", "postgis": "django.contrib.gis.db.backends.postgis"}
+        engines = {"postgresql": "django.db.backends.postgresql", "postgis": "django.contrib.gis.db.backends.postgis", "pgvector": "django.db.backends.postgresql"}
         if (proof_instance != instance_id or not hmac.compare_digest(token, os.environ.get("TEST_MANAGEMENT_CONTROLLER_TOKEN", "")) or
                 database.get("ENGINE") != engines[flavour] or database.get("USER") != "test_management" or
                 str(database.get("PORT")) != "5432" or database.get("HOST") != "db" or database.get("NAME") != f"dcm_tm_{instance_id.hex}" or

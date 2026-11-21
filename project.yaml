@@ -1,0 +1,9 @@
+# Run with the repository's test virtual environment on PATH.
+# Install the checkout with .[test,ai,extraction,push,scripts,billing,receipts,reimbursements].
+tests:
+  backend:
+    command: pytest -q -o pythonpath=.
+  test-management-launcher:
+    command: pytest -q -o pythonpath=. tests/test_test_management_launcher.py
+  test-management-isolation:
+    command: pytest -q -o pythonpath=. tests/test_test_management_consumers.py tests/test_test_management_postgis_proof.py tests/test_test_management_pgvector_proof.py
