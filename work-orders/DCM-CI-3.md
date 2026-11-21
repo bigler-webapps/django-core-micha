@@ -25,3 +25,5 @@ Gate #1 approved by the operator 2026-11-21 (chat approval for the CI test extra
 ## Completion
 
 Release preparation commit `a1a9c0d` adds the test extra to Core CI and sets 3.41.2. The publish workflow already installs that extra. The full supported Core backend run passed 1,999 tests with eight skipped after installing the declared extras. The DCM-DX-16 focused run passed 117 isolation and 10 launcher tests. Independent release review reported no findings across envelope, regression, duplication, tests and security, using codex/gpt-6.1-terra and codex/gpt-6-luna. Publication and Cockpit acceptance are pending.
+
+The [publish workflow](https://github.com/bigler-webapps/django-core-micha/actions/runs/44946878268) completed successfully at `3e0f5ce`. The published 3.41.2 package installed in a dedicated local runtime. Cockpit's local image reports 3.41.2. CP-CI-2 remains open because its isolated Compose startup did not reach a ready URL.
