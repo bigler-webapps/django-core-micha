@@ -14,10 +14,16 @@ domain by that primitive's default, so older dcm releases remain compatible.
 """
 
 from django.conf import settings
+from django.core import signing
+from django.db import transaction
+from django.db.models import Q, Max
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import generics, status, views
+from rest_framework.exceptions import NotFound
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
+from rest_framework.utils.urls import replace_query_param, remove_query_param
 
 from .delivery import notification_envelope, push_to_users
 from .models import NotificationPreference, NotificationRecipient, PushSubscription, get_notification_model
@@ -160,6 +166,43 @@ class NotificationMarkReadView(_OptionalInboxView):
 class CanonicalInboxPagination(PageNumberPagination):
     page_size = 20
 
+    def paginate_queryset(self, queryset, request, view=None):
+        self.request = request
+        self.keyset = "page" not in request.query_params
+        if not self.keyset:
+            return super().paginate_queryset(queryset, request, view)
+        self.count = queryset.count() if hasattr(queryset, "model") else len(queryset)
+        cursor = request.query_params.get("cursor")
+        if cursor:
+            try:
+                created, pk = signing.loads(cursor, salt="notification-feed")
+                created = parse_datetime(created)
+                if created is None or not isinstance(pk, int):
+                    raise ValueError
+            except (signing.BadSignature, ValueError, TypeError):
+                raise NotFound("Invalid feed continuation.")
+            if hasattr(queryset, "model"):
+                queryset = queryset.filter(Q(notification__created_at__lt=created) | Q(notification__created_at=created, pk__lt=pk))
+            else:
+                queryset = [r for r in queryset if (r.notification.created_at, r.pk) < (created, pk)]
+        rows = list(queryset[: self.page_size + 1])
+        self.has_more = len(rows) > self.page_size
+        self.rows = rows[: self.page_size]
+        return self.rows
+
+    def get_paginated_response(self, data):
+        if not self.keyset:
+            response = super().get_paginated_response(data)
+            response.data["capabilities"] = {"mark_all_seen": True}
+            return response
+        next_link = None
+        if self.has_more:
+            last = self.rows[-1]
+            cursor = signing.dumps([last.notification.created_at.isoformat(), last.pk], salt="notification-feed")
+            next_link = replace_query_param(remove_query_param(self.request.build_absolute_uri(), "page"), "cursor", cursor)
+        return Response({"count": self.count, "next": next_link, "previous": None, "results": data,
+                         "capabilities": {"mark_all_seen": True}})
+
 
 class CanonicalInboxView(generics.ListAPIView):
     """List the current user's canonical notification-recipient projection."""
@@ -173,7 +216,7 @@ class CanonicalInboxView(generics.ListAPIView):
             .exclude(notification__category="todo")
             .exclude(notification__notification_type__in=iter_feed_hidden_type_keys())
             .select_related("notification", "notification__content_type")
-            .order_by("-notification__created_at")
+            .order_by("-notification__created_at", "-pk")
         )
         status_filter = self.request.query_params.get("status")
         if status_filter == "unseen":
@@ -204,7 +247,7 @@ class CanonicalInboxView(generics.ListAPIView):
             live_todos = [recipient for recipient in live_todos if recipient.done_at is not None]
         return sorted(
             [*event_recipients, *live_todos],
-            key=lambda recipient: recipient.notification.created_at,
+            key=lambda recipient: (recipient.notification.created_at, recipient.pk),
             reverse=True,
         )
 
@@ -218,6 +261,7 @@ class CanonicalUnreadCountView(views.APIView):
             user=request.user,
             seen_at__isnull=True,
             dismissed_at__isnull=True,
+            done_at__isnull=True,
         ).exclude(
             notification__category="todo"
         ).exclude(
@@ -225,6 +269,33 @@ class CanonicalUnreadCountView(views.APIView):
         ).count()
         todo_count = count_active_todos_for_user(request.user)
         return Response({"count": event_count + todo_count})
+
+
+class CanonicalMarkAllSeenView(views.APIView):
+    """Mark the current actionable projection at a bounded server-side boundary."""
+
+    def post(self, request):
+        if request.data != {}:
+            return Response({"detail": "Expected an empty object."}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            todos = derive_todos_for_user(request.user) if iter_registered_todo_types() else []
+            todo_ids = [r.pk for r in todos if r.dismissed_at is None and r.done_at is None]
+            boundary = NotificationRecipient.objects.aggregate(max_id=Max("pk"))["max_id"] or 0
+            now = timezone.now()
+            eligible = NotificationRecipient.objects.filter(
+                user=request.user, pk__lte=boundary, seen_at__isnull=True,
+                dismissed_at__isnull=True, done_at__isnull=True,
+            ).filter(
+                Q(pk__in=todo_ids) | (~Q(notification__category="todo") &
+                    ~Q(notification__notification_type__in=iter_feed_hidden_type_keys()))
+            )
+            updated = eligible.update(seen_at=now)
+            if updated:
+                transaction.on_commit(lambda: push_to_users(
+                    [request.user], notification_envelope({"type": "notification.inbox_changed"})
+                ))
+            unread_count = CanonicalUnreadCountView().get(request).data["count"]
+        return Response({"updated": updated, "unread_count": unread_count})
 
 
 class CanonicalMarkView(views.APIView):
@@ -271,3 +342,55 @@ class CanonicalMarkView(views.APIView):
                 )
 
         return Response({"updated": updated})
+
+
+class ChannelMatrixView(views.APIView):
+    """Read or update only the authenticated account's declared pairs."""
+
+    from rest_framework.permissions import IsAuthenticated
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def row(user, category, channel, label_key):
+        from .dispatch import _recipient_language
+        from .models import NotificationCategoryChannelPreference
+        from .prefs import is_channel_enabled
+        from .text_registry import resolve_notification_text
+
+        override = NotificationCategoryChannelPreference.objects.filter(
+            user=user, category=category, channel=channel
+        ).values_list("enabled", flat=True).first()
+        return {
+            "category": category, "channel": channel, "label_key": label_key,
+            "label": resolve_notification_text(label_key, _recipient_language(user)) or label_key,
+            "choice": "inherit" if override is None else ("enabled" if override else "disabled"),
+            "effective_enabled": is_channel_enabled(user, category, channel),
+        }
+
+    def get(self, request):
+        from .prefs import iter_editable_channel_pairs
+
+        return Response({"results": [
+            self.row(request.user, category, channel, label_key)
+            for (category, channel), label_key in iter_editable_channel_pairs().items()
+        ]})
+
+    def patch(self, request):
+        from .models import NotificationCategoryChannelPreference
+        from .prefs import iter_editable_channel_pairs
+        from .serializers import ChannelMatrixInputSerializer
+
+        serializer = ChannelMatrixInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        category = serializer.validated_data["category"]
+        channel = serializer.validated_data["channel"]
+        choice = serializer.validated_data["choice"]
+        if choice == "inherit":
+            NotificationCategoryChannelPreference.objects.filter(
+                user=request.user, category=category, channel=channel
+            ).delete()
+        else:
+            NotificationCategoryChannelPreference.set_category_channel(
+                request.user, category, channel, choice == "enabled"
+            )
+        return Response(self.row(request.user, category, channel, iter_editable_channel_pairs()[(category, channel)]))

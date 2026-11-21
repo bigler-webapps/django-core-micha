@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from .dispatch import dispatch
+from .dispatch import dispatch_result
 from .models import Notification, NotificationDelivery, NotificationRecipient
 from .router import resolve_channels
 from .subscriptions import resolve_category_subscribers
@@ -112,13 +112,16 @@ def notify(
             delivery, created = _get_delivery_with_retry(recipient=recipient, channel=channel)
             if not created:
                 continue
-            result = dispatch(channel, notification=notification, recipient=recipient, ctx=transient)
-            if result is True:
+            result = dispatch_result(channel, notification=notification, recipient=recipient, ctx=transient)
+            if result.ok is True:
                 delivery.status = "sent"
                 delivery.sent_at = timezone.now()
                 delivery.save(update_fields=["status", "sent_at"])
-            elif result is False:
+            elif result.ok is False:
                 delivery.status = "failed"
+                delivery.save(update_fields=["status"])
+            elif result.outcome is not None:
+                delivery.status = result.outcome.value
                 delivery.save(update_fields=["status"])
 
     return notification

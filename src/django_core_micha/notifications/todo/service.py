@@ -52,7 +52,7 @@ def _materialized_candidates(user, now) -> list[_TodoCandidate]:
                 raise ValueError(f"Todo provider {type_key!r} emitted seed for {seed.type_key!r}")
             scope = seed.scope if seed.scope is not None else seed.notifiable
             raw_seeds.append((seed, config, scope))
-            if scope is not None:
+            if scope is not None and seed.policy is None:
                 scoped_objects.append(scope)
             if seed.notifiable is not None:
                 notifiable_objects.append(seed.notifiable)
@@ -63,7 +63,7 @@ def _materialized_candidates(user, now) -> list[_TodoCandidate]:
     scope_keys = {
         (content_types[type(scope)].pk, str(scope.pk), seed.type_key)
         for seed, _, scope in raw_seeds
-        if scope is not None
+        if scope is not None and seed.policy is None
     }
     overrides = {
         (override.content_type_id, override.object_id, override.type_key): override
@@ -78,10 +78,18 @@ def _materialized_candidates(user, now) -> list[_TodoCandidate]:
     for seed, config, scope in raw_seeds:
         override = overrides.get(
             (content_types[type(scope)].pk, str(scope.pk), seed.type_key)
-        ) if scope is not None else None
-        if override is not None and not override.enabled:
-            continue
-        effective_engine_config = _engine_config(_apply_lead_override(config, override))
+        ) if scope is not None and seed.policy is None else None
+        if seed.policy is not None:
+            if not seed.policy.enabled:
+                continue
+            effective_config = config if seed.policy.lead_days is None else replace(
+                config, remind_before=f"P{seed.policy.lead_days}D"
+            )
+        else:
+            if override is not None and not override.enabled:
+                continue
+            effective_config = _apply_lead_override(config, override)
+        effective_engine_config = _engine_config(effective_config)
         due_base_resolver = seed.due_base_resolver or (lambda base: None)
         materialized = materialize_todo(
             seed.content,

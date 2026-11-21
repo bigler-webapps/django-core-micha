@@ -112,3 +112,18 @@ class CanonicalNotificationSerializer(serializers.Serializer):
 class CanonicalMarkInputSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=["seen", "dismissed", "done"])
     ids = serializers.ListField(child=serializers.IntegerField(), allow_empty=True)
+
+
+class ChannelMatrixInputSerializer(serializers.Serializer):
+    category = serializers.CharField()
+    channel = serializers.CharField()
+    choice = serializers.ChoiceField(choices=("inherit", "enabled", "disabled"))
+
+    def validate(self, attrs):
+        from .prefs import iter_editable_channel_pairs
+
+        if set(self.initial_data) != {"category", "channel", "choice"}:
+            raise serializers.ValidationError("Provide exactly category, channel and choice.")
+        if (attrs["category"], attrs["channel"]) not in iter_editable_channel_pairs():
+            raise serializers.ValidationError("Unsupported category and channel pair.")
+        return attrs

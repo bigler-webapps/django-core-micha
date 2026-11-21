@@ -1,8 +1,10 @@
 from django.urls import path
 
 from .views import (
+    ChannelMatrixView,
     CanonicalInboxView,
     CanonicalMarkView,
+    CanonicalMarkAllSeenView,
     CanonicalUnreadCountView,
     NotificationInboxView,
     NotificationMarkReadView,
@@ -16,6 +18,7 @@ from .views import (
 
 urlpatterns = [
     path("preferences/", NotificationPreferenceView.as_view(), name="notification-preferences"),
+    path("preferences/channel-matrix/", ChannelMatrixView.as_view(), name="notification-channel-matrix"),
     path("preferences/subscriptions/", NotificationSubscriptionView.as_view(), name="notification-subscriptions"),
     path("preferences/push-subscription/", PushSubscriptionView.as_view(), name="push-subscription"),
     path("preferences/vapid-public-key/", VapidPublicKeyView.as_view(), name="vapid-public-key"),
@@ -25,4 +28,5 @@ urlpatterns = [
     path("feed/", CanonicalInboxView.as_view(), name="canonical-notification-feed"),
     path("feed/unread-count/", CanonicalUnreadCountView.as_view(), name="canonical-notification-unread-count"),
     path("feed/mark/", CanonicalMarkView.as_view(), name="canonical-notification-mark"),
+    path("feed/mark-all-seen/", CanonicalMarkAllSeenView.as_view(), name="canonical-notification-mark-all-seen"),
 ]

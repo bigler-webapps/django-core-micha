@@ -262,3 +262,20 @@ def test_resolve_category_subscribers_ignores_channel_overrides_and_requires_exp
     assert resolved == {subscribed.pk}
     assert is_subscribed(subscribed, "ops") is True
     assert is_subscribed(not_subscribed, "ops") is False
+
+
+@pytest.mark.django_db
+def test_matrix_override_changes_router_without_granting_subscription():
+    from django_core_micha.notifications.models import NotificationCategoryChannelPreference
+    from django_core_micha.notifications.prefs import is_digest_email_enabled
+
+    user = make_user("matrix-router")
+    NotificationPreference.objects.create(user=user, email_opt_in=False)
+    ntype = NotificationType(key="messaging.matrix", category="messaging", mode="event",
+                             resolution="user-done", active=True, passive=False)
+    NotificationCategoryChannelPreference.set_category_channel(user, "messaging", "email", True)
+    assert resolve_channels(ntype, user) == ["email"]
+    assert not is_subscribed(user, "messaging")
+    assert not is_digest_email_enabled(user)
+    NotificationCategoryChannelPreference.set_category_channel(user, "todo", "email", True)
+    assert is_digest_email_enabled(user)

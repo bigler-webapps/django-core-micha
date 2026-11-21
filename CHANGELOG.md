@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.41.0] — 2026-11-21
+
+- DCM-NOTIF-30 makes notification delivery outcomes real. Email delivery reports `accepted`, `failed`, `not_attempted` or `uncertain` per recipient; `notify` stores that outcome instead of marking every send as sent, and `dispatch_result` exposes it (`dispatch` still returns a boolean). Todo digest claims carry a `claim_token` (migration `0011`) and move through claimed, sending, sent, failed, not_attempted and uncertain; only failed or not-attempted rows retry, `recover_digest_claim` settles a confirmed-dead worker, and the digest body lists only occurrences still eligible after claiming. The canonical inbox pages by a signed keyset cursor, `POST /api/notifications/feed/mark-all-seen/` marks everything seen and returns the reconciled `unread_count` (`capabilities.mark_all_seen` in the feed), and a `notification.inbox_changed` realtime message invalidates open inboxes. `GET`/`PATCH /api/notifications/preferences/channel-matrix/` expose per-category channel choices (inherit, enabled, disabled) for pairs an app declares with `register_editable_channel_pair`. Apps overriding `_send_email` or patching `api.dispatch` must adopt the new return types.
+
 ## [3.40.0] — 2026-11-19
 
 - DCM-DX-14 lets the isolated test center's per-request activation check accept `django.contrib.gis.db.backends.postgis` for an instance that declared the `postgis` flavour (DCM-DX-12). The starter writes the flavour into the HMAC-signed per-boot isolation proof after verifying the running database image; the check selects exactly one allowed engine from that proven flavour, never from settings or environment. Plain instances still require `django.db.backends.postgresql`, mismatches fail closed, and proofs and containers from earlier versions stay valid and mean plain.

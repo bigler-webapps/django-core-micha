@@ -7,6 +7,7 @@ from django.utils import timezone
 
 from django_core_micha.notifications import dispatch
 from django_core_micha.notifications.api import has_open, notify, resolve
+from django_core_micha.notifications.delivery import EmailOutcome
 from django_core_micha.notifications.models import (
     Notification,
     NotificationDelivery,
@@ -21,6 +22,14 @@ from django_core_micha.notifications.types import (
     get_notification_type,
     register_notification_type,
 )
+
+
+def accepting_email(calls):
+    """Fake mail transport: records the call and reports acceptance for every recipient."""
+    def transport(**kwargs):
+        calls.append(kwargs)
+        return {user.id: EmailOutcome.ACCEPTED for user in kwargs["users"]}
+    return transport
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +135,7 @@ def test_notify_creates_canonical_rows_dispatches_and_deduplicates(monkeypatch):
 
     calls = {"chip": [], "email": [], "push": []}
     monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: calls["chip"].append((users, payload)))
-    monkeypatch.setattr(dispatch, "_send_email", lambda **kwargs: calls["email"].append(kwargs))
+    monkeypatch.setattr(dispatch, "_send_email", accepting_email(calls["email"]))
     monkeypatch.setattr(dispatch, "_send_push", lambda **kwargs: calls["push"].append(kwargs))
     content = {"title_key": "Notification title", "body_key": "Notification body", "params": {}, "link": "/next"}
 
@@ -161,8 +170,8 @@ def test_notify_after_resolution_creates_and_delivers_a_fresh_episode(monkeypatc
     user = make_user("notify-after-resolution")
     calls = []
     monkeypatch.setattr(
-        "django_core_micha.notifications.api.dispatch",
-        lambda channel, **kwargs: calls.append((channel, kwargs)),
+        "django_core_micha.notifications.api.dispatch_result",
+        lambda channel, **kwargs: (calls.append((channel, kwargs)), dispatch.DeliveryResult(ok=None))[1],
     )
     content = {"title_key": "Notification title", "body_key": "Notification body"}
 
@@ -240,7 +249,7 @@ def test_notify_transient_values_render_only_for_email_and_push_without_affectin
     emails = []
     pushes = []
     monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: None)
-    monkeypatch.setattr(dispatch, "_send_email", lambda **kwargs: emails.append(kwargs))
+    monkeypatch.setattr(dispatch, "_send_email", accepting_email(emails))
     monkeypatch.setattr(dispatch, "_send_push", lambda **kwargs: pushes.append(kwargs))
     content = {
         "title_key": "Title {name}",
@@ -268,13 +277,13 @@ def test_notify_without_transient_passes_none_to_dispatch_and_preserves_existing
     user = make_user("no-transient")
     calls = []
     monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: None)
-    original_dispatch = dispatch.dispatch
+    original_dispatch = dispatch.dispatch_result
 
     def capture_dispatch(channel, *, notification, recipient, ctx=None):
         calls.append(ctx)
         return original_dispatch(channel, notification=notification, recipient=recipient, ctx=ctx)
 
-    monkeypatch.setattr("django_core_micha.notifications.api.dispatch", capture_dispatch)
+    monkeypatch.setattr("django_core_micha.notifications.api.dispatch_result", capture_dispatch)
     content = {"title_key": "Title", "body_key": "Body", "params": {"stored": "value"}}
 
     notification = notify(type="test_notice", recipients=user, content=content)
@@ -311,6 +320,7 @@ def test_notify_critical_type_actually_delivers_email_despite_opt_out(monkeypatc
 
         def send(self, fail_silently=False):
             sent_to.extend(self.to)
+            return len(self.to)  # Django's send() returns the number of accepted messages
 
     from django_core_micha.notifications import delivery
 
@@ -398,3 +408,18 @@ def test_notify_recovers_from_null_delivery_integrity_error(monkeypatch):
     assert attempts == 1
     assert NotificationDelivery.objects.get(pk=existing.pk).status == "pending"
     assert NotificationDelivery.objects.filter(recipient=recipient, channel="chip").count() == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("outcome", [EmailOutcome.FAILED, EmailOutcome.NOT_ATTEMPTED, EmailOutcome.UNCERTAIN])
+def test_notify_persists_the_real_email_outcome_instead_of_marking_it_sent(monkeypatch, outcome):
+    register_notification_type(make_type(active=True, passive=False))
+    user = make_user(f"outcome-{outcome.value}")
+    NotificationPreference.objects.create(user=user, email_opt_in=True)
+    monkeypatch.setattr(dispatch, "push_to_users", lambda users, payload: None)
+    monkeypatch.setattr(dispatch, "_send_email", lambda **kwargs: {u.id: outcome for u in kwargs["users"]})
+
+    notify(type="test_notice", recipients=user, content={"title_key": "T", "body_key": "B"})
+
+    row = NotificationDelivery.objects.get(recipient__user=user, channel="email")
+    assert row.status == outcome.value and row.status != "sent"

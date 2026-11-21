@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import logging
 from typing import ClassVar, Protocol
 
-from .delivery import _send_email, _send_push, notification_envelope, push_to_users
+from .delivery import EmailOutcome, _send_email, _send_push, notification_envelope, push_to_users
 from .models import NotificationPreference
 from .text_registry import resolve_notification_text
 
@@ -20,6 +20,7 @@ class DeliveryResult:
     ok: bool | None
     error: str | None = None
     retryable: bool = False
+    outcome: EmailOutcome | None = None
 
 
 class Dispatcher(Protocol):
@@ -123,14 +124,15 @@ class EmailDispatcher:
         title, body, url = _render_content(
             notification.content, recipient.user, ctx, app_profile_fallback=True,
         )
-        _send_email(
+        outcomes = _send_email(
             title=title,
             body=body,
             url=url,
             users=[recipient.user],
             bypass_preference_check=True,
         )
-        return DeliveryResult(ok=True)
+        outcome = outcomes.get(recipient.user.id, EmailOutcome.NOT_ATTEMPTED)
+        return DeliveryResult(ok={EmailOutcome.ACCEPTED: True, EmailOutcome.FAILED: False}.get(outcome), outcome=outcome)
 
 
 class PushDispatcher:
@@ -195,25 +197,25 @@ def get_dispatcher(channel: str) -> Dispatcher | None:
     return _DISPATCHERS.get(channel)
 
 
-def dispatch(channel: str, *, notification, recipient, ctx=None) -> bool | None:
-    """Dispatch one channel, returning success, failure, or pending-stub status."""
+def dispatch_result(channel: str, *, notification, recipient, ctx=None) -> DeliveryResult:
+    """Dispatch and retain the channel's detailed outcome."""
 
     dispatcher = get_dispatcher(channel)
     if dispatcher is None:
         logger.warning("Notification %s has no dispatcher for channel %s", notification.pk, channel)
-        return False
+        return DeliveryResult(False)
 
     for attempt in range(_MAX_DELIVERY_ATTEMPTS):
         try:
             result = dispatcher.deliver(notification, recipient, ctx)
         except Exception:
             logger.exception("Notification %s dispatch failed for %s", notification.pk, channel)
-            return False
+            return DeliveryResult(None, outcome=EmailOutcome.UNCERTAIN) if channel == "email" else DeliveryResult(False)
 
         # Retry applies only to an explicit ok=False, retryable=True transient failure.
         # ok=True (sent) and ok=None (pending stub, e.g. todo/popup) both return immediately.
         if result.ok is not False or not result.retryable:
-            return result.ok
+            return result
         if attempt + 1 < _MAX_DELIVERY_ATTEMPTS:
             logger.warning(
                 "Notification %s dispatch retry %s/%s for %s: %s",
@@ -224,4 +226,9 @@ def dispatch(channel: str, *, notification, recipient, ctx=None) -> bool | None:
                 result.error or "retryable failure",
             )
 
-    return False
+    return result
+
+
+def dispatch(channel: str, *, notification, recipient, ctx=None) -> bool | None:
+    """Legacy success/failure/pending interface."""
+    return dispatch_result(channel, notification=notification, recipient=recipient, ctx=ctx).ok

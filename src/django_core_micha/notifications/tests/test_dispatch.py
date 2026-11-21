@@ -390,3 +390,30 @@ def test_push_dispatcher_hides_preview_body_but_keeps_the_sender_name_in_the_tit
     assert sent[0]["title"] == "Jamie Lee"
     assert "sensitive body text" not in sent[0]["body"]
     assert "Jamie Lee" not in sent[0]["body"]
+
+
+@pytest.mark.django_db
+def test_dcm_mail_1_dispatch_reports_transport_outcomes_and_isolates_recipients(monkeypatch):
+    import smtplib
+    from django_core_micha.notifications.delivery import EmailOutcome, _send_email
+
+    users = [get_user_model().objects.create_user(username=f"mail-{i}", email=f"{i}@example.test") for i in range(5)]
+    notification, _ = Notification.objects.get_or_create_by_dedup(
+        notification_type="mail-result", category="system", content={"title_key": "Hello {name}", "body_key": "Body", "params": {"name": "Ada"}},
+    )
+    recipients = [NotificationRecipient.objects.create(notification=notification, user=user) for user in users]
+    calls = []
+    def send(message, **kwargs):
+        calls.append((message.to[0], message.subject))
+        i = int(message.to[0].split("@")[0])
+        if i == 2:
+            raise smtplib.SMTPRecipientsRefused({})
+        if i == 3:
+            raise TimeoutError("lost response")
+        return 0 if i == 1 else 1
+    monkeypatch.setattr("django_core_micha.notifications.delivery.EmailMultiAlternatives.send", send)
+    results = [dispatch_module.dispatch_result("email", notification=notification, recipient=r).outcome for r in recipients[:4]]
+    assert results == [EmailOutcome.ACCEPTED, EmailOutcome.FAILED, EmailOutcome.FAILED, EmailOutcome.UNCERTAIN]
+    assert calls[-1][0] == users[3].email
+    assert all(subject == "Hello Ada" for _, subject in calls)
+    assert _send_email(title="x", body="y", url=None, users=[users[4]])[users[4].id] == EmailOutcome.NOT_ATTEMPTED

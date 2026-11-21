@@ -295,6 +295,7 @@ class NotificationDelivery(models.Model):
     channel = models.CharField(max_length=16)
     status = models.CharField(max_length=16, default="pending")
     retries = models.PositiveSmallIntegerField(default=0)
+    claim_token = models.UUIDField(null=True, blank=True)
     digest_threshold = models.CharField(max_length=8, null=True, blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -125,8 +125,21 @@ Before handing off, identify the exact provider and digest entry points that the
 
 ## Completion
 
-Implementation, review, contract verification and release evidence are pending.
+Landed as django-core-micha 3.41.0 (migration 0011).
+
+Tests: notification suite 185 passed, 2 skipped (host pytest, SQLite).
+
+Review: round 1 plus one closing round, five lenses (envelope, regression, duplication, tests, security). Round 1 findings were fixed in scope (digest body from still-eligible occurrences, claim-token guard, real email outcome persistence). The closing round raised no blocker and no security finding.
+
+Carried to the register (not blockers):
+- Digest still gates on the general email opt-in and does not re-evaluate the todo/email resolver or provider policy and lead time after claiming.
+- Concurrency tests acquire claims sequentially (SQLite cannot run true concurrent writers); a PostgreSQL concurrent test is missing.
+- Matrix endpoint is tested through the view, not the URL route; only one German label is asserted.
+- Default feed returns `previous: null` (keyset cursor); backward navigation needs the page-number mode.
+- `is_digest_email_enabled` overlaps `is_channel_enabled(user, "todo", "email")`.
+
+Release evidence: published by the existing workflow; version recorded in the register.
 
 ## Gate record
 
-On 2026-11-21 the operator requested preparation of the combined Core package alongside JG-NOTIF-29. Gate #1 for code implementation is pending.
+On 2026-11-21 the operator requested preparation of the combined Core package alongside JG-NOTIF-29. Gate #1 approved by the operator 2026-11-21 (Core package, Tier 3, together with UCM-NOTIF-16 and JG-NOTIF-29).

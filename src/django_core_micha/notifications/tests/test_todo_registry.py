@@ -54,3 +54,9 @@ def test_unknown_notification_mode_is_rejected():
             mode="bogus",
             resolution="state-resolved",
         )
+
+def test_policy_and_retention_are_opt_in():
+    from django_core_micha.notifications.todo.registry import TodoPolicy
+    assert TodoSeed("type", None, {}).policy is None
+    assert TodoPolicy(lead_days=0).lead_days == 0
+    assert not TodoTypeConfig(type_key="type").retain_stale_overlays

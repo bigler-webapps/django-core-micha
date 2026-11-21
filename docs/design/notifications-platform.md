@@ -469,3 +469,27 @@ without first checking that a producer exists.
 
 hram/spesix consume from P1 onward as their **first** notification implementation (they never diverge —
 the reason for building the contract now).
+
+
+### Personal channel matrix
+
+Hosts opt in by calling `register_editable_channel_pair(category, channel, label_key)`
+from `notifications.prefs` during application registration. No declarations yields an
+empty matrix and leaves existing channel behavior intact. For jg-ferien, declare
+`(messaging, email)`, `(messaging, push)` and `(todo, email)` with registered
+notification text keys. Labels resolve in the recipient language, falling back to the
+key. Registration does not subscribe users or determine recipient eligibility.
+
+Authenticated `GET /api/notifications/preferences/channel-matrix/` returns
+`{"results": [{"category": "todo", "channel": "email", "label_key": "...",
+"label": "...", "choice": "inherit", "effective_enabled": false}]}`.
+`PATCH` to the same URL accepts exactly `category`, `channel`, and `choice`
+(`inherit`, `enabled`, or `disabled`) and returns the updated row. `inherit` removes
+the account's override. Undeclared pairs and extra fields are rejected. Effective
+values use the existing override, channel default, live legacy opt-in, then built-in
+default precedence. Push subscription availability is separate.
+
+Digest integrations can call `is_digest_email_enabled(user)` from `notifications.prefs`
+to resolve the `todo`/`email` preference. This is a preference decision only; the
+caller must independently enforce eligibility and applicable transactional or critical
+mail policy. Existing callers retain their current behavior until they adopt this seam.

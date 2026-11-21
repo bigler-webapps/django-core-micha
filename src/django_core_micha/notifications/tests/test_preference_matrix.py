@@ -88,3 +88,74 @@ def test_0003_migration_preserves_legacy_channel_behavior_without_seeding():
         # That silently broke every other test needing anything past 0003 whenever
         # this test happened to run first in the session.
         call_command("migrate", run_syncdb=True, verbosity=0)
+
+
+@pytest.mark.django_db
+def test_declared_matrix_updates_resets_and_tracks_live_fallback():
+    from rest_framework.test import APIRequestFactory, force_authenticate
+
+    from django_core_micha.notifications import prefs
+    from django_core_micha.notifications.models import NotificationPreference
+    from django_core_micha.notifications.text_registry import register_notification_text
+    from django_core_micha.notifications.views import ChannelMatrixView
+
+    class Client:
+        """Calls the view directly (the test settings define no URL conf); ``user=None`` is anonymous."""
+
+        user = None
+
+        def _call(self, method, url, data=None):
+            factory = APIRequestFactory()
+            request = getattr(factory, method)(url, data, format="json") if data is not None else getattr(factory, method)(url)
+            if self.user is not None:
+                force_authenticate(request, user=self.user)
+            response = ChannelMatrixView.as_view()(request)
+            response.json = lambda: response.data
+            return response
+
+        def get(self, url):
+            return self._call("get", url)
+
+        def patch(self, url, data, format=None):
+            return self._call("patch", url, data)
+
+    original = prefs._EDITABLE_CHANNEL_PAIRS.copy()
+    prefs._EDITABLE_CHANNEL_PAIRS.clear()
+    try:
+        user = make_user("matrix-api")
+        other = make_user("matrix-other")
+        client = Client()
+        client.user = user
+        url = "/notifications/preferences/channel-matrix/"
+        assert client.get(url).json() == {"results": []}
+        prefs.register_editable_channel_pair("messaging", "email", "matrix.email")
+        prefs.register_editable_channel_pair("messaging", "push", "matrix.push")
+        prefs.register_editable_channel_pair("todo", "email", "matrix.digest")
+        register_notification_text("matrix.email", {"de": "Nachrichten"})
+        NotificationPreference.objects.create(user=user, email_opt_in=False)
+        NotificationCategoryChannelPreference.set_category_channel(other, "messaging", "email", True)
+        rows = client.get(url).json()["results"]
+        assert rows[0] == {"category": "messaging", "channel": "email", "label_key": "matrix.email",
+                           "label": "Nachrichten", "choice": "inherit", "effective_enabled": False}
+        payload = {"category": "messaging", "channel": "email", "choice": "enabled"}
+        response = client.patch(url, payload, format="json")
+        assert response.status_code == 200
+        assert response.json()["choice"] == "enabled" and response.json()["effective_enabled"] is True
+        assert prefs.is_channel_enabled(user, "todo", "email") is False
+        assert prefs.is_digest_email_enabled(user) is False
+        NotificationPreference.objects.filter(user=user).update(email_opt_in=True)
+        payload["choice"] = "disabled"
+        assert client.patch(url, payload, format="json").json()["effective_enabled"] is False
+        payload["choice"] = "inherit"
+        assert client.patch(url, payload, format="json").json()["effective_enabled"] is True
+        assert not NotificationCategoryChannelPreference.objects.filter(user=user).exists()
+        assert NotificationCategoryChannelPreference.objects.filter(user=other, enabled=True).exists()
+        assert prefs.is_digest_email_enabled(user) is True
+        for invalid in ({**payload, "user": other.pk}, {**payload, "category": "unknown"},
+                        {**payload, "choice": "invalid"}, {**payload, "channel": "unknown"}):
+            assert client.patch(url, invalid, format="json").status_code == 400
+        client.user = None
+        assert client.get(url).status_code in (401, 403)
+    finally:
+        prefs._EDITABLE_CHANNEL_PAIRS.clear()
+        prefs._EDITABLE_CHANNEL_PAIRS.update(original)

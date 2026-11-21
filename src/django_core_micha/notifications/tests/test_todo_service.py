@@ -236,3 +236,24 @@ def test_bulk_upserts_converge_when_rows_appear_in_the_race_window(monkeypatch):
     assert len(recipients) == 1
     assert Notification.objects.count() == 1
     assert NotificationRecipient.objects.count() == 1
+
+@pytest.mark.django_db
+def test_resolved_policy_controls_each_occurrence_and_count_without_override_queries():
+    from django_core_micha.notifications.todo.registry import TodoPolicy
+    from django_core_micha.notifications.todo.service import count_active_todos_for_user
+    user, first = make_user_and_widget()
+    second = Widget.objects.create(name="second")
+    now = timezone.now()
+    policies = [TodoPolicy(lead_days=3), TodoPolicy(lead_days=0)]
+    def provider(user, current):
+        return [TodoSeed("demo_todo", user, {"title": str(widget.pk)}, widget,
+                         due_base_resolver=lambda base: now + timedelta(days=2), policy=policy)
+                for widget, policy in zip([first, second], policies)]
+    register_provider(provider, TodoTypeConfig(type_key="demo_todo", due="start", remind_before="P5D"))
+    with CaptureQueriesContext(connection) as queries:
+        assert len(derive_active_todos(user, now)) == count_active_todos_for_user(user, now) == 1
+    assert not any("todooverride" in query["sql"].lower() for query in queries)
+    policies[:] = [TodoPolicy(enabled=False, lead_days=3), TodoPolicy(lead_days=3)]
+    rows = derive_active_todos(user, now)
+    assert len(rows) == count_active_todos_for_user(user, now) == 1
+    assert rows[0].notification.object_id == str(second.pk)

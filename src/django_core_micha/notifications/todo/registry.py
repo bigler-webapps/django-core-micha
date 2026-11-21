@@ -5,8 +5,20 @@ from typing import Any, Callable, Iterable
 
 
 @dataclass(frozen=True)
+class TodoPolicy:
+    """App-resolved policy for a seed; lead_days=None uses the type default.
+
+    Resolve policy in the provider, preferably in batches, before emitting seeds.
+    A zero lead is meaningful and does not fall back to an override.
+    """
+
+    enabled: bool = True
+    lead_days: int | None = None
+
+
+@dataclass(frozen=True)
 class TodoSeed:
-    """One provider-emitted candidate todo before visibility/override resolution."""
+    """One candidate. Use a stable persisted notifiable per occurrence for independent state."""
 
     type_key: str
     recipient: Any
@@ -15,6 +27,7 @@ class TodoSeed:
     scope: Any | None = None
     due_base_resolver: Callable[[str], Any] | None = None
     has_due_time: bool = False
+    policy: TodoPolicy | None = None
 
 
 @dataclass(frozen=True)
@@ -28,6 +41,7 @@ class TodoTypeConfig:
     persist_until_done: bool = False
     always_visible: bool = False
     lead_adjustable: bool = False
+    retain_stale_overlays: bool = False
 
 
 TodoProviderFn = Callable[[Any, datetime], Iterable[TodoSeed]]

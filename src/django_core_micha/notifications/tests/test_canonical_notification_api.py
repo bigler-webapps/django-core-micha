@@ -1,4 +1,6 @@
 from datetime import timedelta
+from urllib.parse import parse_qs, urlparse
+from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -11,7 +13,7 @@ from django_core_micha.notifications.serializers import CanonicalNotificationSer
 from django_core_micha.notifications.todo import registry
 from django_core_micha.notifications.todo.registry import TodoSeed, TodoTypeConfig
 from django_core_micha.notifications.types import NotificationType, _REGISTRY, register_notification_type
-from django_core_micha.notifications.views import CanonicalInboxView, CanonicalMarkView, CanonicalUnreadCountView
+from django_core_micha.notifications.views import CanonicalInboxView, CanonicalMarkView, CanonicalUnreadCountView, CanonicalMarkAllSeenView
 from tests.testapp.models import Widget
 
 
@@ -70,6 +72,61 @@ def get_unread_count(user):
     request = APIRequestFactory().get("/notifications/feed/unread-count/")
     force_authenticate(request, user=user)
     return CanonicalUnreadCountView.as_view()(request)
+
+
+@pytest.mark.django_db
+def test_feed_continuation_keeps_tied_rows_stable_when_new_rows_arrive():
+    user = make_user("continuation")
+    now = timezone.now()
+    rows = [make_recipient(user, suffix=f"tie-{i}", created_at=now) for i in range(25)]
+    emissions = {"Task"}
+    register_toggleable_todo_provider(emissions, {"Task": Widget.objects.create(name="Task")})
+    first = get_feed(user)
+    assert first.data["capabilities"] == {"mark_all_seen": True}
+    assert len(first.data["results"]) == 20
+    make_recipient(user, suffix="new-arrival", created_at=now + timedelta(seconds=1))
+    cursor = parse_qs(urlparse(first.data["next"]).query)["cursor"][0]
+    second = get_feed(user, cursor=cursor)
+    combined = first.data["results"] + second.data["results"]
+    assert second.data["next"] is None
+    assert len(combined) == 26
+    tied = [r["id"] for r in combined if r["id"] in {row.pk for row in rows}]
+    assert tied == sorted(tied, reverse=True)
+    assert len({r["id"] for r in combined}) == 26
+    assert get_feed(user, page=1).status_code == 200
+
+
+@pytest.mark.django_db
+def test_mark_all_seen_scopes_eligible_rows_and_emits_one_invalidation(django_capture_on_commit_callbacks):
+    user = make_user("bulk-owner")
+    other = make_user("bulk-other")
+    rows = [make_recipient(user, suffix=f"bulk-{i}") for i in range(23)]
+    other_row = make_recipient(other, suffix="bulk-other")
+    dismissed = make_recipient(user, suffix="bulk-dismissed", dismissed_at=timezone.now())
+    done = make_recipient(user, suffix="bulk-done", done_at=timezone.now())
+    register_notification_type(NotificationType(key="bulk-hidden", category="system", mode="event", resolution="user-done", active=True, passive=False))
+    hidden = make_recipient(user, suffix="bulk-hidden", notification_type="bulk-hidden")
+    register_toggleable_todo_provider({"Task"}, {"Task": Widget.objects.create(name="Bulk task")})
+    original_update = NotificationRecipient.objects.all().update
+    queryset_type = type(NotificationRecipient.objects.all())
+    def update_with_arrival(queryset, **kwargs):
+        make_recipient(user, suffix="bulk-arrival")
+        return original_update.__func__(queryset, **kwargs)
+    request = APIRequestFactory().post("/notifications/feed/mark-all-seen/", {}, format="json")
+    force_authenticate(request, user=user)
+    with patch.object(queryset_type, "update", update_with_arrival), patch.object(notification_views, "push_to_users") as push:
+        with django_capture_on_commit_callbacks(execute=True):
+            response = CanonicalMarkAllSeenView.as_view()(request)
+        assert response.data == {"updated": 24, "unread_count": 1}
+        push.assert_called_once_with([user], {"type": "notification.inbox_changed", "envelope": "notification"})
+    for row in [other_row, dismissed, done, hidden]:
+        row.refresh_from_db()
+        assert row.seen_at is None
+    assert NotificationRecipient.objects.filter(pk__in=[r.pk for r in rows], seen_at__isnull=False).count() == 23
+    second_request = APIRequestFactory().post("/notifications/feed/mark-all-seen/", {}, format="json")
+    force_authenticate(second_request, user=user)
+    assert CanonicalMarkAllSeenView.as_view()(second_request).data == {"updated": 1, "unread_count": 0}
+    assert CanonicalMarkAllSeenView.as_view()(second_request).data == {"updated": 0, "unread_count": 0}
 
 
 def register_toggleable_todo_provider(emissions, widgets):

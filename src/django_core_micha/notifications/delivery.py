@@ -1,6 +1,8 @@
 """Domain-agnostic WebSocket, browser-push, and email notification delivery."""
 import json
 import logging
+import smtplib
+from enum import Enum
 from html import escape
 
 from django.conf import settings
@@ -17,6 +19,14 @@ except ImportError:  # pragma: no cover - dependency is optional at import time
 
 
 logger = logging.getLogger(__name__)
+
+
+class EmailOutcome(str, Enum):
+    ACCEPTED = "accepted"
+    FAILED = "failed"
+    NOT_ATTEMPTED = "not_attempted"
+    UNCERTAIN = "uncertain"
+
 
 # NOTIF-13 envelope discriminator: identifies this domain's WS payloads so a
 # Layer-1 realtime primitive (ucm's subscribe(envelope, handler)) can route a
@@ -114,6 +124,7 @@ def _send_email(*, title, body, url, users, bypass_preference_check=False):
     router deliberately forced past their opt-out for a critical notification.
     """
     recipients = list(users or [])
+    outcomes = {user.id: EmailOutcome.NOT_ATTEMPTED for user in recipients}
     if bypass_preference_check:
         opted_in_ids = {user.id for user in recipients}
     else:
@@ -125,7 +136,7 @@ def _send_email(*, title, body, url, users, bypass_preference_check=False):
             )
         except Exception as exc:
             logger.warning("Could not resolve email notification preferences: %s", exc)
-            return
+            return outcomes
 
     full_url = _full_url(url)
     text_body = f"{body}\n\n{full_url}".strip() if full_url else body
@@ -145,9 +156,15 @@ def _send_email(*, title, body, url, users, bypass_preference_check=False):
                 to=[user.email],
             )
             message.attach_alternative(html_body, "text/html")
-            message.send(fail_silently=False)
+            count = message.send(fail_silently=False)
+            outcomes[user.id] = EmailOutcome.ACCEPTED if count else EmailOutcome.FAILED
+        except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused, smtplib.SMTPDataError) as exc:
+            outcomes[user.id] = EmailOutcome.FAILED
+            logger.warning("Email notification rejected for user %s: %s", user.id, exc)
         except Exception as exc:
-            logger.warning("Email notification failed for user %s: %s", user.id, exc)
+            outcomes[user.id] = EmailOutcome.UNCERTAIN
+            logger.warning("Email notification outcome uncertain for user %s: %s", user.id, exc)
+    return outcomes
 
 
 def _send_push(*, title, body, url, users, bypass_preference_check=False):

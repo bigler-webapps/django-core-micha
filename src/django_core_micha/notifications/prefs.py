@@ -52,3 +52,30 @@ def is_channel_enabled(user, category, channel) -> bool:
     if channel not in {"email", "push"}:
         return True
     return False
+
+
+_EDITABLE_CHANNEL_PAIRS: dict[tuple[str, str], str] = {}
+
+
+def register_editable_channel_pair(category: str, channel: str, label_key: str) -> None:
+    """Declare a pair offered by the host application, with its translation key."""
+    if not isinstance(category, str) or not category or len(category) > 32:
+        raise ValueError("Invalid category.")
+    if channel not in {"email", "push", "chip", "todo", "popup"}:
+        raise ValueError("Invalid channel.")
+    if not isinstance(label_key, str) or not label_key:
+        raise ValueError("A label key is required.")
+    _EDITABLE_CHANNEL_PAIRS[(category, channel)] = label_key
+
+
+def iter_editable_channel_pairs() -> dict[tuple[str, str], str]:
+    """Return the declared pairs; no declarations means no editable pairs."""
+    return dict(_EDITABLE_CHANNEL_PAIRS)
+
+
+def is_digest_email_enabled(user) -> bool:
+    """Resolve the personal preference for todo digest email, not eligibility.
+
+    Callers must separately apply their recipient and transactional mail policies.
+    """
+    return is_channel_enabled(user, "todo", "email")
