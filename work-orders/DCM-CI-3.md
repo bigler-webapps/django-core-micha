@@ -21,3 +21,7 @@ Record independent release review, named test evidence, version, landing and pub
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-21 (chat approval for the CI test extra, Core 3.41.2, inclusion of planning commit bf6d243, and the eventual Cockpit pin).
+
+## Completion
+
+Release preparation commit `a1a9c0d` adds the test extra to Core CI and sets 3.41.2. The publish workflow already installs that extra. The full supported Core backend run passed 1,999 tests with eight skipped after installing the declared extras. The DCM-DX-16 focused run passed 117 isolation and 10 launcher tests. Independent release review reported no findings across envelope, regression, duplication, tests and security, using codex/gpt-6.1-terra and codex/gpt-6-luna. Publication and Cockpit acceptance are pending.

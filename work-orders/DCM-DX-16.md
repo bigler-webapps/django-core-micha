@@ -25,3 +25,7 @@ Record the scoped Core test results, independent envelope, regression, duplicati
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-21 (chat approval for fixed pgvector support and existing isolation proof coverage). The operator also approved disjoint edits alongside the uncommitted DCM-DX-15 diagnostic and register work.
+
+## Completion
+
+Implementation commit `7ae4894`. `tests.py` passed 117 isolation tests and 10 launcher tests on the corrected tree. The first independent pass found one missing negative activation assertion. The closing envelope, regression, duplication, tests and security lenses reported no findings. Codex used gpt-6.1-terra for envelope, regression, tests and security and gpt-6-luna for duplication. The release and Cockpit evidence are tracked by DCM-CI-3 and CP-CI-2.
