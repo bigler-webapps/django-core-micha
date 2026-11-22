@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.41.4] — 2026-11-22
+
+- DCM-DX-15 reports fixed, redacted categories for isolated container startup and migration failures while preserving generic diagnostics for unknown output.
+
 ## [3.41.3] — 2026-11-22
 
 - DCM-DX-17: the isolated local test-management proxy now listens with a backlog of 128 instead of the socketserver default of 5, so a browser's burst of parallel asset requests is no longer refused.

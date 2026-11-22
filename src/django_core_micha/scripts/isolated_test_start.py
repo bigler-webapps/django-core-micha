@@ -403,6 +403,11 @@ def validate_compose_file(path: Path, *, identity="innoservice", stop_only=False
 
 
 _DIAGNOSTIC_PATTERNS = (
+    ("invalid interpolation format", "Compose rejected a configuration interpolation."),
+    ("additional properties are not allowed", "Compose rejected an unsupported configuration property."),
+    ("refers to undefined service", "Compose references an undefined service."),
+    ("unable to prepare context: path", "Compose cannot access the image build context."),
+    ("cannot connect to the docker daemon", "Docker daemon is unavailable."),
     ("address pools have been fully subnetted", "Docker has no free local network address pool."),
     ("could not find an available, non-overlapping", "Docker has no free local network address pool."),
     ("pool overlaps", "The isolated Docker network overlaps an existing network."),
@@ -427,30 +432,64 @@ _DOCKER_ERROR_CATEGORIES = (
     ("no such", "not-found"), ("invalid", "invalid"), ("read-only", "read-only"),
     ("driver", "driver"), ("container", "container"), ("image", "image"),
 )
+_MIGRATION_DIAGNOSTIC_PATTERNS = (
+    (re.compile(r"(?m)^(?:modulenotfounderror|importerror):"), "A Python module could not be imported during migration."),
+    (re.compile(r"(?m)^django\.core\.exceptions\.improperlyconfigured:"), "Django configuration prevented migration startup."),
+    (re.compile(r"(?m)^django\.core\.exceptions\.appregistrynotready:"), "The Django app registry was not ready during migration startup."),
+    (re.compile(r"(?m)^(?:django\.core\.management\.base\.)?systemcheckerror:"), "Django system checks failed during migration startup."),
+    (re.compile(r"(?m)^(?:syntaxerror|indentationerror|taberror):"), "A Python syntax error prevented migration startup."),
+    (re.compile(r"(?m)^django\.db\.migrations\.exceptions\.inconsistentmigrationhistory:"), "Migration history is inconsistent."),
+    (re.compile(r"(?m)^django\.db\.migrations\.exceptions\.nodenotfounderror:"), "A migration dependency is missing."),
+    (re.compile(r"(?m)^django\.db\.migrations\.exceptions\.circulardependencyerror:"), "Migration dependencies contain a cycle."),
+    (re.compile(r"(?m)^django\.db\.utils\.operationalerror:"), "The migration encountered a database operational error."),
+    (re.compile(r"(?m)^django\.db\.utils\.integrityerror:"), "The migration encountered a database integrity error."),
+    (re.compile(r"(?m)^django\.db\.utils\.programmingerror:"), "The migration encountered a database schema error."),
+    (re.compile(r"(?m)^commanderror: conflicting migrations detected;"), "Migration branches conflict."),
+)
+_SYSTEM_CHECK_ERROR = re.compile(r"(?m)^(?:django\.core\.management\.base\.)?systemcheckerror:")
+_SYSTEM_CHECK_CODE = re.compile(r": \(([a-z][a-z0-9_]{0,63})\.[cewid][0-9]{3}\)")
+_SYSTEM_CHECK_NAMESPACES = frozenset(("fields", "models", "admin", "urls", "security", "staticfiles"))
 
 
-def _run_private(command, *, cwd, env, timeout=60, heartbeat=False):
+def _run_private(command, *, cwd, env, timeout=60, heartbeat=False, migration=False):
     """Run without exposing Compose output, runtime configuration or credentials."""
     try:
         process = subprocess.Popen(command, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace", shell=False)
-        diagnostic = {"message": None, "daemon_error": False, "categories": set()}
+        diagnostic = {"message": None, "migration": None, "daemon_error": False, "categories": set(),
+                      "system_check": False, "check_categories": set()}
 
         def inspect_output():
             tail = ""
+            tail_at_line_start = True
             while True:
                 chunk = process.stdout.read(4096)
                 if not chunk:
                     return
                 sample = (tail + chunk).lower()
+                migration_sample = sample if tail_at_line_start else "\0" + sample
+                if migration:
+                    diagnostic["system_check"] |= bool(_SYSTEM_CHECK_ERROR.search(migration_sample))
+                    for match in _SYSTEM_CHECK_CODE.finditer(sample):
+                        namespace = match.group(1)
+                        diagnostic["check_categories"].add(namespace if namespace in _SYSTEM_CHECK_NAMESPACES else "unknown")
+                if migration and diagnostic["migration"] is None:
+                    diagnostic["migration"] = next((message for pattern, message in _MIGRATION_DIAGNOSTIC_PATTERNS if pattern.search(migration_sample)), None)
                 if diagnostic["message"] is None:
-                    diagnostic["message"] = next((message for pattern, message in _DIAGNOSTIC_PATTERNS if pattern in sample), None)
+                    if re.search(r"required variable [^\s:]+ is missing a value", sample):
+                        diagnostic["message"] = "Compose requires a missing or empty configuration value."
+                    else:
+                        diagnostic["message"] = next((message for pattern, message in _DIAGNOSTIC_PATTERNS if pattern in sample), None)
                 if "error response from daemon" in sample:
                     diagnostic["daemon_error"] = True
-                    sample = sample[sample.rfind("error response from daemon"):]
+                    daemon_sample = sample[sample.rfind("error response from daemon"):]
+                else:
+                    daemon_sample = sample
                 if diagnostic["daemon_error"]:
-                    diagnostic["categories"].update(label for pattern, label in _DOCKER_ERROR_CATEGORIES if pattern in sample)
+                    diagnostic["categories"].update(label for pattern, label in _DOCKER_ERROR_CATEGORIES if pattern in daemon_sample)
+                if len(sample) > 256:
+                    tail_at_line_start = sample[-257] == "\n"
                 tail = sample[-256:]
 
         reader = threading.Thread(target=inspect_output, daemon=True)
@@ -468,6 +507,10 @@ def _run_private(command, *, cwd, env, timeout=60, heartbeat=False):
         reader.join(timeout=5)
         if process.returncode and diagnostic["message"]:
             print(f"[WARN] {diagnostic['message']}", flush=True)
+        if process.returncode and diagnostic["migration"]:
+            print(f"[WARN] {diagnostic['migration']}", flush=True)
+        if process.returncode and diagnostic["system_check"] and diagnostic["check_categories"]:
+            print(f"[WARN] Django system check categories: {', '.join(sorted(diagnostic['check_categories']))}.", flush=True)
         if process.returncode and diagnostic["categories"]:
             print(f"[WARN] Docker error categories: {', '.join(sorted(diagnostic['categories']))}.", flush=True)
         return process.returncode
@@ -534,7 +577,7 @@ def _finish_start(project, instance, compose, cwd, env, *, identity, renew=False
             raise IsolationError("The isolated media volume could not be prepared.")
     if _run_private(compose + ["exec", "-T", "backend", "python", "-m", "django_core_micha.test_management.isolated_entrypoint", "install-proof", database_ip] + ([database] if database != "postgresql" else []), cwd=cwd, env=env):
         raise IsolationError("The database isolation preflight failed.")
-    if _run_private(compose + ["exec", "-T", "backend", "python", "manage.py", "migrate", "--noinput"], cwd=cwd, env=env, timeout=300, heartbeat=True):
+    if _run_private(compose + ["exec", "-T", "backend", "python", "manage.py", "migrate", "--noinput"], cwd=cwd, env=env, timeout=300, heartbeat=True, migration=True):
         raise IsolationError("The isolated database migration failed.")
     if renew and _run_private(compose + ["exec", "-T", "backend", "python", "manage.py", "renew_test_controller"], cwd=cwd, env=env):
         raise IsolationError("The isolated controller could not be renewed.")
