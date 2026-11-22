@@ -87,3 +87,5 @@
   - a path outside the allow list still gets 404.
 
 ## Gate record
+
+Gate #1 approved by the operator 2026-11-22 (AskUserQuestion: "Freigeben + Übergabetext").
