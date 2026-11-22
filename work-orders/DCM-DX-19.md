@@ -103,4 +103,4 @@ Pending implementation and independent evidence.
 
 ## Gate record
 
-On 2026-11-22 the operator authorized preparing this separate Tier 3 WO. Implementation handover awaits Gate #1.
+Gate #1 approved by the operator 2026-11-22 (explicit approval to record Gate #1 and start a dedicated Orchestrator chat for DCM-DX-19).
