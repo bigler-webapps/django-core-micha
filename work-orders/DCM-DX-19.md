@@ -102,7 +102,8 @@ The Orchestrator records scoped launcher and isolation evidence through tests.py
 The launcher implements the terminal operation, shared
 per-instance lifecycle locking, preflight ownership checks and a durable
 fail-closed interruption marker. The installed launcher is 3.41.4; the tested
-checkout is the 3.42.0 candidate and is not yet published. Part B: accurate;
+checkout is 3.42.0. Publish run 45067571331 passed, and PyPI confirmed 3.42.0
+on 2026-11-22. Part B: accurate;
 implementation additionally requires focused lifecycle modules, a launcher
 CLI test and opt-in proof configuration.
 
