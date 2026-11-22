@@ -43,3 +43,5 @@
 - The server class still binds only to `127.0.0.1`, and its error handler still writes nothing for a failing request.
 
 ## Gate record
+
+Gate #1 approved by the operator 2026-11-22 (AskUserQuestion: "Freigeben + Übergabetext").
