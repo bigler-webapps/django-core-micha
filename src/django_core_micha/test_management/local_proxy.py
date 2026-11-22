@@ -32,6 +32,7 @@ def compose_env(project, cwd):
 
 class QuietServer(ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 128
 
     def handle_error(self, request, client_address):
         # Request data and authentication cookies must never enter logs.

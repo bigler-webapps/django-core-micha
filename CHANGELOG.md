@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.41.3] — 2026-11-22
+
+- DCM-DX-17: the isolated local test-management proxy now listens with a backlog of 128 instead of the socketserver default of 5, so a browser's burst of parallel asset requests is no longer refused.
+
 ## [3.41.2] — 2026-11-21
 
 - DCM-DX-16 adds the `pgvector` database flavour for isolated local acceptance, using `pgvector/pgvector:pg18` and the PostgreSQL backend with the existing isolation proof checks.
