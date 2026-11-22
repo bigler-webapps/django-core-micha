@@ -6,6 +6,7 @@ until runtime inspection and the database preflight have also succeeded.
 
 from pathlib import Path
 from contextlib import contextmanager
+from functools import wraps
 import hashlib
 import json
 import ipaddress
@@ -27,6 +28,23 @@ import yaml
 
 class IsolationError(ValueError):
     pass
+
+
+def _serialized_lifecycle(function):
+    """Prevent competing launcher operations on the same instance."""
+    @wraps(function)
+    def invoke(cwd, project, inherited_env=None):
+        from .test_management_lock import LifecycleBusyError, instance_lock
+
+        try:
+            with instance_lock(project):
+                if function.__name__ in {"_start_instance_locked", "resume_isolated_instance", "stop_isolated_instance"}:
+                    from .test_management_disposal import ensure_not_disposing
+                    ensure_not_disposing(project)
+                return function(cwd, project, inherited_env)
+        except LifecycleBusyError as exc:
+            raise IsolationError(str(exc)) from exc
+    return invoke
 
 
 _IDENTITY = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
@@ -640,6 +658,12 @@ def start_isolated_instance(cwd: Path, inherited_env=None):
     _assert_local_docker(cwd, env)
     instance = uuid.uuid4()
     project = f"{identity}-tm-{instance.hex}"
+    return _start_instance_locked(cwd, project, (env, identity, instance, manifest))
+
+
+@_serialized_lifecycle
+def _start_instance_locked(cwd, project, inherited_env=None):
+    env, identity, instance, manifest = inherited_env
     env.update({
         "TEST_MANAGEMENT_IMAGE": consumer_image(identity, cwd),
         "TEST_MANAGEMENT_INSTANCE_ID": str(instance),
@@ -676,6 +700,7 @@ def start_isolated_instance(cwd: Path, inherited_env=None):
             raise
 
 
+@_serialized_lifecycle
 def resume_isolated_instance(cwd: Path, project: str, inherited_env=None):
     """Explicitly resume one stopped instance without taking over a live one."""
     cwd, identity = consumer(cwd)
@@ -715,6 +740,7 @@ def resume_isolated_instance(cwd: Path, project: str, inherited_env=None):
         raise
 
 
+@_serialized_lifecycle
 def stop_isolated_instance(cwd: Path, project: str, inherited_env=None):
     """Stop only the verified instance; preserve its data for explicit recovery."""
     # Stopping an owned runtime must remain possible after source/build changes.
@@ -736,3 +762,21 @@ def stop_isolated_instance(cwd: Path, project: str, inherited_env=None):
     if _run_private(command, cwd=cwd, env=env, timeout=60):
         raise IsolationError("The isolated instance could not be stopped.")
     print(f"[INFO] Stopped isolated instance: {project}", flush=True)
+
+
+@_serialized_lifecycle
+def dispose_isolated_instance(cwd: Path, project: str, inherited_env=None):
+    """Permanently dispose of exactly one fully verified local instance."""
+    from .test_management_disposal import dispose
+
+    cwd, identity, _, _, build_args = _load_consumer(cwd, stop_only=True, include_build_args=True)
+    project_instance(project, identity)
+    if build_args:
+        validate_compose_file(cwd / "docker-compose.test-management.yml", identity=identity, stop_only=True)
+    env = dict(os.environ if inherited_env is None else inherited_env)
+    if env.get("ENV_TYPE") and env["ENV_TYPE"].lower() != "local":
+        raise IsolationError("The caller environment is not local.")
+    env.pop("ENV_TYPE", None)
+    env.pop("COMPOSE_PROFILES", None)
+    _assert_local_docker(cwd, env)
+    return dispose(cwd, project, env, identity=identity)

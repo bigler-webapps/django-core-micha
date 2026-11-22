@@ -155,6 +155,28 @@ explicit recovery before further changes; recovery verifies owned resources.
 Stopping or resuming does not delete volumes. Local results do not constitute
 staging acceptance and do not bypass application MFA.
 
+To end the lifetime of a single disposable instance and permanently remove its
+dedicated database and media data, run `run-dev --test-management
+--test-management-dispose <instance-handle>` from its owning checkout. The
+launcher requires the same consumer declaration and a local Docker daemon. It
+checks both containers, their source and data mounts, the exclusive network,
+the volume owners and every container using each volume before removing any
+resource. It preserves source files, build outputs, images and other instances.
+It refuses inconsistent, shared, foreign or unverifiable resources.
+
+Start, stop, resume and disposal use a per-instance OS lock at a machine-wide
+local path. A launcher that cannot access this lock refuses the operation. Use
+the same current launcher version for every lifecycle operation; direct Docker
+changes and older launchers are outside this coordination. The launcher records
+a secret-free disposal marker beside the lock before the first removal: under
+the public documents `django-core-micha-test-management` directory on Windows,
+or `/tmp/django-core-micha-test-management` on POSIX systems.
+If the process is interrupted, or if ownership changes, later lifecycle actions
+refuse the instance; the marker and remaining Docker resources support diagnosis.
+No automatic retry or resource discovery expands the original disposal target.
+Successful repeated disposal reports the earlier completion without removing
+anything. Ordinary stop keeps its recovery contract until explicit disposal.
+
 ## Local password recovery
 
 DCM 3.34.0 extends the declared DCM-DX-8 consumer contract with a private,

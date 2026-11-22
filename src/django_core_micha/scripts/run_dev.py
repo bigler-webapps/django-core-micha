@@ -799,6 +799,11 @@ def main():
         metavar="INSTANCE",
         help="Stop a verified isolated instance without deleting its data.",
     )
+    parser.add_argument(
+        "--test-management-dispose",
+        metavar="INSTANCE",
+        help="Permanently dispose of one verified isolated instance and its data.",
+    )
 
     args = parser.parse_args()
 
@@ -843,18 +848,20 @@ def main():
         os.environ["MEDIA_VOLUME_NAME"] = f"{project_name}_media_volume"
         os.environ["EXCEL_VOLUME_NAME"] = f"{project_name}_excel_volume"
 
-    if (args.test_management_resume or args.test_management_stop) and not args.test_management:
+    if (args.test_management_resume or args.test_management_stop or args.test_management_dispose) and not args.test_management:
         parser.error("Test-management instance operations require --test-management.")
-    if args.test_management_resume and args.test_management_stop:
-        parser.error("Choose either test-management resume or stop.")
+    if sum(bool(value) for value in (args.test_management_resume, args.test_management_stop, args.test_management_dispose)) > 1:
+        parser.error("Choose only one test-management instance operation.")
     if args.test_management:
         if (args.edge or args.env or args.vite or args.watch or args.spool or args.compose_files or
                 args.compose_project_name or args.celery or args.java or args.migrate or args.makemigrations or args.translate or
                 args.refresh or args.refresh_deps):
             parser.error("Test-management startup cannot be combined with other modes or maintenance options.")
-        from django_core_micha.scripts.isolated_test_start import IsolationError, resume_isolated_instance, start_isolated_instance, stop_isolated_instance
+        from django_core_micha.scripts.isolated_test_start import IsolationError, dispose_isolated_instance, resume_isolated_instance, start_isolated_instance, stop_isolated_instance
         try:
-            if args.test_management_stop:
+            if args.test_management_dispose:
+                dispose_isolated_instance(BASE_DIR, args.test_management_dispose)
+            elif args.test_management_stop:
                 stop_isolated_instance(BASE_DIR, args.test_management_stop)
             elif args.test_management_resume:
                 resume_isolated_instance(BASE_DIR, args.test_management_resume)

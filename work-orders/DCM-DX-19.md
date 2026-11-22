@@ -99,7 +99,36 @@ The Orchestrator records scoped launcher and isolation evidence through tests.py
 
 ## Completion
 
-Pending implementation and independent evidence.
+The launcher implements the terminal operation, shared
+per-instance lifecycle locking, preflight ownership checks and a durable
+fail-closed interruption marker. The installed launcher is 3.41.4; the tested
+checkout is the 3.42.0 candidate and is not yet published. Part B: accurate;
+implementation additionally requires focused lifecycle modules, a launcher
+CLI test and opt-in proof configuration.
+
+Checkout-scoped `tests.py` evidence: launcher 91 passed, isolation 161 passed.
+The simulated tests cover refusal, running and stopped instances, interruption,
+contention, and preservation of another instance. These do not prove real data
+removal. On 2026-11-22 the operator approved the named two-instance local Docker
+proof. `tests.py --scope test-management-disposal-proof` passed 1 test with no
+skips. Beforehand, neither named instance had containers, volumes or a network.
+The proof wrote distinguishable database and media markers, stopped and resumed
+both instances, disposed of the first through the checkout launcher API and
+verified both markers of the second. Afterwards the first instance's containers,
+volumes and network were absent; the second instance's containers were stopped
+and its volumes and network remained. Host source and build inputs survived. The
+proof exercised the 3.42.0 checkout, not the globally installed 3.41.4 run-dev.
+The ordinary test scopes were corrected to import the checkout.
+
+Independent rounds 1 and 2 used codex/gpt-6.1-terra and codex/gpt-6-luna for
+envelope, regression, duplication, tests and security. They identified missing
+real proof, lock ownership, test isolation and coverage defects. Corrections
+after the closing review touch the previously reviewed lock, proof, tests and
+scope files; they received no further review. Round 3 independently reviewed
+only the newly included version and pytest-option files. Its envelope finding
+that disposal was missing is inapplicable to this explicitly limited payload.
+There are no accepted open review findings. BCO remains responsible for its own
+account, mailbox and expense lifecycles.
 
 ## Gate record
 

@@ -359,9 +359,24 @@ def test_test_management_stop_uses_isolated_launcher(monkeypatch, tmp_path):
     assert calls == [(tmp_path, project)]
 
 
+def test_test_management_dispose_uses_isolated_launcher(monkeypatch, tmp_path):
+    from django_core_micha.scripts import isolated_test_start
+    calls = []
+    project = "innoservice-tm-" + "a" * 32
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(run_dev.sys, "argv", ["run-dev", "--test-management", "--test-management-dispose", project])
+    monkeypatch.setattr(isolated_test_start, "dispose_isolated_instance", lambda cwd, name: calls.append((cwd, name)))
+    monkeypatch.setattr(run_dev, "collect_drift_warnings", lambda *args: pytest.fail("ordinary environment setup was reached"))
+    run_dev.main()
+    assert calls == [(tmp_path, project)]
+
+
 @pytest.mark.parametrize("flags", [
     ["--test-management-resume", "innoservice-tm-" + "a" * 32],
     ["--test-management-stop", "innoservice-tm-" + "a" * 32],
+    ["--test-management-dispose", "innoservice-tm-" + "a" * 32],
+    ["--test-management", "--test-management-dispose", "innoservice-tm-" + "a" * 32,
+     "--test-management-resume", "innoservice-tm-" + "a" * 32],
     ["--test-management", "--test-management-resume", "innoservice-tm-" + "a" * 32,
      "--test-management-stop", "innoservice-tm-" + "a" * 32],
     ["--test-management", "--migrate"],
