@@ -89,3 +89,7 @@
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-22 (AskUserQuestion: "Freigeben + Übergabetext").
+
+## Completion
+
+Dropped by the operator 2026-11-22 before implementation. The refusals came from the global `run-dev` still running django-core-micha 3.40.0, so the DCM-DX-17 backlog fix never reached acceptance runs. After the update to 3.41.4, hram F1 and F2 pass (HRAM-CI-26, hram@6c81ca3c). Reopen with fresh measurements if refusals recur.
