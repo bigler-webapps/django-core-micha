@@ -908,7 +908,10 @@ def test_run_turn_wires_refresh_execution_to_the_current_chat_and_user(monkeypat
 @pytest.mark.parametrize("driver", ["openai_api", "anthropic_api"])
 def test_provider_refreshes_authorized_datasets_after_repeated_app_queries(monkeypatch, driver):
     from dataclasses import replace
+    from django_core_micha.assistant import catalogue_activation
     from django_core_micha.assistant.drivers import anthropic_api, openai_api
+    # Synthetic actors have no database authorization context in this unit test.
+    monkeypatch.setattr(catalogue_activation, "groups_enabled", lambda: False)
     user, chat, turn, entry, pricing, state, observed, policy, fresh = _refresh_context(driver)
     _patch_provider_execution_accounting(monkeypatch, driver)
     client = _openai_tool_refresh_client(lookup_calls=2) if driver == "openai_api" else _AnthropicClient()
@@ -1012,7 +1015,9 @@ def test_provider_rechecks_dataset_policy_before_reusing_analysis(monkeypatch, d
 @pytest.mark.parametrize("scenario", ["deny", "revoke", "cancel"])
 def test_provider_refresh_fails_closed_for_denial_revocation_and_cancellation(monkeypatch, driver, scenario):
     from dataclasses import replace
+    from django_core_micha.assistant import catalogue_activation
     from django_core_micha.assistant.drivers import anthropic_api, openai_api
+    monkeypatch.setattr(catalogue_activation, "groups_enabled", lambda: False)
     user, chat, turn, entry, pricing, state, observed, policy, _fresh = _refresh_context(driver, scenario)
     _patch_provider_execution_accounting(monkeypatch, driver)
     cancel_event = asyncio.Event()
@@ -1063,7 +1068,9 @@ def test_provider_refresh_fails_closed_for_denial_revocation_and_cancellation(mo
 def test_anthropic_reuses_container_only_inside_analysis_and_deduplicates_billing(monkeypatch):
     from django_core_micha.assistant.drivers import anthropic_api
     from django_core_micha.assistant.drivers import base
+    from django_core_micha.assistant import catalogue_activation
     from django_core_micha.extraction import cost_guard
+    monkeypatch.setattr(catalogue_activation, "groups_enabled", lambda: False)
     client = _AnthropicClient()
     fixed_reservations, settled = [], []
     monkeypatch.setattr(base, "_reserve", lambda *args: None)

@@ -1,3 +1,5 @@
 from django.urls import path
 from .views import CatalogueView,AvailabilityView,ChatListCreateView,ChatDetailView,TurnsView,UserLimitView,AdminLimitView,AdminModelsView
+from .group_grant_views import ChatGroupGrantsView
 urlpatterns=[path("assistant/catalogue/",CatalogueView.as_view(),name="assistant-catalogue"),path("assistant/status/",AvailabilityView.as_view(),name="assistant-status"),path("assistant/limit/",UserLimitView.as_view(),name="assistant-limit"),path("assistant/admin/limit/",AdminLimitView.as_view(),name="assistant-admin-limit"),path("assistant/admin/models/",AdminModelsView.as_view(),name="assistant-admin-models"),path("assistant/chats/",ChatListCreateView.as_view(),name="assistant-chats"),path("assistant/chats/<uuid:chat_id>/",ChatDetailView.as_view(),name="assistant-chat"),path("assistant/chats/<uuid:chat_id>/turns/",TurnsView.as_view(),name="assistant-turns")]
+urlpatterns += [path("assistant/chats/<uuid:chat_id>/group-grants/", ChatGroupGrantsView.as_view(), name="assistant-chat-group-grants")]

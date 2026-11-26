@@ -5,6 +5,9 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from uuid import UUID
 
 from asgiref.sync import sync_to_async
 
@@ -138,17 +141,155 @@ async def call_with_budget(*, user_id, model, prompt_bytes, operation):
         raise
 
 
+def _same_model_instance(left, right, *, authorized_chat=False):
+    """Compare only fully loaded model state with safe, immutable field values."""
+    from django.db.models import JSONField, Model
+
+    if not isinstance(left, Model) or type(left) is not type(right):
+        return False
+    fields = left._meta.concrete_fields
+    names = {field.attname for field in fields}
+    extras = {"_state", "_authorized_actor"} if authorized_chat else {"_state"}
+    if (set(left.__dict__) != names | extras
+            or set(right.__dict__) != names | extras):
+        return False
+    ls, rs = left._state, right._state
+    if (ls.adding or rs.adding or ls.db is None or ls.db != rs.db
+            or left.pk is None or right.pk is None):
+        return False
+    if authorized_chat:
+        from ..models import AssistantChat
+        if type(left) is not AssistantChat:
+            return False
+        for chat, state in ((left, ls), (right, rs)):
+            actor = chat.__dict__["_authorized_actor"]
+            expected_cache = {"owner": actor} if chat.owner_id == getattr(actor, "pk", None) else {}
+            if (state.fields_cache.keys() != expected_cache.keys()
+                    or any(state.fields_cache[key] is not value for key, value in expected_cache.items())):
+                return False
+        if not _same_model_instance(left._authorized_actor, right._authorized_actor):
+            return False
+    elif ls.fields_cache or rs.fields_cache:
+        return False
+    safe_types = (str, bytes, int, float, bool, type(None), date, datetime, time, timedelta, Decimal, UUID)
+    def same_json(a, b, depth=0):
+        if depth > 32 or type(a) is not type(b):
+            return False
+        if type(a) in (str, int, float, bool, type(None)):
+            return a == b
+        if type(a) is list:
+            return len(a) == len(b) and all(same_json(x, y, depth + 1) for x, y in zip(a, b))
+        if type(a) is dict:
+            return (all(type(key) is str for key in a) and a.keys() == b.keys()
+                    and all(same_json(value, b[key], depth + 1) for key, value in a.items()))
+        return False
+
+    def same_field(field):
+        a, b = left.__dict__[field.attname], right.__dict__[field.attname]
+        if isinstance(field, JSONField):
+            return same_json(a, b)
+        return type(a) is type(b) and type(a) in safe_types and a == b
+
+    return all(same_field(field) for field in fields)
+
+
+def _same_safe_json(left, right):
+    """Compare bounded JSON captures without accepting credentials or opaque objects."""
+    remaining = [1000]
+    sensitive = re.compile(r"(?:password|passwd|secret|token|credential|api[_-]?key|authorization)", re.I)
+
+    def compare(a, b, depth):
+        remaining[0] -= 1
+        if remaining[0] < 0 or depth > 16 or type(a) is not type(b):
+            return False
+        if type(a) in (str, int, float, bool, type(None)):
+            return a == b
+        if type(a) is list:
+            return len(a) == len(b) and all(compare(x, y, depth + 1) for x, y in zip(a, b))
+        if type(a) is dict:
+            return (len(a) == len(b) and all(type(k) is str and not sensitive.search(k) for k in a)
+                    and a.keys() == b.keys()
+                    and all(compare(v, b[k], depth + 1) for k, v in a.items()))
+        return False
+
+    return compare(left, right, 0)
+
+
+def _same_handler(left, right):
+    """Accept recreated methods/functions only when their captured bindings agree."""
+    if left is right:
+        return True
+    if inspect.ismethod(left) and inspect.ismethod(right):
+        return (left.__func__ is right.__func__ and
+                (left.__self__ is right.__self__ or _same_model_instance(left.__self__, right.__self__)))
+    if not (inspect.isfunction(left) and inspect.isfunction(right)):
+        return False
+    if left.__code__ is not right.__code__ or left.__globals__ is not right.__globals__:
+        return False
+
+    def same_binding(a, b):
+        if a is b:
+            return True
+        return ((type(a) is type(b) and type(a) in (str, bytes, int, float, bool, type(None)) and a == b)
+                or (type(a) in (list, dict) and _same_safe_json(a, b))
+                or _same_model_instance(a, b)
+                or _same_model_instance(a, b, authorized_chat=True))
+
+    def same_values(a, b):
+        return len(a) == len(b) and all(same_binding(x, y) for x, y in zip(a, b))
+
+    try:
+        return (same_values(left.__defaults__ or (), right.__defaults__ or ())
+                and (left.__kwdefaults__ or {}).keys() == (right.__kwdefaults__ or {}).keys()
+                and all(same_binding(value, right.__kwdefaults__[key])
+                        for key, value in (left.__kwdefaults__ or {}).items())
+                and same_values(tuple(cell.cell_contents for cell in left.__closure__ or ()),
+                                tuple(cell.cell_contents for cell in right.__closure__ or ())))
+    except ValueError:  # An empty closure cell cannot establish equivalence.
+        return False
+
+
 async def invoke_tool(tool, user, chat, arguments, trust_class):
     if not isinstance(arguments, dict):
         raise DriverError("invalid_output")
     try:
+        from ..hooks import _hook
+        from ..catalogue_activation import groups_enabled
+        check_grants = await sync_to_async(groups_enabled)()
         handler = tool.handler
+        if check_grants:
+            from django.core.exceptions import PermissionDenied
+            from ..group_grants import authorized_chat, tool_authorization
+            try:
+                chat = await sync_to_async(authorized_chat)(getattr(chat, "pk", None), user)
+                user = chat._authorized_actor
+            except PermissionDenied as exc:
+                raise DriverError("access_lost") from exc
+            allowed, token = await sync_to_async(tool_authorization)(chat.pk, user, tool.name)
+            if not allowed:
+                raise DriverError("access_lost")
+            if token is not None:
+                from ..hooks import tools_for_chat
+                current = await sync_to_async(tools_for_chat)(chat)
+                candidate = next((candidate for candidate in current if candidate.name == tool.name
+                                  and _same_handler(candidate.handler, handler)), None)
+                if candidate is None:
+                    raise DriverError("access_lost")
+                handler = candidate.handler
         if inspect.iscoroutinefunction(handler):
             result = await handler(user, chat, arguments, trust_class)
         else:
             result = await sync_to_async(handler)(user, chat, arguments, trust_class)
         if inspect.isawaitable(result):
             result = await result
+        if check_grants:
+            allowed, current_token = await sync_to_async(tool_authorization)(chat.pk, user, tool.name)
+            if not allowed or current_token != token:
+                raise DriverError("access_lost")
+            if token is not None:
+                current = await sync_to_async(tools_for_chat)(chat)
+                if not any(candidate.name == tool.name and _same_handler(candidate.handler, handler) for candidate in current):
+                    raise DriverError("access_lost")
         content, sources = result
         if not isinstance(sources, list):
             raise ValueError

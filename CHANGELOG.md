@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.44.0] — 2026-11-26
+
+- DCM-CHAT-23 adds per-chat permission groups with durable catalogue and authorization generations, explicit reauthorization, and conservative provider-context reuse after access changes. Apps must synchronize authorization changes with chat grant saves and activate their catalogue and baseline during rollout.
+
 ## [3.43.0] — 2026-11-26
 
 - DCM-BILL-15 adds object-scoped subscriptions, isolated checkout and billing details, contract cancellation and withdrawal, independent token accounting, object access and operator grants. Object plan changes are unavailable; future-period and other-plan invoices are logged for operator resolution and Stripe Sandbox acceptance on Cinevia staging is pending.

@@ -246,7 +246,7 @@ class OpenAIDriver:
                 buffered_text = []
                 started = False
                 try:
-                    if execution is not None and authorize and not await authorize():
+                    if authorize and not await authorize():
                         raise DriverError("access_lost")
                     started = True
                     provider_tools = list(specs)
@@ -404,6 +404,8 @@ class OpenAIDriver:
                     tool = tool_map[call["name"]]
                     yield {"type": "tool", "phase": "start", "name": tool.name, "label": tool.label}
                     content, sources = await invoke_tool(tool, user, chat, arguments_json(call["arguments"]), "cloud")
+                    if authorize and not await authorize():
+                        raise DriverError("access_lost")
                     yield {"type": "tool", "phase": "end", "name": tool.name, "label": tool.label, "sources": sources}
                     if execution is not None:
                         await _upload_refreshed_execution_inputs(

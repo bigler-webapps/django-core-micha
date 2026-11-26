@@ -253,7 +253,7 @@ class AnthropicDriver:
                 buffered_text = []
                 reported_requests = 0
                 try:
-                    if execution is not None and authorize and not await authorize():
+                    if authorize and not await authorize():
                         raise DriverError("access_lost")
                     execution_possible = execution is not None
                     started = True
@@ -437,6 +437,8 @@ class AnthropicDriver:
                     tool = tool_map[name]
                     yield {"type": "tool", "phase": "start", "name": tool.name, "label": tool.label}
                     content, sources = await invoke_tool(tool, user, chat, arguments, "cloud")
+                    if authorize and not await authorize():
+                        raise DriverError("access_lost")
                     yield {"type": "tool", "phase": "end", "name": tool.name, "label": tool.label, "sources": sources}
                     refreshed_ids = []
                     if execution is not None:
