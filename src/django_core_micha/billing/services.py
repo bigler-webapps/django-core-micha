@@ -158,7 +158,10 @@ def settle_ai_usage(record_id):
             from django_core_micha.assistant.models import AssistantTurn
             # Turn finalization takes these locks in the same order.
             turn = AssistantTurn.objects.select_for_update().select_related("chat").get(pk=identity.reference)
-        row = AICostRecord.objects.select_for_update().select_related("user").get(pk=record_id)
+        row = AICostRecord.objects.select_for_update().get(pk=record_id)
+        if row.user_id is not None:
+            user_model = AICostRecord._meta.get_field("user").remote_field.model
+            row.user = user_model.objects.select_for_update().get(pk=row.user_id)
         if row.settlement_status != "pending" or row.usage_status != "reported" or row.user_id is None:
             return row.settlement_status == "settled"
         if row.purpose == "chat":

@@ -20,6 +20,7 @@ class Plan:
     tax_code: str = ""
     continuation: str | None = None
     available: bool = True
+    member_limit: int | None = None
 
 @dataclass(frozen=True)
 class BillingConfig:
@@ -29,7 +30,7 @@ class BillingConfig:
     token_rates: dict
     contract: dict | None = None
 
-_FIELDS = {"subscription": {"key","kind","name","amount_cents","interval","token_allowance","tax_code","continuation","available"}, "continuation": {"key","kind","name","amount_cents","interval","token_allowance","tax_code"}, "team_package": {"key","kind","name","amount_cents","term_months","seats","token_allowance","tax_code","available"}, "token_package": {"key","kind","name","amount_cents","tokens","tax_code","available"}}
+_FIELDS = {"object_subscription": {"key","kind","name","amount_cents","interval","member_limit","tax_code","available"}, "subscription": {"key","kind","name","amount_cents","interval","token_allowance","tax_code","continuation","available"}, "continuation": {"key","kind","name","amount_cents","interval","token_allowance","tax_code"}, "team_package": {"key","kind","name","amount_cents","term_months","seats","token_allowance","tax_code","available"}, "token_package": {"key","kind","name","amount_cents","tokens","tax_code","available"}}
 def load_billing_config():
     try:
         import yaml
@@ -56,9 +57,9 @@ def load_billing_config():
         if not isinstance(key,str) or not re.fullmatch(r"[a-z0-9_]{1,40}",key) or key in keys: raise ValueError("plan keys must be unique [a-z0-9_]{1,40}")
         keys.add(key)
         if not isinstance(item["name"],str) or not item["name"] or not isinstance(item["tax_code"],str) or not item["tax_code"]: raise ValueError("plan name and tax_code are required")
-        for field in ("amount_cents", "term_months", "seats", "tokens", "token_allowance"):
+        for field in ("amount_cents", "term_months", "seats", "tokens", "token_allowance", "member_limit"):
             if field in item and (type(item[field]) is not int or item[field] <= 0): raise ValueError(f"{field} must be a positive integer")
-        if kind in ("subscription","continuation") and item["interval"] not in ("month","year"): raise ValueError("subscription interval must be month or year")
+        if kind in ("subscription","continuation","object_subscription") and item["interval"] not in ("month","year"): raise ValueError("subscription interval must be month or year")
         if kind == "continuation" and item["interval"] != "month": raise ValueError("continuation plan interval must be month")
         if kind == "subscription" and item.get("continuation") and item["interval"] != "year": raise ValueError("continuation is only valid on an annual subscription")
         if "available" in item and type(item["available"]) is not bool: raise ValueError("available must be a boolean")

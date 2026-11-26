@@ -52,6 +52,11 @@ A request with a `context` key is a contextual checkout instead (next section); 
 
 `POST <prefix>/portal/` requires a session-authenticated user and returns `{"url":"https://..."}`. It returns 404 `{"detail":"no_customer"}` when the user has no Stripe customer. Cancellation, payment methods, and receipts are handled in Stripe's portal using `DCM_BILLING_PORTAL_RETURN_URL`.
 
+Object purchases use a dedicated Stripe customer per checkout attempt. Applications can call `billing.object_portal.create_object_portal(user=..., subscription_id=..., return_url=...)` with a trusted return URL to obtain a portal URL for the authenticated payer, including after project membership ends. The helper rejects another user and purchases whose customer isolation cannot be established. Its portal permits payment method and invoice access; subscription changes and cancellation are disabled. The account portal retains its personal functions for isolated purchases. Legacy object records without an isolated customer fail closed and require a separate migration or operator resolution.
+
+
+A failed object Checkout session creation keeps the reservation and isolated customer; even a rejection can reflect an idempotency mismatch with a concurrently created session. A verified event can bind the missing session. Within 23 hours the original buyer can retry with the same input and provider idempotency key to recover the session. Changed provider parameters can cause Stripe to reject the retry; the reservation remains blocked. After that window automatic retries stop because Stripe can prune idempotency keys; a verified event or operator reconciliation is needed.
+
 ## Webhook and reconciliation
 
 `POST <prefix>/webhook/` is CSRF-exempt and has no session authentication. It requires `Stripe-Signature`, verifies the raw body with Stripe's default signature tolerance, and returns an empty 400 on invalid signatures or payloads. The event id is stored uniquely before processing. Duplicate ids return 200 without running side effects. Foreign-app events and unknown event types are stored as `ignored`. A processing error rolls back effects, stores only its exception class, and returns 500 so Stripe retries. Signature headers and payloads are never logged.
@@ -231,3 +236,26 @@ The API never returns Stripe secret keys, webhook secrets, signatures, or raw ev
 - `billing_reconcile [--since ISO_TIMESTAMP]`: reconcile subscriptions and events.
 - `billing_grant_free_access <user-id|email> --reason ...` / `billing_revoke_free_access`: manage operator access.
 - `billing_expire_tokens`: close expired token grants.
+
+
+
+Object subscription plan changes are unavailable. Paid invoices for a future service start or a different plan are ignored and logged at error level with invoice and subscription identifiers for operator resolution.
+
+### Object billing integration
+
+Object plans have `kind: object_subscription` and a `member_limit` in `billing.yaml`. The host owns object existence and permissions; object keys are scoped by `DCM_BILLING_APP`. Call `billing.object_checkout.start_object_checkout(user=..., object_key=..., plan_key=..., idempotency_key=..., authorize=..., success_url=..., cancel_url=...)` with authenticated user, trusted server-configured URLs and an ASCII idempotency key of 16–64 letters, digits, `_` or `-`. `authorize(user, object_key)` must return exactly `True` only when the object exists and the user may purchase for it. The returned attempt has `stripe_checkout_url`; send only that URL to the buyer, never its customer, session, price or internal reference. A browser return is not payment evidence. Verified webhooks or reconciliation establish payment. Competing buyers and unresolved attempts block new checkout; retry the same buyer and key with the same arguments.
+
+`billing.object_access.object_access_state(user=..., object_key=..., authorize=...)` requires an authenticated user and the host's exact-`True` object-access callback. It returns `source` (`none`, `subscription`, or `operator_grant`), `plan_key`, `plan_name`, effective `member_limit` (null means unlimited when a grant is active), `paid_member_limit` (the paid plan's limit while paid access is valid, otherwise null), `billing_status`, `paid_through`, `cancel_at_period_end`, and `payer` (a user instance or null). Dates are Python datetimes. The host must serialize only fields its requesting role may see; in particular, do not expose the payer or billing details to ordinary object members merely because they can access the object. No grant reason is returned.
+
+`billing.object_access.set_object_grant(operator=..., object_key=..., reason=..., grant=..., authorize=...)` requires an authenticated operator, nonblank audit reason and an exact-`True` callback that checks operator authority and object existence. It creates or revokes the audited grant and returns its model row (or null when there is nothing to revoke); do not serialize the row or its audit reasons to object members. A grant does not alter the underlying subscription or its paid limit. Hosts must enforce authorization on every route; these helpers do not infer membership, operator authority or cross-app access from a key.
+
+### Object access notes
+
+Call `start_object_checkout` outside any enclosing database transaction. A blocking subscription or attempt raises `ObjectCheckoutConflict`; authorization, invalid input and unknown plans raise `PermissionError`, `ValueError` and `LookupError`, respectively.
+
+Under an unlimited operator grant, `member_limit` is `None`; the subscription's other details remain available. A `None` limit without a grant does not itself establish unlimited access: inspect `source`.
+
+These helpers scope subjects to the configured billing app and object key; a consumer must never trust an object key or callback result supplied directly by a client. Payer-only contract operations have their own payer checks, and consumers must not expose provider identifiers or unrelated purchase details.
+
+
+

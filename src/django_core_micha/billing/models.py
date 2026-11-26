@@ -218,3 +218,76 @@ class Refund(models.Model):
     updated_at=models.DateTimeField(auto_now=True)
     class Meta:
         constraints=[models.UniqueConstraint(fields=("payment",),condition=Q(status__in=("pending","requested","requires_action")),name="dcm_bill_refund_open_payment")]
+
+
+class ObjectBillingSubject(models.Model):
+    """Stable lock target for all billing activity belonging to an app object."""
+    app = models.CharField(max_length=80)
+    object_key = models.CharField(max_length=255)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("app", "object_key"), name="dcm_bill_object_subject_unique"),
+            models.CheckConstraint(condition=~Q(app="") & ~Q(object_key=""), name="dcm_bill_object_subject_nonempty"),
+        ]
+
+
+class ObjectSubscription(models.Model):
+    subject = models.ForeignKey(ObjectBillingSubject, on_delete=models.PROTECT, related_name="subscriptions")
+    payer = models.ForeignKey(User, on_delete=models.PROTECT, related_name="billing_object_subscriptions")
+    plan_key = models.CharField(max_length=40)
+    stripe_subscription_id = models.CharField(max_length=255, unique=True)
+    stripe_customer_id = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=32)
+    current_period_start = models.DateTimeField(null=True, blank=True)
+    current_period_end = models.DateTimeField(null=True, blank=True)
+    cancel_at_period_end = models.BooleanField(default=False)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    # Blocking includes subscriptions whose paid term or payment is still unresolved.
+    blocks_purchase = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("subject",), condition=Q(blocks_purchase=True), name="dcm_bill_object_sub_block_unique")]
+
+
+class ObjectCheckoutAttempt(models.Model):
+    STATUSES = [(x, x) for x in ("open", "processing", "paid", "completed", "failed", "expired", "creation_failed")]
+    subject = models.ForeignKey(ObjectBillingSubject, on_delete=models.PROTECT, related_name="attempts")
+    payer = models.ForeignKey(User, on_delete=models.PROTECT, related_name="billing_object_attempts")
+    reference = models.CharField(max_length=64, unique=True)
+    plan_key = models.CharField(max_length=40)
+    idempotency_key = models.CharField(max_length=64)
+    status = models.CharField(max_length=16, choices=STATUSES, default="open")
+    stripe_price_id = models.CharField(max_length=255)
+    stripe_customer_id = models.CharField(max_length=255, blank=True)
+    isolated_customer_flow = models.BooleanField(default=False)
+    stripe_session_id = models.CharField(max_length=255, blank=True)
+    stripe_checkout_url = models.TextField(blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("subject",), condition=Q(status__in=("open", "processing", "paid")), name="dcm_bill_obj_attempt_block_unique"),
+            models.UniqueConstraint(fields=("payer", "subject", "idempotency_key"), name="dcm_bill_obj_attempt_key_unique"),
+            models.UniqueConstraint(fields=("stripe_session_id",), condition=~Q(stripe_session_id=""), name="dcm_bill_obj_attempt_session_unique"),
+            models.UniqueConstraint(fields=("stripe_customer_id",), condition=~Q(stripe_customer_id=""), name="dcm_bill_obj_customer_unique"),
+        ]
+
+
+class ObjectAccessGrant(models.Model):
+    subject = models.ForeignKey(ObjectBillingSubject, on_delete=models.PROTECT, related_name="grants")
+    granted_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="billing_object_grants")
+    reason = models.TextField()
+    granted_at = models.DateTimeField(default=timezone.now)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="billing_object_revocations")
+    revocation_reason = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("subject",), condition=Q(revoked_at__isnull=True), name="dcm_bill_obj_grant_active_unique"),
+            models.CheckConstraint(condition=~Q(reason=""), name="dcm_bill_obj_grant_reason_nonempty"),
+            models.CheckConstraint(condition=(Q(revoked_at__isnull=True, revoked_by__isnull=True, revocation_reason="") | (Q(revoked_at__isnull=False, revoked_by__isnull=False) & ~Q(revocation_reason=""))), name="dcm_bill_obj_revoke_audit"),
+        ]

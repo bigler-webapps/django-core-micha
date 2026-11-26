@@ -195,7 +195,10 @@ def test_pagination_returns_the_requested_page_and_an_empty_one_beyond_the_end()
     ids=lambda d:[r["user_id"] for r in d["results"]]
     assert len(ids(one))==2 and len(ids(two))==2 and len(ids(three))==2 and not (set(ids(one))&set(ids(two))) and not (set(ids(two))&set(ids(three)))
     assert one["count"]==6 and q("page_size=2&page=4")["results"]==[] and q("page_size=2&page=4")["count"]==6
-    assert [r["email"] for r in one["results"]+two["results"]+three["results"]]==sorted(r["email"] for r in one["results"]+two["results"]+three["results"])
+    assert {r["email"] for r in one["results"]+two["results"]+three["results"]}=={"page-op@example.test", *(f"page{i}@example.test" for i in range(5))}
+    assert not (set(ids(one)) & set(ids(three)))
+    expected=list(get_user_model().objects.order_by("email", "pk").values_list("pk", flat=True))
+    assert ids(one)+ids(two)+ids(three)==expected
 
 
 def test_no_stripe_id_reference_or_payload_in_any_operator_response():

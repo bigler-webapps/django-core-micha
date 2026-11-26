@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from .config import load_billing_config
 from .models import (Contract, ContractPayment, Declaration, Purchase, Refund, StripePrice,
-                     Subscription, TeamPackage, TokenAccount, TokenEntry)
+                     Subscription, ObjectSubscription, TeamPackage, TokenAccount, TokenEntry)
 from .withdrawal import EU_EEA_COUNTRIES
 
 log=logging.getLogger(__name__)
@@ -87,7 +87,8 @@ def contract_summary(contract, now=None):
     now=now or timezone.now()
     cfg=load_billing_config(); plans={p.key:p for p in cfg.plans}
     plan=plans.get(contract.plan_key)
-    sub=Subscription.objects.filter(stripe_subscription_id=contract.stripe_object_id).first() if contract.kind=="subscription" else None
+    sub_model=ObjectSubscription if contract.kind=="object_subscription" else Subscription
+    sub=sub_model.objects.filter(stripe_subscription_id=contract.stripe_object_id).first() if contract.kind in ("subscription","object_subscription") else None
     current_end=sub.current_period_end if sub else contract.initial_term_end
     if contract.continuation_plan_key and contract.phase in ("initial","continuation"):
         amount=contract.continuation_amount_cents; allowance=contract.continuation_token_allowance
@@ -124,8 +125,9 @@ def _local_date(value):
 
 
 def _period_end(contract):
-    if contract.kind == "subscription":
-        sub=Subscription.objects.filter(stripe_subscription_id=contract.stripe_object_id).first()
+    if contract.kind in ("subscription", "object_subscription"):
+        model=ObjectSubscription if contract.kind=="object_subscription" else Subscription
+        sub=model.objects.filter(stripe_subscription_id=contract.stripe_object_id).first()
         if sub and sub.current_period_end: return sub.current_period_end
     return contract.initial_term_end
 
@@ -203,6 +205,20 @@ def ensure_contract_schedule(contract):
 
 
 def apply_cancellation(declaration, *, operator_accepted=False):
+    # Serialize object cancellation with billing state changes.
+    if declaration.contract and declaration.contract.kind == "object_subscription":
+        from django.db import transaction
+        from .models import ObjectBillingSubject
+        with transaction.atomic():
+            sub = ObjectSubscription.objects.filter(stripe_subscription_id=declaration.contract.stripe_object_id).first()
+            if sub:
+                ObjectBillingSubject.objects.select_for_update().get(pk=sub.subject_id)
+            declaration.contract.refresh_from_db()
+            return _apply_cancellation(declaration, operator_accepted=operator_accepted)
+    return _apply_cancellation(declaration, operator_accepted=operator_accepted)
+
+
+def _apply_cancellation(declaration, *, operator_accepted=False):
     contract=declaration.contract
     if not contract: return declaration
     if declaration.cancellation_type=="extraordinary" and not operator_accepted:
@@ -210,14 +226,15 @@ def apply_cancellation(declaration, *, operator_accepted=False):
         contract.save(update_fields=("needs_review","review_reason","updated_at"))
         declaration.status="needs_review"; declaration.save(update_fields=("status",))
         return declaration
-    if contract.kind != "subscription":
+    if contract.kind not in ("subscription", "object_subscription"):
         effective=contract.initial_term_end or timezone.now()
         declaration.effective_at=effective; declaration.status="effective"
         contract.cancel_effective_at=effective; contract.status="cancellation_scheduled"
         declaration.save(update_fields=("effective_at","status")); contract.save(update_fields=("cancel_effective_at","status","updated_at"))
         return declaration
     effective=_cancellation_effective(contract,declaration.requested_end_date)
-    sub=Subscription.objects.filter(stripe_subscription_id=contract.stripe_object_id).first()
+    model=ObjectSubscription if contract.kind=="object_subscription" else Subscription
+    sub=model.objects.filter(stripe_subscription_id=contract.stripe_object_id).first()
     if not sub:
         contract.needs_review=True; contract.review_reason="subscription_missing"
         contract.save(update_fields=("needs_review","review_reason","updated_at"))
@@ -232,10 +249,11 @@ def apply_cancellation(declaration, *, operator_accepted=False):
     try:
         from .stripe_service import _stripe
         stripe=_stripe()
-        if contract.phase=="initial" and contract.stripe_schedule_id and contract.schedule_status=="created":
-            schedule=stripe.SubscriptionSchedule.retrieve(contract.stripe_schedule_id)
+        schedule_id=(contract.stripe_schedule_id if contract.kind=="subscription" and contract.phase=="initial" and contract.schedule_status=="created" else None)
+        if schedule_id:
+            schedule=stripe.SubscriptionSchedule.retrieve(schedule_id)
             phase1=_schedule_phase(schedule)
-            stripe.SubscriptionSchedule.modify(contract.stripe_schedule_id,end_behavior="cancel",phases=[phase1])
+            stripe.SubscriptionSchedule.modify(schedule_id,end_behavior="cancel",phases=[phase1])
             sub.cancel_at_period_end=True; sub.save(update_fields=("cancel_at_period_end",))
         else:
             stripe.Subscription.modify(contract.stripe_object_id,cancel_at_period_end=True)
@@ -258,6 +276,8 @@ def _owner_accounts(contract):
 
 
 def _contract_grants(contract):
+    if contract.kind=="object_subscription":
+        return TokenEntry.objects.none()
     refs=[]
     if contract.purchase_id: refs.extend(contract.purchase.grant_references or [])
     if contract.kind=="subscription":
@@ -269,7 +289,7 @@ def _contract_grants(contract):
 
 
 def _stop_future_charges(contract, now):
-    if contract.kind=="subscription":
+    if contract.kind in ("subscription", "object_subscription"):
         from .stripe_service import _stripe
         stripe=_stripe()
         try: stripe.Subscription.cancel(contract.stripe_object_id)
@@ -280,7 +300,10 @@ def _stop_future_charges(contract, now):
             except Exception as exc:
                 if getattr(exc,"http_status",None)!=404 and "released" not in str(exc).lower() and "canceled" not in str(exc).lower(): raise
             Contract.objects.filter(pk=contract.pk).update(schedule_status="released")
-        Subscription.objects.filter(stripe_subscription_id=contract.stripe_object_id).update(status="canceled",ended_at=now,current_period_end=now,cancel_at_period_end=False)
+        model=ObjectSubscription if contract.kind=="object_subscription" else Subscription
+        values=dict(status="canceled",ended_at=now,current_period_end=now,cancel_at_period_end=False)
+        if contract.kind=="object_subscription": values["blocks_purchase"]=False
+        model.objects.filter(stripe_subscription_id=contract.stripe_object_id).update(**values)
     elif contract.kind=="team_package":
         TeamPackage.objects.filter(stripe_ref=contract.stripe_object_id).update(ends_at=now)
 
@@ -379,6 +402,9 @@ def apply_withdrawal(declaration, *, operator_accepted=False):
 def _perform_withdrawal(declaration_id):
     declaration=Declaration.objects.select_related("contract","contract__purchase").get(pk=declaration_id)
     contract=declaration.contract; now=declaration.received_at
+    if contract.kind=="object_subscription":
+        from .object_withdrawal import perform_object_withdrawal
+        return perform_object_withdrawal(declaration)
     try:
         _stop_future_charges(contract,now)
     except Exception as exc:
@@ -427,18 +453,21 @@ def apply_due_cancellations(now=None):
     for declaration in Declaration.objects.filter(app=_app(),kind="cancellation",status="scheduled").select_related("contract"):
         contract=declaration.contract
         if not contract: continue
-        if contract.kind!="subscription": continue
-        sub=Subscription.objects.filter(stripe_subscription_id=contract.stripe_object_id).first()
-        if not sub or not sub.current_period_end: continue
-        if sub.status=="canceled" or (sub.current_period_end and sub.current_period_end<=now):
+        if contract.kind not in ("subscription", "object_subscription"): continue
+        model=ObjectSubscription if contract.kind=="object_subscription" else Subscription
+        sub=model.objects.filter(stripe_subscription_id=contract.stripe_object_id).first()
+        if not sub: continue
+        if (sub.status=="canceled" and contract.kind!="object_subscription") or (sub.current_period_end and sub.current_period_end<=now):
             declaration.status="effective"; declaration.effective_at=declaration.effective_at or sub.ended_at or sub.current_period_end or now
             declaration.save(update_fields=("status","effective_at"))
             if sub.status!="canceled":
                 # The period ended before Stripe's deletion webhook: end the local subscription now. The webhook is idempotent.
-                Subscription.objects.filter(pk=sub.pk).update(status="canceled",ended_at=sub.ended_at or sub.current_period_end,cancel_at_period_end=False)
+                values=dict(status="canceled",ended_at=sub.ended_at or sub.current_period_end,cancel_at_period_end=False)
+                if contract.kind=="object_subscription": values["blocks_purchase"]=False
+                model.objects.filter(pk=sub.pk).update(**values)
             contract.status="ended"; contract.save(update_fields=("status","updated_at")); count+=1
             continue
-        if declaration.cancellation_type!="extraordinary" and sub.current_period_end >= declaration.effective_at and sub.current_period_end > now and not (sub.cancel_at_period_end and contract.cancel_effective_at==sub.current_period_end):
+        if sub.current_period_end and declaration.effective_at and declaration.cancellation_type!="extraordinary" and sub.current_period_end >= declaration.effective_at and sub.current_period_end > now and not (sub.cancel_at_period_end and contract.cancel_effective_at==sub.current_period_end):
             try:
                 from .stripe_service import _stripe
                 _stripe().Subscription.modify(contract.stripe_object_id,cancel_at_period_end=True)

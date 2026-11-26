@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.43.0] — 2026-11-26
+
+- DCM-BILL-15 adds object-scoped subscriptions, isolated checkout and billing details, contract cancellation and withdrawal, independent token accounting, object access and operator grants. Object plan changes are unavailable; future-period and other-plan invoices are logged for operator resolution and Stripe Sandbox acceptance on Cinevia staging is pending.
+- Correct PostgreSQL row locking for billing declarations and AI usage settlement when related records are optional.
+
 ## [3.41.4] — 2026-11-22
 
 - DCM-DX-15 reports fixed, redacted categories for isolated container startup and migration failures while preserving generic diagnostics for unknown output.

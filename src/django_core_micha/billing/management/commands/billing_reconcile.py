@@ -5,8 +5,13 @@ from django.db import transaction
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone as django_timezone
 
-from django_core_micha.billing.models import StripeEvent
-from django_core_micha.billing.stripe_service import _dict, _stripe, complete_withdrawal_from_refund, process_stripe_event, withdrawal_refund_purchase
+from django_core_micha.billing.models import ObjectCheckoutAttempt, StripeEvent
+from django_core_micha.billing.stripe_service import _dict, complete_withdrawal_from_refund, process_stripe_event, withdrawal_refund_purchase
+
+
+def _stripe():
+    from django_core_micha.billing.stripe_service import _stripe as stripe_client
+    return stripe_client()
 
 
 class Command(BaseCommand):
@@ -26,6 +31,15 @@ class Command(BaseCommand):
             if since.tzinfo is None:
                 since = since.replace(tzinfo=timezone.utc)
             count = 0
+            from django_core_micha.billing.object_checkout import reconcile_object_attempt
+            attempts = ObjectCheckoutAttempt.objects.filter(subject__app=app, status__in=("open", "processing"))
+            object_errors = 0
+            for attempt_id in attempts.values_list("id", flat=True).iterator():
+                try:
+                    if reconcile_object_attempt(attempt_id):
+                        count += 1
+                except Exception:
+                    object_errors += 1
             for sub in stripe.Subscription.list(limit=100).auto_paging_iter():
                 data = _dict(sub)
                 if (data.get("metadata") or {}).get("app") != app:
@@ -59,5 +73,9 @@ class Command(BaseCommand):
                     if complete_withdrawal_from_refund(data):
                         count += 1
             self.stdout.write(str(count))
+            if object_errors:
+                raise CommandError(f"object checkout reconciliation failed for {object_errors} attempt(s)")
+        except CommandError:
+            raise
         except Exception as exc:
             raise CommandError(f"billing reconciliation failed ({type(exc).__name__})") from None

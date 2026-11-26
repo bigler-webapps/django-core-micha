@@ -200,9 +200,22 @@ def retry_declaration_emails():
         row.status="needs_review"; row.decision_note="confirmation_expired_before_delivery"; row.save(update_fields=("status","decision_note"))
 
 
+def _lock_object_subject(contract):
+    if contract and contract.kind == "object_subscription":
+        from .models import ObjectBillingSubject, ObjectSubscription
+        subject_id = ObjectSubscription.objects.filter(
+            subject__app=contract.app, stripe_subscription_id=contract.stripe_object_id
+        ).values_list("subject_id", flat=True).first()
+        if subject_id:
+            ObjectBillingSubject.objects.select_for_update().get(pk=subject_id)
+
+
 def create_owner_declaration(contract,kind,*,cancellation_type="",requested_end_date=None,reason="",message=""):
     with transaction.atomic():
-        contract=Contract.objects.select_for_update().select_related("user","purchase").get(pk=contract.pk)
+        _lock_object_subject(contract)
+        contract=Contract.objects.select_for_update().select_related("user").get(pk=contract.pk)
+        if contract.purchase_id:
+            contract.purchase=contract._meta.get_field("purchase").remote_field.model.objects.select_for_update().get(pk=contract.purchase_id)
         if kind=="withdrawal":
             prior=Declaration.objects.filter(contract=contract,kind=kind,channel="account",status__in=("received","accepted","scheduled","effective")).order_by("-received_at","-pk").first()
             if prior: return prior
@@ -216,7 +229,7 @@ def create_owner_declaration(contract,kind,*,cancellation_type="",requested_end_
 
 def apply_withdrawal_declaration(declaration):
     contract=declaration.contract
-    if contract.withdrawal_policy=="full":
+    if contract.withdrawal_policy=="full" or contract.kind=="object_subscription":
         from .contracts import apply_withdrawal
         return apply_withdrawal(declaration)
     from .withdrawal import withdraw
@@ -239,7 +252,10 @@ def confirm_public_declaration(token):
         return None
     token_hash=hashlib.sha256(token.encode()).hexdigest()
     with transaction.atomic():
-        declaration=Declaration.objects.select_for_update().filter(reference=ref,channel="public").select_related("contract").first()
+        declaration=Declaration.objects.select_for_update().filter(reference=ref,channel="public").first()
+        if declaration and declaration.contract_id:
+            _lock_object_subject(declaration.contract)
+            declaration.contract=Contract.objects.select_for_update().get(pk=declaration.contract_id)
         if not declaration or declaration.status!="awaiting_confirmation" or not declaration.confirm_token_hash or declaration.confirmed_at or not declaration.confirm_expires_at or declaration.confirm_expires_at<=timezone.now(): return None
         if not secrets.compare_digest(declaration.confirm_token_hash,token_hash) or not declaration.contract_id: return None
         declaration.confirmed_at=timezone.now(); declaration.confirm_token_hash=""; declaration.user=declaration.contract.user

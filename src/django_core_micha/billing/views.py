@@ -169,7 +169,7 @@ def checkout(request):
         if data is None: data=json.loads(request.body or b"{}")
         key=data.get("plan_key") if isinstance(data,dict) else None
         plan=next(p for p in load_billing_config().plans if p.key==key)
-        if plan.kind == "continuation" or not plan.available: raise StopIteration
+        if plan.kind in ("continuation", "object_subscription") or not plan.available: raise StopIteration
         from .stripe_service import _latest_price, _stripe
         price=_latest_price(plan.key)
         customer=get_customer(request.user)
@@ -204,7 +204,7 @@ def _contextual_checkout(request,data,locale):
     if not isinstance(idem,str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}",idem,flags=re.ASCII): return JsonResponse({"detail":"invalid_idempotency_key"},status=400)
     key=data.get("plan_key")
     plan=next((p for p in load_billing_config().plans if p.key==key),None)
-    if plan is None or plan.kind == "continuation" or not plan.available: return JsonResponse({"detail":"unknown_plan"},status=400)
+    if plan is None or plan.kind in ("continuation", "object_subscription") or not plan.available: return JsonResponse({"detail":"unknown_plan"},status=400)
     app=getattr(settings,"DCM_BILLING_APP","")
     attempt=CheckoutAttempt.objects.filter(user=request.user,app=app,idempotency_key=idem).first()
     if attempt is None:
@@ -255,6 +255,14 @@ def portal(request):
     customer=BillingCustomer.objects.filter(user=request.user).first()
     if not customer:
         return JsonResponse({"detail":"no_customer"},status=404)
+    # A customer-wide portal can modify every subscription, including other objects.
+    from .models import ObjectCheckoutAttempt, ObjectSubscription
+    from django.db.models import Q
+    unsafe=Q(stripe_customer_id=customer.stripe_customer_id) | Q(stripe_customer_id="")
+    unsafe_attempt=Q(stripe_customer_id=customer.stripe_customer_id) | Q(stripe_customer_id="", isolated_customer_flow=False)
+    if (ObjectSubscription.objects.filter(unsafe, payer=request.user).exists() or
+            ObjectCheckoutAttempt.objects.filter(unsafe_attempt, payer=request.user).exists()):
+        return JsonResponse({"detail":"portal_unavailable"},status=409)
     try:
         from .stripe_service import _stripe
         session=_stripe().billing_portal.Session.create(customer=customer.stripe_customer_id,
@@ -289,6 +297,16 @@ def _purchase_or_404(request, purchase_id):
 def withdrawal_preview(request,purchase_id):
     if not request.user.is_authenticated: return JsonResponse({"detail":"authentication_required"},status=401)
     p=_purchase_or_404(request,purchase_id); now=timezone.now()
+    if p.kind=="object_subscription":
+        contract=Contract.objects.filter(purchase=p,app=getattr(settings,"DCM_BILLING_APP","")).first()
+        if not contract: return JsonResponse({"code":"contract_missing"},status=409)
+        from .contracts import withdrawal_eligibility
+        from .object_withdrawal import object_withdrawal_preview
+        result=withdrawal_eligibility(contract,now)
+        try: amounts=object_withdrawal_preview(contract,now)
+        except Exception:
+            return JsonResponse({"code":"withdrawal_preview_unavailable"},status=503)
+        return JsonResponse({"policy":contract.withdrawal_policy,"eligible":result.eligible,"reason":result.reason,"deadline":result.deadline.isoformat(),**amounts})
     contract=Contract.objects.filter(purchase=p,app=getattr(settings,"DCM_BILLING_APP",""),withdrawal_policy="full").first()
     if contract:
         from .contracts import withdrawal_eligibility
@@ -306,12 +324,17 @@ def withdrawal_execute(request,purchase_id):
     import json
     p=_purchase_or_404(request,purchase_id)
     contract=Contract.objects.filter(purchase=p,app=getattr(settings,"DCM_BILLING_APP",""),withdrawal_policy="full").first()
+    if not contract and p.kind=="object_subscription":
+        contract=Contract.objects.filter(purchase=p,app=getattr(settings,"DCM_BILLING_APP","")).first()
+        if not contract: return JsonResponse({"code":"contract_missing"},status=409)
     if contract:
         try: data=json.loads(request.body or b"{}")
         except (ValueError,UnicodeDecodeError): return JsonResponse({"code":"invalid_json"},status=400)
         if not isinstance(data,dict) or data.get("confirm") is not True: return JsonResponse({"code":"confirmation_required"},status=400)
         from .declarations import create_owner_declaration
         with transaction.atomic():
+            from .declarations import _lock_object_subject
+            _lock_object_subject(contract)
             locked=Contract.objects.select_for_update().get(pk=contract.pk)
             declaration=Declaration.objects.filter(contract=locked,kind="withdrawal",channel="account").order_by("-received_at","-pk").first()
             if not declaration or declaration.status in ("needs_review","rejected"):
@@ -320,7 +343,8 @@ def withdrawal_execute(request,purchase_id):
         refunds=list(Refund.objects.filter(declaration=declaration))
         payment_total=sum(x.amount_paid_cents for x in contract.payments.all())
         refunded_total=sum(x.refunded_cents for x in contract.payments.all())
-        refund_status=next((r.status for r in refunds if r.status not in ("succeeded","cancelled")),"succeeded" if refunded_total>=payment_total else "pending")
+        complete=declaration.status=="effective" if contract.kind=="object_subscription" else refunded_total>=payment_total
+        refund_status=next((r.status for r in refunds if r.status not in ("succeeded","cancelled")),"succeeded" if complete else "pending")
         return JsonResponse({"status":declaration.status,"declaration_reference":declaration.reference,
             "refund_status":refund_status,
             "refund_cents":sum(r.amount_cents for r in refunds),"withdrawn_at":p.withdrawn_at.isoformat() if p.withdrawn_at else None})
@@ -446,7 +470,8 @@ def contract_withdraw(request,reference):
     declaration=create_owner_declaration(contract,"withdrawal")
     refunds=list(Refund.objects.filter(declaration=declaration))
     payment_total=sum(x.amount_paid_cents for x in contract.payments.all()); refunded_total=sum(x.refunded_cents for x in contract.payments.all())
-    refund_status=next((r.status for r in refunds if r.status not in ("succeeded","cancelled")),"succeeded" if refunded_total>=payment_total else "pending")
+    complete=declaration.status=="effective" if contract.kind=="object_subscription" else refunded_total>=payment_total
+    refund_status=next((r.status for r in refunds if r.status not in ("succeeded","cancelled")),"succeeded" if complete else "pending")
     response=JsonResponse({"reference":declaration.reference,"status":declaration.status,"refund_status":refund_status,"refund_cents":sum(x.amount_cents for x in refunds)},status=201)
     response["Cache-Control"]="no-store"
     return response

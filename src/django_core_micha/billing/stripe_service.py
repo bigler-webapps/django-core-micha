@@ -98,14 +98,14 @@ def _verify_plan_price(stripe, price, *, app, plan, currency, lookup_key, produc
     if price.get("unit_amount") != plan.amount_cents:
         raise PlanSyncError("price amount does not match plan")
     recurring = price.get("recurring")
-    if plan.kind in ("subscription", "continuation"):
+    if plan.kind in ("subscription", "continuation", "object_subscription"):
         if (not isinstance(recurring, dict) or recurring.get("interval") != plan.interval
                 or recurring.get("interval_count", 1) != 1
                 or recurring.get("usage_type", "licensed") != "licensed"):
             raise PlanSyncError("price recurrence does not match plan")
     elif recurring not in (None, {}):
         raise PlanSyncError("one-time plan has a recurring price")
-    if price.get("tax_behavior") != "exclusive":
+    if price.get("tax_behavior") != ("inclusive" if plan.kind == "object_subscription" else "exclusive"):
         raise PlanSyncError("price tax behavior does not match plan")
     metadata = _dict(price.get("metadata") or {})
     expected_version = lookup_key.rsplit(":v", 1)[-1]
@@ -153,10 +153,10 @@ def _create_plan_product(stripe, *, app, plan, version):
 
 def _create_plan_price(stripe, *, app, plan, currency, lookup_key, product_id, version):
     args = {"product": product_id, "unit_amount": plan.amount_cents, "currency": currency,
-            "lookup_key": lookup_key, "tax_behavior": "exclusive",
+            "lookup_key": lookup_key, "tax_behavior": "inclusive" if plan.kind == "object_subscription" else "exclusive",
             "metadata": {"app": app, "plan_key": plan.key, "version": str(version)},
             "idempotency_key": f"dcm-plan-price:{app}:{plan.key}:v{version}"}
-    if plan.kind in ("subscription", "continuation"):
+    if plan.kind in ("subscription", "continuation", "object_subscription"):
         args["recurring"] = {"interval": plan.interval}
     return stripe.Price.create(**args)
 
@@ -302,7 +302,7 @@ def checkout_session_params(*, plan, price, user, customer_id, success_url=None,
     """Build only parameters supported by Stripe Checkout SessionCreateParams in Stripe 16."""
     if plan.kind == "continuation" or not getattr(plan, "available", True):
         raise LookupError("unknown_plan")
-    mode = "subscription" if plan.kind == "subscription" else "payment"
+    mode = "subscription" if plan.kind in ("subscription", "object_subscription") else "payment"
     params = {"mode": mode, "customer": customer_id, "line_items": [{"price": price.stripe_price_id, "quantity": 1}],
         "success_url": success_url if success_url is not None else getattr(settings, "DCM_BILLING_SUCCESS_URL", ""),
         "cancel_url": cancel_url if cancel_url is not None else getattr(settings, "DCM_BILLING_CANCEL_URL", ""),
@@ -673,6 +673,15 @@ def process_stripe_event(event):
     metadata = _event_app_and_metadata(kind, obj)
     if metadata.get("app") != getattr(settings, "DCM_BILLING_APP", ""):
         return "ignored"
+    if metadata.get("object_checkout_attempt"):
+        from .object_lifecycle import handle_object_event
+        return "processed" if handle_object_event(kind, obj, metadata, event) else "ignored"
+    sid = obj.get("id") if kind.startswith("customer.subscription.") else _invoice_subscription_id(obj) if kind.startswith("invoice.") else None
+    if sid and Purchase.objects.select_for_update().filter(stripe_object_id=sid, status="withdrawn").exists():
+        return "processed"
+    plan = _plan(metadata.get("plan_key", "")) if metadata.get("plan_key") else None
+    if plan and plan.kind == "object_subscription":
+        return "ignored"  # Object lifecycle is handled separately, never as personal access.
     if kind in ("checkout.session.async_payment_failed", "checkout.session.expired"):
         return "processed" if _update_checkout_attempt(kind, obj, metadata) else "ignored"
     if kind in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
@@ -802,7 +811,7 @@ def _create_purchase(obj,event,user,plan,kind,object_id,*,payment_intent=None,in
     contract,_=create_contract_for_purchase(purchase,plan,info_delivered=bool(cfg.contract and terms==cfg.contract["terms_version"]))
     if invoice_data is None: invoice_data={}
     invoice_data=_dict(invoice_data)
-    if not invoice_data.get("amount_paid"):
+    if invoice_data.get("amount_paid") is None or (kind != "object_subscription" and not invoice_data.get("amount_paid")):
         invoice_data["amount_paid"]=amount
     if not invoice_data.get("id"):
         invoice_data["id"]=str(invoice_id or "")
@@ -817,5 +826,6 @@ def _create_purchase(obj,event,user,plan,kind,object_id,*,payment_intent=None,in
     elif not invoice_id and ContractPayment.objects.filter(contract=contract,stripe_invoice_id="",billing_reason="initial").exists():
         pass
     else:
-        _record_contract_payment(contract,invoice_data,"initial")
+        reason = "renewal" if kind == "object_subscription" and invoice_data.get("billing_reason") != "subscription_create" else "initial"
+        _record_contract_payment(contract,invoice_data,reason)
     return purchase

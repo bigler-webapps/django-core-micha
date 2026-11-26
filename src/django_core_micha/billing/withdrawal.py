@@ -8,7 +8,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Purchase, Subscription, TeamPackage, TokenEntry
+from .models import ObjectSubscription, Purchase, Subscription, TeamPackage, TokenEntry
 
 log = logging.getLogger(__name__)
 EU_EEA_COUNTRIES = frozenset("AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE IS LI NO".split())
@@ -115,8 +115,9 @@ def complete_withdrawal(purchase_pk, *, now, refund_cents, refund_id, calc=None,
 
         # Lock the owner's accounts before changing any token balances.
         list(_owner_accounts(purchase).select_for_update().values_list("pk", flat=True))
-        if purchase.kind == "subscription":
-            sub = Subscription.objects.select_for_update().filter(stripe_subscription_id=purchase.stripe_object_id).first()
+        if purchase.kind in ("subscription", "object_subscription"):
+            model = ObjectSubscription if purchase.kind == "object_subscription" else Subscription
+            sub = model.objects.select_for_update().filter(stripe_subscription_id=purchase.stripe_object_id).first()
             try:
                 from .stripe_service import _stripe
                 _stripe().Subscription.cancel(purchase.stripe_object_id)
@@ -128,7 +129,11 @@ def complete_withdrawal(purchase_pk, *, now, refund_cents, refund_id, calc=None,
                 sub.ended_at = now
                 sub.current_period_end = now
                 sub.cancel_at_period_end = False
-                sub.save(update_fields=("status", "ended_at", "current_period_end", "cancel_at_period_end"))
+                fields = ["status", "ended_at", "current_period_end", "cancel_at_period_end"]
+                if purchase.kind == "object_subscription":
+                    sub.blocks_purchase = False
+                    fields.append("blocks_purchase")
+                sub.save(update_fields=fields)
         elif purchase.kind == "team_package":
             TeamPackage.objects.filter(stripe_ref=purchase.stripe_object_id).update(ends_at=now)
 

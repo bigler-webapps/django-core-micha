@@ -15,7 +15,7 @@ from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.http import require_GET, require_http_methods
 
 from django_core_micha.auth.permissions import can_view_users_admin
-from .models import AICostRecord, FreeAccess, Purchase, Subscription, TeamPackage, TeamSeat, TokenEntry, Declaration, Refund
+from .models import AICostRecord, FreeAccess, Purchase, Subscription, TeamPackage, TeamSeat, TokenEntry, Declaration, Refund, ObjectSubscription
 from .services import access_state, models_q_expiry, token_balance
 
 
@@ -93,7 +93,7 @@ def overview(request):
     per_token=(2*cost+used)//(2*used) if used else None
     review_count=Declaration.objects.filter(app=app,status="needs_review").count()
     overdue_count=Refund.objects.filter(contract__app=app,due_by__lt=now).exclude(status__in=("succeeded","cancelled")).count()
-    return _response({"app":app,"month":month,"accounts":{"active":active,"by_source":by_source},"subscriptions":{"new":subs_new,"ended":subscriptions_ended},"team":{"packages_active":team_data["packages_active"] or 0,"packages_sold":team_sold,"seats_total":team_data["seats_total"] or 0,"seats_used":seats_used},"token_packages":{"sold":token_packages["sold"] or 0,"tokens":token_packages["tokens"] or 0},"tokens":{"granted":token_totals.get("grant",0)+token_totals.get("purchase",0),"used":used,"expired":expired},"ai_cost":{"calls":ai_total["calls"] or 0,"usd_micros":cost,"by_model":by_model,"usd_micros_per_used_token":per_token},"declarations_needing_review":review_count,"refunds_overdue":overdue_count})
+    return _response({"app":app,"month":month,"accounts":{"active":active,"by_source":by_source},"subscriptions":{"new":subs_new,"ended":subscriptions_ended},"object_subscriptions":{"active":ObjectSubscription.objects.filter(subject__app=app,current_period_end__gt=now).exclude(status__in=("unpaid", "incomplete_expired")).exclude(stripe_subscription_id__in=Purchase.objects.filter(status="withdrawn").values("stripe_object_id")).count(),"new":purchases.filter(kind="object_subscription",stripe_object_id__in=ObjectSubscription.objects.filter(subject__app=app).values("stripe_subscription_id")).count(),"ended":ObjectSubscription.objects.filter(subject__app=app,ended_at__gte=start,ended_at__lt=end).count()},"team":{"packages_active":team_data["packages_active"] or 0,"packages_sold":team_sold,"seats_total":team_data["seats_total"] or 0,"seats_used":seats_used},"token_packages":{"sold":token_packages["sold"] or 0,"tokens":token_packages["tokens"] or 0},"tokens":{"granted":token_totals.get("grant",0)+token_totals.get("purchase",0),"used":used,"expired":expired},"ai_cost":{"calls":ai_total["calls"] or 0,"usd_micros":cost,"by_model":by_model,"usd_micros_per_used_token":per_token},"declarations_needing_review":review_count,"refunds_overdue":overdue_count})
 
 
 @_operator("GET")
