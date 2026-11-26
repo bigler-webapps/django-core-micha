@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: dcm-test-postgres
+    environment:
+      POSTGRES_DB: dcm_test
+      POSTGRES_USER: dcm_test
+      POSTGRES_PASSWORD: dcm_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dcm_test -d dcm_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

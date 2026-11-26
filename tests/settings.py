@@ -1,3 +1,5 @@
+import os
+
 SECRET_KEY = "test-secret-not-for-production"
 
 INSTALLED_APPS = [
@@ -24,13 +26,6 @@ INSTALLED_APPS = [
     "tests.testapp",
 ]
 
-MIGRATION_MODULES = {
-    "testapp": None,
-    "account": None,
-    "mfa": None,
-    "socialaccount": None,
-}
-
 MIDDLEWARE = [
     "allauth.account.middleware.AccountMiddleware",
 ]
@@ -45,8 +40,12 @@ AUDITLOG_RETENTION_DAYS = 730
 
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": ":memory:",
+        "ENGINE": "django.db.backends.postgresql",
+        "HOST": os.environ.get("DCM_TEST_DB_HOST", "127.0.0.1"),
+        "PORT": os.environ.get("DCM_TEST_DB_PORT", "55432"),
+        "NAME": os.environ.get("DCM_TEST_DB_NAME", "dcm_test"),
+        "USER": os.environ.get("DCM_TEST_DB_USER", "dcm_test"),
+        "PASSWORD": os.environ.get("DCM_TEST_DB_PASSWORD", "dcm_test"),
     }
 }
 

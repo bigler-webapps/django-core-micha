@@ -3,9 +3,21 @@
 tests:
   backend:
     command: pytest -q -o pythonpath=.
+    stack_container: dcm-test-postgres
+    stack_env: POSTGRES_DB=dcm_test
+    stack_fix: docker compose -f compose.test-db.yml up -d
   test-management-launcher:
     command: 'pytest -q -o "pythonpath=src ." tests/test_test_management_launcher.py tests/test_run_dev.py'
+    stack_container: dcm-test-postgres
+    stack_env: POSTGRES_DB=dcm_test
+    stack_fix: docker compose -f compose.test-db.yml up -d
   test-management-isolation:
     command: 'pytest -q -o "pythonpath=src ." tests/test_test_management_consumers.py tests/test_test_management_disposal.py tests/test_test_management_synthetic_config.py tests/test_test_management_postgis_proof.py tests/test_test_management_pgvector_proof.py'
+    stack_container: dcm-test-postgres
+    stack_env: POSTGRES_DB=dcm_test
+    stack_fix: docker compose -f compose.test-db.yml up -d
   test-management-disposal-proof:
     command: 'pytest -q -o "pythonpath=src ." --dcm-disposal-proof-handles=../.claude/scratch/DCM-DX-19-proof-handles.json tests/test_test_management_disposal_proof.py'
+    stack_container: dcm-test-postgres
+    stack_env: POSTGRES_DB=dcm_test
+    stack_fix: docker compose -f compose.test-db.yml up -d

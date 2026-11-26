@@ -105,4 +105,14 @@ Tier 3 in a shared core: configured implementer, full independent review (envelo
 
 ## Gate record
 
-Gate #1 pending operator approval (plan agreed 2026-11-25; local database: repo-owned test database).
+Gate #1 approved by the operator 2026-11-25 (handover of DCM-DX-21 to the Orchestrator; plan agreed 2026-11-25; local database: repo-owned test database).
+
+## Completion
+
+- Status: in progress. The operator approved one shared 3.43.0 release containing DCM-CHAT-23, DCM-BILL-15 and DCM-DX-21 on 2026-11-26. The combined candidate must be reviewed and tested as landed, and the CI workflow proof remains open.
+- Independent reviews: `review-lenses.py` rounds 1 and 2, configured Codex routes `gpt-6.1-terra` and `gpt-6-luna`; two test defects raised and fixed, closing pass without findings. Review evidence: workspace `.claude/scratch/review-DCM-DX-21-r1` and `review-DCM-DX-21-r2`.
+- After the review fixes, the full backend run passed 2,286 tests with four skips on the shared tree (`tests-django-core-micha-20261126-161321/backend.log`). Database teardown warned that another session still used the test database; the reason for the four skips was not reported. The initial run passed 2,284 with four skips; test-management launcher passed 91 and isolation passed 161.
+- A focused selection of the PostgreSQL concurrency and index cases passed all nine selected cases without skips (`tests-django-core-micha-20261126-162448/backend.log`). As a selection this is supplementary, not a scope gate.
+- The separate disposal proof stopped at its existing-volume precondition before any disposal. Its DX-19 handles name volumes that already exist; no volume was removed. This is separate from the backend PostgreSQL gate and remains unresolved.
+- Landing and CI proof are pending. The approved joint release includes the Billing fixes for PostgreSQL row locks, together with the rest of the reviewed Billing and Chat scope. The core's allowed refs do not include `ci-test/*`; the workflow on main does not yet contain this change.
+- Part B: errors: the three billing concurrency tests named in Part B are uncommitted DCM-BILL-15 work rather than tests present on the starting trunk; found by the orchestrator.

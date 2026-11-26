@@ -21,7 +21,7 @@ def test_core_apps_boot_when_optional_packages_are_unimportable(tmp_path):
             from django_core_micha.settings.settings_base import *  # noqa: F401,F403
 
             ROOT_URLCONF = "django.urls"
-            DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}}
+            DATABASES = {"default": {"ENGINE": "django.db.backends.postgresql", "NAME": "boot_check_unused"}}
             CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
             DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
             """

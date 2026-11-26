@@ -15,6 +15,20 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: dcm_test
+          POSTGRES_USER: dcm_test
+          POSTGRES_PASSWORD: dcm_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U dcm_test -d dcm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Check out code
@@ -99,6 +113,7 @@ jobs:
         if: steps.version_check.outputs.should_publish == 'true'
         env:
           PYTHONPATH: .
+          DCM_TEST_DB_PORT: ${{ job.services.postgres.ports['5432'] }}
         run: |
           pip install -e ".[test,ai,extraction,push,scripts,billing,receipts,reimbursements]"
           pytest -q
