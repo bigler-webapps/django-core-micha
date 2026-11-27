@@ -46,7 +46,7 @@ billing = ["stripe>=17.1.0", "PyYAML"]
 receipts = ["pillow-heif>=1.8.1"]
 reimbursements = [
     "openpyxl>=3.1.5",
-    "reportlab>=4.5.1",
+    "reportlab>=5.1.0",
     "pypdf>=7.1.1",
     "Pillow>=12.3.0",
     "pypdfium2>=5.15.2",
