@@ -1,8 +1,8 @@
 """Owner-only REST API for catalogue, persistent chats, and turns."""
 import uuid
 from django.conf import settings
-from django.db.models import Q
 from django.db import transaction
+from django.db.models import Q
 from django.http import Http404
 from django.utils import timezone
 from rest_framework import status
@@ -17,7 +17,6 @@ from .catalogue import (default_entry, entries, entry_by_id, entry_id, entry_ena
 from .hooks import availability_reason, can_access_scope, is_shared_scope, _hook
 from .access import can_view_chat, is_creator
 from .models import AssistantChat
-from .group_grants import create_chat_with_baseline
 from .history import summary_payload
 from .pagination import InvalidCursor, decode_cursor, encode_cursor
 from .turns import delete_session, reconcile_interrupted, turn_payload
@@ -316,7 +315,7 @@ class ChatListCreateView(APIView):
                 effort = (validated.get("efforts") or ["medium"])[0]
             title=body.get("title","New chat")
             if not isinstance(title,str) or not title.strip() or len(title)>200: return _problem("invalid_title")
-            chat=create_chat_with_baseline(owner=request.user,scope=scope,title=title.strip(),
+            chat=AssistantChat.objects.create(owner=request.user,scope=scope,title=title.strip(),
                 title_source="user" if "title" in body else "automatic",selected_provider=provider,
                 selected_family=family,selected_driver=validated["driver"],selected_model=validated["model"],
                 selected_source_id=validated["source_id"],selected_effort=effort)
@@ -340,7 +339,7 @@ class ChatListCreateView(APIView):
             source = validated.get("source_id") if policy_enabled() else None
         title=body.get("title","New chat")
         if not isinstance(title,str) or not title.strip() or len(title)>200: return _problem("invalid_title")
-        chat=create_chat_with_baseline(owner=request.user,scope=scope,title=title.strip(),title_source="user" if "title" in body else "automatic",
+        chat=AssistantChat.objects.create(owner=request.user,scope=scope,title=title.strip(),title_source="user" if "title" in body else "automatic",
             selected_driver=driver,selected_model=model,selected_effort=effort,
             selected_source_id=source or "")
         return Response(payload(chat),status=status.HTTP_201_CREATED)
@@ -350,6 +349,7 @@ class ChatDetailView(APIView):
     def get(self,request,chat_id): return Response(payload(_chat(request.user,chat_id)))
     @transaction.atomic
     def patch(self,request,chat_id):
+        # Row lock: archiving serializes with a concurrent group-grant save on the same chat.
         chat = AssistantChat.objects.select_for_update().filter(pk=chat_id).first()
         if chat is None or not can_view_chat(request.user, chat): raise Http404
         reconcile_interrupted(chat)

@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.45.0
+
+- Simplify assistant chat group grants (DCM-CHAT-24) to a live intersection of the chat's enabled groups and the members the app currently declares available; no saved choice enables every read group. Removes capability generations, catalogue activation, the baseline and authorization-snapshot hook, reauthorization and the provider-continuation revocation added in 3.44.0. Apps need no activation or rollout step; the settings `DCM_ASSISTANT_GROUP_DEPLOYMENT`, `DCM_ASSISTANT_GROUP_GRANT_BASELINE`, `DCM_ASSISTANT_GROUP_AUTHORITATIVE_CATALOGUE` and `DCM_ASSISTANT_LOCK_AUTHORIZATION_SNAPSHOT` are ignored. The grant API stays compatible with ui-core-micha 4.41.0. Migration 0013 converts saved grants to the enabled-group list and drops the activation tables.
+
 ## [3.44.0] — 2026-11-26
 
 - DCM-CHAT-23 adds per-chat permission groups with durable catalogue and authorization generations, explicit reauthorization, and conservative provider-context reuse after access changes. Apps must synchronize authorization changes with chat grant saves and activate their catalogue and baseline during rollout.

@@ -46,31 +46,14 @@ def _validate_tool_registry(value):
         raise ValueError("invalid_tool_registry")
     return tools
 
-@transaction.atomic
 def tools_for_chat(chat):
-    from .catalogue_activation import groups_enabled
-    enabled = groups_enabled()
-    if enabled:
-        from django.core.exceptions import PermissionDenied, ValidationError
-        from .models import AssistantChat
-        try:
-            chat = AssistantChat.objects.select_related("owner").filter(pk=getattr(chat, "pk", None)).first()
-        except (ValueError, TypeError, ValidationError):
-            chat = None
-        if chat is None:
-            raise PermissionDenied("access_lost")
-        if not is_shared_scope(chat.scope):
-            from .authorization_snapshot import lock_authorization
-            lock_authorization(chat.owner_id)
-            from .group_grants import authorized_chat
-            chat = authorized_chat(chat.pk, chat.owner)
     hook = _hook("TOOLS_FOR_CHAT")
     tools = hook(chat) if hook else None
     if tools is None:
         tools = tool_registry() if hook is None or not chat.scope else []
     else:
         tools = _validate_tool_registry(tools)
-    if not enabled or is_shared_scope(chat.scope):
+    if _hook("GROUP_CATALOGUE") is None or is_shared_scope(chat.scope):
         return tools
     from .group_grants import allowed_tools
     allowed = allowed_tools(chat, chat.owner)
@@ -98,11 +81,7 @@ def build_turn_context(chat, user, message, turn, client_context=None):
     if not fn: return None
     from .group_grants import allowed_selectors, authorized_chat
     if _hook("GROUP_CATALOGUE") is not None:
-        from .models import AssistantChat
-        candidate = AssistantChat.objects.filter(pk=getattr(chat, "pk", None)).first()
-        if candidate is not None and not is_shared_scope(candidate.scope):
-            from .authorization_snapshot import lock_authorization
-            lock_authorization(getattr(user, "pk", None))
+        # The live chat decides, never the caller's copy of its scope.
         chat = authorized_chat(getattr(chat, "pk", None), user)
         user = chat._authorized_actor
     selectors = allowed_selectors(chat, user)

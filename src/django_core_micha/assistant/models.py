@@ -2,20 +2,6 @@ import uuid
 from django.conf import settings
 from django.db import models
 
-class AssistantCatalogueState(models.Model):
-    # The single row is created by migration and is the serialization point.
-    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
-    revision = models.PositiveBigIntegerField(default=0)
-    deployment = models.CharField(max_length=128, blank=True)
-    catalogue_hash = models.CharField(max_length=64, blank=True)
-    members = models.JSONField(default=dict)
-    baseline = models.JSONField(default=dict)
-
-
-class AssistantCatalogueDeployment(models.Model):
-    deployment = models.CharField(max_length=128, primary_key=True)
-
-
 class AssistantChat(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="dcm_assistant_chats")

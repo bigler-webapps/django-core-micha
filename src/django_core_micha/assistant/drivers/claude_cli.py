@@ -86,8 +86,6 @@ class ClaudeCliDriver:
         nonce = __import__("secrets").token_urlsafe(24)
         tool_events = []
         tool_calls = 0
-        access_lost = asyncio.Event()
-        proc = None
         async def handle(reader, writer):
             nonlocal tool_calls
             try:
@@ -104,22 +102,9 @@ class ClaudeCliDriver:
                         from .base import invoke_tool
                         tool_events.append({"type":"tool","phase":"start","name":found.name,"label":found.label})
                         content, sources = await invoke_tool(found, kwargs.get("user"), chat, request.get("arguments", {}), "cloud")
-                        if kwargs.get("authorize") and not await kwargs["authorize"]():
-                            raise DriverError("access_lost")
                         tool_events.append({"type":"tool","phase":"end","name":found.name,"label":found.label,"sources":sources})
                         answer = {"status":"ok","content":content}
-                if access_lost.is_set():
-                    return
                 writer.write((json.dumps(answer, ensure_ascii=False)+"\n").encode()); await writer.drain()
-            except DriverError as exc:
-                if exc.code == "access_lost":
-                    access_lost.set()
-                    if proc is not None and proc.returncode is None:
-                        self.kill_tree(proc)
-                else:
-                    writer.write(b'{"status":"error","text":"tool_unavailable"}\n')
-                    try: await writer.drain()
-                    except Exception: pass
             except Exception:
                 writer.write(b'{"status":"error","text":"tool_unavailable"}\n')
                 try: await writer.drain()
@@ -145,15 +130,9 @@ class ClaudeCliDriver:
         resume = session_id and any((config / "projects").glob(f"*/{session_id}.jsonl"))
         active_id = session_id or str(uuid.uuid4())
         argv.extend(["--resume", active_id] if resume else ["--session-id", active_id])
-        if kwargs.get("authorize") and not await kwargs["authorize"]():
-            server.close()
-            await server.wait_closed()
-            raise DriverError("access_lost")
         proc = await self.process_factory(*argv, cwd=str(root), env=env, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             start_new_session=(os.name != "nt"), limit=get_limit("max_output_bytes"))
-        if access_lost.is_set() and proc.returncode is None:
-            self.kill_tree(proc)
         async def stderr_log():
             data = await proc.stderr.read()
             if data:
@@ -181,20 +160,8 @@ class ClaudeCliDriver:
             async def read_events():
                 nonlocal saw_init, saw_result, total, assistant_usage, assistant_usage_reported
                 while True:
-                    if access_lost.is_set(): raise DriverError("access_lost")
-                    read_task = asyncio.create_task(proc.stdout.readline())
-                    lost_task = asyncio.create_task(access_lost.wait())
-                    try:
-                        done, _ = await asyncio.wait((read_task, lost_task), timeout=get_limit("idle_timeout"),
-                                                     return_when=asyncio.FIRST_COMPLETED)
-                        if access_lost.is_set(): raise DriverError("access_lost")
-                        if not done: raise asyncio.TimeoutError
-                        line = read_task.result()
+                    try: line = await asyncio.wait_for(proc.stdout.readline(), get_limit("idle_timeout"))
                     except asyncio.TimeoutError as exc: raise DriverError("timeout") from exc
-                    finally:
-                        for task in (read_task, lost_task):
-                            if not task.done(): task.cancel()
-                        await asyncio.gather(read_task, lost_task, return_exceptions=True)
                     if not line: break
                     total += len(line)
                     if total > get_limit("max_output_bytes"):
@@ -257,7 +224,6 @@ class ClaudeCliDriver:
             async with asyncio.timeout(get_limit("provider_timeout")):
                 async for frame in read_events(): yield frame
                 await proc.wait()
-            if access_lost.is_set(): raise DriverError("access_lost")
             if proc.returncode or not saw_result: raise DriverError("provider_error" if proc.returncode else "invalid_output")
             for item in tool_events: yield item
             yield {"type": "session", "session_id": active_id}

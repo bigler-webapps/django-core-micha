@@ -1,36 +1,16 @@
-"""Catalogue projection and immutable per-group capability snapshots.
-
-Execution paths must intersect their existing authorization with effective_ids().
-"""
+"""Live per-chat group selection and catalogue intersection."""
 import hashlib
 import json
 import re
 from django.db import transaction
-
 from .hooks import _hook
 
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _POLICIES = {"direct", "confirmation_required"}
 
-
-@transaction.atomic
 def catalogue(chat, user):
-    from .catalogue_activation import groups_enabled
-    groups_enabled()
     provider = _hook("GROUP_CATALOGUE")
-    if provider is None:
-        return None
-    from .authorization_snapshot import lock_authorization
-    snapshot = lock_authorization(getattr(user, "pk", None))
-    chat = authorized_chat(getattr(chat, "pk", None), user)
-    user = chat._authorized_actor
-    groups = validate_catalogue(provider(chat, user))
-    from .catalogue_activation import verified_state, attach_generations
-    state = verified_state()
-    groups = attach_generations(groups, state)
-    groups.authorization = snapshot
-    return groups
-
+    return None if provider is None else validate_catalogue(provider(chat, user))
 
 def validate_catalogue(groups):
     if not isinstance(groups, list) or len(groups) > 100:
@@ -72,145 +52,38 @@ def validate_catalogue(groups):
 
 
 def catalogue_revision(groups):
-    # Labels and display order are deliberately excluded; eligibility and policy are not.
-    security = sorted((g["id"], g["kind"], sorted((m["id"], m["available"], m["confirmation"] or "", sorted(m["tools"]), sorted(m["selectors"]), m.get("generation"), m.get("activation_revision"))
-                                                   for m in g["members"])) for g in groups)
-    return hashlib.sha256(json.dumps([getattr(groups, "activation_revision", None), getattr(groups, "authorization", (None, None))[0], security], separators=(",", ":")).encode()).hexdigest()
+    security = sorted((g["id"], g["kind"], sorted((m["id"], m["available"], m["confirmation"] or "", sorted(m["tools"]), sorted(m["selectors"])) for m in g["members"])) for g in groups)
+    return hashlib.sha256(json.dumps(security, separators=(",", ":")).encode()).hexdigest()
 
 
-def member_revision(group, member):
-    identity = [group["id"], group["kind"], member["id"], member["confirmation"],
-                sorted(member["tools"]), sorted(member["selectors"]), member.get("generation")]
-    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
-
-
-def validate_baseline(baseline):
-    if not isinstance(baseline, dict) or len(baseline) > 100:
-        raise ValueError("invalid_group_baseline")
-    for gid, ids in baseline.items():
-        if (not isinstance(gid, str) or not _ID.fullmatch(gid) or not isinstance(ids, dict)
-                or len(ids) > 100 or any(not isinstance(i, str) or not _ID.fullmatch(i)
-                                           or not isinstance(rev, str) or not re.fullmatch(r"[0-9a-f]{64}", rev)
-                                           for i, rev in ids.items())):
-            raise ValueError("invalid_group_baseline")
-    return baseline
-
-
-def initial_grants(groups):
-    # The cohort pair is supplied by the app, never inferred from first access.
-    baseline = getattr(groups, "authorization", (None, None))[1]
-    if baseline is None:
-        return {}
-    return {gid: {"authorization": list(baseline), "members": members}
-            for gid, members in getattr(groups, "baseline", {}).items()}
-
-
-@transaction.atomic
-def create_chat_with_baseline(*, owner, scope, **fields):
-    """Create a private chat under the app and catalogue serialization fences."""
-    from django.core.exceptions import PermissionDenied
-    from .catalogue_activation import attach_generations, groups_enabled, verified_state
-    from .hooks import is_shared_scope
-    from .models import AssistantChat
-
-    if is_shared_scope(scope):
-        return AssistantChat.objects.create(owner=owner, scope=scope, **fields)
-    provider = _hook("GROUP_CATALOGUE")
-    if provider is None:
-        # Detect a withdrawn hook after activation; an unconfigured app stays unchanged.
-        groups_enabled()
-        return AssistantChat.objects.create(owner=owner, scope=scope, **fields)
-    if not callable(provider):
-        raise PermissionDenied("catalogue_unverified")
-
-    from .authorization_snapshot import lock_authorization
-    current, cohort = lock_authorization(owner.pk)
-    state = verified_state(lock=True)
-    try:
-        baseline = validate_baseline(state.baseline)
-    except (TypeError, ValueError) as exc:
-        raise PermissionDenied("catalogue_unverified") from exc
-    chat = AssistantChat.objects.create(owner=owner, scope=scope, group_grants={}, **fields)
-    try:
-        groups = attach_generations(validate_catalogue(provider(chat, owner)), state)
-    except (TypeError, ValueError) as exc:
-        raise PermissionDenied("catalogue_unverified") from exc
-    if cohort is not None:
-        grants = {}
-        for group in groups:
-            members = {member["id"]: member_revision(group, member)
-                       for member in group["members"] if member["available"]
-                       and baseline.get(group["id"], {}).get(member["id"]) == member_revision(group, member)}
-            if members:
-                grants[group["id"]] = {"authorization": list(current), "members": members}
-        chat.group_grants = grants
-        chat.save(update_fields=["group_grants"])
-    return chat
+def enabled_ids(chat, groups):
+    if chat.group_grants is None:
+        return {g["id"] for g in groups if g["kind"] == "read"}
+    return set(chat.group_grants) if isinstance(chat.group_grants, list) else set()
 
 
 def effective_ids(chat, groups):
-    grants = chat.group_grants if chat.group_grants is not None else initial_grants(groups)
-    current = getattr(groups, "authorization", (None, None))[0]
-    def approved(group, member):
-        entry = grants.get(group["id"])
-        return (isinstance(entry, dict) and entry.get("authorization") == list(current or ())
-                and isinstance(entry.get("members"), dict)
-                and entry["members"].get(member["id"]) == member_revision(group, member))
-    return {m["id"] for g in groups for m in g["members"]
-            if m["available"] and approved(g, m)}
+    enabled = enabled_ids(chat, groups)
+    return {m["id"] for g in groups if g["id"] in enabled for m in g["members"] if m["available"]}
 
 
 def projection(chat, groups):
-    grants = chat.group_grants if chat.group_grants is not None else initial_grants(groups)
+    enabled = enabled_ids(chat, groups)
     effective = effective_ids(chat, groups)
     return {"supported": True, "grant_revision": str(chat.grant_revision),
             "catalogue_revision": catalogue_revision(groups),
-            "groups": [{**g, "enabled": g["id"] in grants,
+            "groups": [{**g, "enabled": g["id"] in enabled,
                         "editable": any(m["available"] for m in g["members"]),
-                        "members": [{**{k: v for k, v in m.items() if k not in {"tools", "selectors", "generation"}},
-                                     "effective": m["id"] in effective} for m in g["members"]]}
-                       for g in groups]}
+                        "members": [{**{k: v for k, v in m.items() if k not in {"tools", "selectors"}},
+                                     "effective": m["id"] in effective} for m in g["members"]]} for g in groups]}
 
 
-@transaction.atomic
 def save_selection(chat, groups, selected, reauthorize=()):
-    from django.core.exceptions import PermissionDenied
-    from .authorization_snapshot import lock_authorization
-    from .catalogue_activation import verified_state
-    from .models import AssistantChat
-    snapshot = lock_authorization(chat.owner_id)
-    state = verified_state(lock=True)
-    locked = AssistantChat.objects.select_for_update().get(pk=chat.pk)
-    if locked.owner_id != chat.owner_id:
-        raise PermissionDenied("authorization_unverified")
-    fresh = catalogue(locked, locked.owner)
-    if (getattr(groups, "activation_revision", None) != state.revision
-            or getattr(groups, "authorization", None) != snapshot
-            or catalogue_revision(groups) != catalogue_revision(fresh)
-            or locked.grant_revision != chat.grant_revision):
-        raise PermissionDenied("authorization_unverified")
-    groups = fresh
-    previous = locked.group_grants if locked.group_grants is not None else initial_grants(groups)
-    by_id = {g["id"]: g for g in groups}
-    if any(gid not in by_id for gid in selected) or not set(reauthorize).issubset(selected):
-        raise ValueError("invalid_selection")
-    if any(not any(m["available"] for m in by_id[gid]["members"]) and (gid not in previous or gid in reauthorize)
-           for gid in selected):
-        raise ValueError("invalid_selection")
-    entries = {}
-    for gid in selected:
-        old = previous.get(gid)
-        if gid in previous and gid not in reauthorize:
-            # Retain old authorization, including stale or legacy entries; never refresh it implicitly.
-            entries[gid] = old
-        else:
-            entries[gid] = {"authorization": list(snapshot[0]), "members": {
-                m["id"]: member_revision(by_id[gid], m)
-                for m in by_id[gid]["members"] if m["available"]}}
-    chat.group_grants = entries
+    # Unknown IDs are dropped, so a later-added group is never pre-enabled by a stale or forged selection.
+    known = {group["id"] for group in groups}
+    chat.group_grants = [gid for gid in selected if gid in known]
     chat.grant_revision += 1
     chat.save(update_fields=["group_grants", "grant_revision"])
-
 
 def authorized_chat(chat_id, user):
     """Resolve the live chat and actor boundary before using catalogue state."""
@@ -234,78 +107,35 @@ def authorized_chat(chat_id, user):
     return chat
 
 
-@transaction.atomic
+def _allowed(chat, user, key):
+    from .hooks import is_shared_scope
+    if _hook("GROUP_CATALOGUE") is None:
+        return None
+    chat = authorized_chat(getattr(chat, "pk", None), user)
+    if is_shared_scope(chat.scope):
+        return None
+    groups = catalogue(chat, chat._authorized_actor)
+    effective = effective_ids(chat, groups)
+    return {item for group in groups for member in group["members"]
+            if member["id"] in effective for item in member[key]}
+
+
 def allowed_tools(chat, user):
-    """Return the opted-in tool ceiling, or None for the legacy contract."""
-    from .catalogue_activation import groups_enabled
-    if not groups_enabled():
-        return None
-    from .hooks import is_shared_scope
-    from .models import AssistantChat
-    candidate = AssistantChat.objects.filter(pk=getattr(chat, "pk", None)).first()
-    if candidate is not None and not is_shared_scope(candidate.scope):
-        from .authorization_snapshot import lock_authorization
-        lock_authorization(getattr(user, "pk", None))
-    chat = authorized_chat(getattr(chat, "pk", None), user)
-    user = chat._authorized_actor
-    if is_shared_scope(chat.scope):
-        return None
-    groups = catalogue(chat, user)
-    if groups is None:
-        return None
-    effective = effective_ids(chat, groups)
-    return {name for group in groups for member in group["members"]
-            if member["id"] in effective for name in member["tools"]}
+    return _allowed(chat, user, "tools")
 
 
-@transaction.atomic
 def allowed_selectors(chat, user):
-    """Return the current app-data ceiling, or None for the legacy contract."""
-    from .catalogue_activation import groups_enabled
-    if not groups_enabled():
-        return None
-    from .hooks import is_shared_scope
-    from .models import AssistantChat
-    candidate = AssistantChat.objects.filter(pk=getattr(chat, "pk", None)).first()
-    if candidate is not None and not is_shared_scope(candidate.scope):
-        from .authorization_snapshot import lock_authorization
-        lock_authorization(getattr(user, "pk", None))
-    chat = authorized_chat(getattr(chat, "pk", None), user)
-    user = chat._authorized_actor
-    if is_shared_scope(chat.scope):
-        return None
-    groups = catalogue(chat, user)
-    if groups is None:
-        return None
-    effective = effective_ids(chat, groups)
-    return {selector for group in groups for member in group["members"]
-            if member["id"] in effective for selector in member["selectors"]}
+    return _allowed(chat, user, "selectors")
 
 
-@transaction.atomic
 def tool_authorization(chat_id, user, name):
-    """Resolve current access and return a token for detecting mid-call changes."""
     from django.core.exceptions import PermissionDenied
-    from .models import AssistantChat
-    from .hooks import is_shared_scope
-    candidate = AssistantChat.objects.filter(pk=chat_id).first()
-    from .catalogue_activation import groups_enabled
-    if candidate is not None and groups_enabled() and not is_shared_scope(candidate.scope):
-        from .authorization_snapshot import lock_authorization
-        lock_authorization(getattr(user, "pk", None))
+    from .hooks import tools_for_chat
     try:
         chat = authorized_chat(chat_id, user)
+        allowed = allowed_tools(chat, chat._authorized_actor)
+        if allowed is None:
+            return True, None
+        return name in allowed and any(tool.name == name for tool in tools_for_chat(chat)), None
     except PermissionDenied:
         return False, None
-    user = chat._authorized_actor
-    from .hooks import is_shared_scope, tools_for_chat
-    if is_shared_scope(chat.scope):
-        return True, None
-    groups = catalogue(chat, user)
-    if groups is None:
-        return True, None
-    effective = effective_ids(chat, groups)
-    allowed = (any(name in member["tools"] and member["id"] in effective
-                   for group in groups for member in group["members"])
-               and any(tool.name == name for tool in tools_for_chat(chat)))
-    return allowed, (chat.grant_revision, catalogue_revision(groups), groups.authorization[0])
