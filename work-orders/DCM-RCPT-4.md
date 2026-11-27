@@ -69,3 +69,14 @@ Excluded: changes to `ai_policy` resolution or catalogue semantics; statement ex
 ## Gate record
 
 Gate #1 approved by the operator 2026-11-27 (click "Übergeben: Session starten" in session local_9ef3b5e5-763d-4d48-a151-31b8553002b2), following the decision "Policy wählt Anbieter".
+
+## Completion
+
+- Landed as the 3.46.0 release (publish from main). Tier 3, shared core.
+- Implementation: codex/gpt-6.1-terra (medium), tests stack was down in its sandbox (TESTS NOT RUN), Orchestrator ran them. Fix workers: gpt-6-luna (nits), gpt-6.1-terra (round-2 test gaps).
+- Round 1 (envelope, regression, duplication, tests, sec_review): 5 findings. Envelope: release metadata missing (fixed by Orchestrator: pyproject 3.46.0, CHANGELOG). Tests lens: 3 nits on weak mocked tests (fixed: real-resolver tests with two providers, consent with two providers). regression, duplication, sec_review: none.
+- Round 2 (closing): envelope, regression, duplication, sec_review none; tests lens 2 defects (invalid-list variants, OpenAI route with both disclosed) fixed as post-review test deltas, no further review.
+- Evidence: receipts tests 80 passed, tests/test_ai_policy.py 5 passed, full backend scope 2207 passed, 0 failed, 3 skipped (tests.py, venv-test on PATH).
+- Own pass: undeclared driver is refused after resolution and before dispatch; setting must be a list/tuple of known provider names, else provider_unavailable; claude_cli rows are never eligible; unenrolled and fake paths untouched; default equals today's single provider.
+- Pre-existing red: none.
+- Part B: accurate

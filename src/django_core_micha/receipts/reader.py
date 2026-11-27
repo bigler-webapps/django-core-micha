@@ -18,13 +18,20 @@ from .schema import CORE, build_schema,resolve_extension
 log=logging.getLogger(__name__)
 
 def _managed_workload(user, provider, effort):
-    driver = {"openai": "openai_api", "anthropic": "anthropic_api"}.get(provider)
-    if driver is None:
+    drivers = {"openai": "openai_api", "anthropic": "anthropic_api"}
+    providers = getattr(settings, "DCM_RECEIPTS_DISCLOSED_PROVIDERS", [provider])
+    if not isinstance(providers, (list, tuple)) or not providers or any(
+        not isinstance(name, str) or name not in drivers for name in providers
+    ):
         raise ReceiptError("provider_unavailable")
+    allowed_drivers = {drivers[name] for name in providers}
     rows = getattr(settings, "DCM_RECEIPTS_AI_POLICY_CATALOGUE", ()) or ()
     try:
-        return resolve_workload(user, rows=rows, effort=effort,
-            workload="extraction", eligible=lambda _user, row: row.get("driver") == driver)
+        workload = resolve_workload(user, rows=rows, effort=effort,
+            workload="extraction", eligible=lambda _user, row: row.get("driver") in allowed_drivers)
+        if workload.driver not in allowed_drivers:
+            raise ReceiptError("provider_unavailable")
+        return workload
     except ValueError as exc:
         raise ReceiptError("provider_unavailable") from exc
 

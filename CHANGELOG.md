@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.46.0
+
+- DCM-RCPT-4: the shared receipt reader follows the AI policy route across every provider an app declares as disclosed. The new list setting `DCM_RECEIPTS_DISCLOSED_PROVIDERS` (`openai`, `anthropic`) defaults to the single `DCM_RECEIPTS_PROVIDER`, so existing consumers behave exactly as before. A resolved route outside the declared set, an invalid list or no eligible route is refused with `provider_unavailable` before any provider receives the document; there is no fallback to another provider.
+
 ## 3.45.0
 
 - Simplify assistant chat group grants (DCM-CHAT-24) to a live intersection of the chat's enabled groups and the members the app currently declares available; no saved choice enables every read group. Removes capability generations, catalogue activation, the baseline and authorization-snapshot hook, reauthorization and the provider-continuation revocation added in 3.44.0. Apps need no activation or rollout step; the settings `DCM_ASSISTANT_GROUP_DEPLOYMENT`, `DCM_ASSISTANT_GROUP_GRANT_BASELINE`, `DCM_ASSISTANT_GROUP_AUTHORITATIVE_CATALOGUE` and `DCM_ASSISTANT_LOCK_AUTHORIZATION_SNAPSHOT` are ignored. The grant API stays compatible with ui-core-micha 4.41.0. Migration 0013 converts saved grants to the enabled-group list and drops the activation tables.
