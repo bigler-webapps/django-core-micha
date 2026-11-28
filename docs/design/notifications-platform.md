@@ -493,3 +493,22 @@ Digest integrations can call `is_digest_email_enabled(user)` from `notifications
 to resolve the `todo`/`email` preference. This is a preference decision only; the
 caller must independently enforce eligibility and applicable transactional or critical
 mail policy. Existing callers retain their current behavior until they adopt this seam.
+
+### Browser push actions
+
+`NotificationType` may declare `push_icon`, `push_badge`, `push_tag`,
+`push_renotify`, `push_open_label_key`, and `push_done_label_key`. Labels resolve
+through the notification text registry for each recipient. `notify()` accepts an
+optional per-notification `push_tag` and same-origin `push_open_url`; the rendered
+notification URL remains the open default. `renotify` requires a tag.
+
+The payload always retains `title`, `body`, and `url`; optional keys are `icon`,
+`badge`, `tag`, `renotify`, and `actions`. A done action additionally carries an
+opaque `done_token`, never exposed in feed or realtime serializers. Payloads are
+bounded to the Web Push plaintext budget by dropping optional extras before reducing
+the body. The service worker obtains a masked CSRF token from authenticated,
+same-origin `GET /api/notifications/push/csrf/` (no-store) and sends it in
+`X-CSRFToken` with JSON `{ "token": "…" }` to `POST /api/notifications/push/done/`.
+The latter requires an exact `PUBLIC_ORIGIN` Origin, normal Django CSRF validation,
+and the recipient's current session. Tokens are SHA-256 hashes of 32-byte random
+values, delivery- and recipient-bound, expire after 14 days, and are consumed once.

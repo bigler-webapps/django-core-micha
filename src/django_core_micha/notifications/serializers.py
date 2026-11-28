@@ -114,6 +114,15 @@ class CanonicalMarkInputSerializer(serializers.Serializer):
     ids = serializers.ListField(child=serializers.IntegerField(), allow_empty=True)
 
 
+class PushDoneInputSerializer(serializers.Serializer):
+    token = serializers.CharField(trim_whitespace=False, max_length=512)
+
+    def validate(self, attrs):
+        if set(self.initial_data) != {"token"}:
+            raise serializers.ValidationError("Provide exactly token.")
+        return attrs
+
+
 class ChannelMatrixInputSerializer(serializers.Serializer):
     category = serializers.CharField()
     channel = serializers.CharField()

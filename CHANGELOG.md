@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.47.0
+
+- DCM-NOTIF-32 adds optional browser-push icon, badge, tag, renotify and localized open/done actions. Done actions carry a one-use, 14-day, recipient- and delivery-bound opaque token and complete through same-origin, session-authenticated CSRF-protected endpoints. The push CSRF endpoint is `GET /api/notifications/push/csrf/`; completion is `POST /api/notifications/push/done/`. Consumers must update their service worker before enabling done actions.
+
 ## 3.46.0
 
 - DCM-RCPT-4: the shared receipt reader follows the AI policy route across every provider an app declares as disclosed. The new list setting `DCM_RECEIPTS_DISCLOSED_PROVIDERS` (`openai`, `anthropic`) defaults to the single `DCM_RECEIPTS_PROVIDER`, so existing consumers behave exactly as before. A resolved route outside the declared set, an invalid list or no eligible route is refused with `provider_unavailable` before any provider receives the document; there is no fallback to another provider.

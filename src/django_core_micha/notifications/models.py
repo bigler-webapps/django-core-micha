@@ -313,3 +313,18 @@ class NotificationDelivery(models.Model):
                 name="uniq_notification_delivery_with_threshold",
             ),
         ]
+
+
+class NotificationPushActionToken(models.Model):
+    """One opaque, recipient-bound browser-push action token."""
+
+    delivery = models.ForeignKey(NotificationDelivery, on_delete=models.CASCADE, related_name="action_tokens")
+    recipient = models.ForeignKey(NotificationRecipient, on_delete=models.CASCADE, related_name="push_action_tokens")
+    action = models.CharField(max_length=16)
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["expires_at", "consumed_at"])]

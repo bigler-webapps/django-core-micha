@@ -16,7 +16,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        from django_core_micha.notifications.models import Notification
+        from django_core_micha.notifications.models import Notification, NotificationPushActionToken
 
         days = getattr(settings, "NOTIFICATIONS_RETENTION_DAYS", 90)
         now = timezone.now()
@@ -32,4 +32,8 @@ class Command(BaseCommand):
             return
 
         deleted, _ = notifications.delete()
+        action_cutoff = now - timezone.timedelta(days=14)
+        NotificationPushActionToken.objects.filter(
+            Q(expires_at__lt=action_cutoff) | Q(consumed_at__lt=action_cutoff)
+        ).delete()
         self.stdout.write(self.style.SUCCESS(f"Deleted {deleted} expired or aged-out Notification rows."))

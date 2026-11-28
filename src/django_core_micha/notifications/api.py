@@ -1,11 +1,16 @@
 """Public authoring API for canonical notifications."""
 from collections.abc import Iterable
+from datetime import timedelta
+from hashlib import sha256
+import secrets
+from urllib.parse import urlsplit
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .dispatch import dispatch_result
-from .models import Notification, NotificationDelivery, NotificationRecipient
+from .models import Notification, NotificationDelivery, NotificationPushActionToken, NotificationRecipient
 from .router import resolve_channels
 from .subscriptions import resolve_category_subscribers
 from .types import get_notification_type
@@ -84,9 +89,63 @@ def _get_delivery_with_retry(*, recipient, channel):
         )
 
 
+def _same_origin_url(url):
+    """Accept a relative URL or an absolute URL on this application's public origin."""
+
+    if not url:
+        return None
+    if not isinstance(url, str):
+        raise ValueError("push open URL must be a string")
+    if "\\" in url or any(ord(char) < 32 or ord(char) == 127 for char in url):
+        raise ValueError("push open URL must be same-origin")
+    parsed = urlsplit(url)
+    if not parsed.scheme and not parsed.netloc and len(url) > 1 and url.startswith("/") and not url.startswith("//"):
+        return url
+    expected = urlsplit(getattr(settings, "PUBLIC_ORIGIN", ""))
+    if not parsed.scheme or not parsed.netloc or (parsed.scheme, parsed.netloc) != (expected.scheme, expected.netloc):
+        raise ValueError("push open URL must be same-origin")
+    return url
+
+
+def _push_options(notification_type, *, push_tag=None, push_open_url=None):
+    tag = push_tag if push_tag is not None else notification_type.push_tag
+    if tag is not None and (not isinstance(tag, str) or not tag):
+        raise ValueError("push tag must be a nonempty string")
+    if notification_type.push_renotify and not tag:
+        raise ValueError("push_renotify requires a nonempty tag")
+    open_url = _same_origin_url(push_open_url) if push_open_url is not None else None
+    labels = {}
+    if notification_type.push_open_label_key:
+        labels["open"] = notification_type.push_open_label_key
+    if notification_type.push_done_label_key:
+        labels["done"] = notification_type.push_done_label_key
+    return {
+        "icon": notification_type.push_icon,
+        "badge": notification_type.push_badge,
+        "tag": tag,
+        "renotify": notification_type.push_renotify,
+        "open_url": open_url,
+        "action_labels": labels,
+    }
+
+
+def _dispatch_delivery(*, channel, notification, recipient, delivery, ctx):
+    result = dispatch_result(channel, notification=notification, recipient=recipient, ctx=ctx)
+    if result.ok is True:
+        delivery.status = "sent"
+        delivery.sent_at = timezone.now()
+        delivery.save(update_fields=["status", "sent_at"])
+    elif result.ok is False:
+        delivery.status = "failed"
+        delivery.save(update_fields=["status"])
+    elif result.outcome is not None:
+        delivery.status = result.outcome.value
+        delivery.save(update_fields=["status"])
+
+
 def notify(
     *, type, recipients, category=None, urgency="normal", content, notifiable=None, channels=None,
-    transient=None, expires_at=None,
+    transient=None, expires_at=None, push_tag=None, push_open_url=None,
 ) -> Notification:
     """Create or reuse a logical message, then dispatch it per recipient and channel."""
 
@@ -106,23 +165,42 @@ def notify(
         expires_at=expires_at,
     )
 
+    options = _push_options(ntype, push_tag=push_tag, push_open_url=push_open_url)
     for user in _normalize_recipients(recipients):
         recipient, _ = NotificationRecipient.objects.get_or_create(notification=notification, user=user)
         for channel in resolve_channels(ntype, user, override=channels):
             delivery, created = _get_delivery_with_retry(recipient=recipient, channel=channel)
             if not created:
                 continue
-            result = dispatch_result(channel, notification=notification, recipient=recipient, ctx=transient)
-            if result.ok is True:
-                delivery.status = "sent"
-                delivery.sent_at = timezone.now()
-                delivery.save(update_fields=["status", "sent_at"])
-            elif result.ok is False:
-                delivery.status = "failed"
-                delivery.save(update_fields=["status"])
-            elif result.outcome is not None:
-                delivery.status = result.outcome.value
-                delivery.save(update_fields=["status"])
+            ctx = transient
+            if channel == "push" and any(value is not None and value != {} for value in options.values()):
+                action_options = dict(options)
+                if "done" in action_options["action_labels"]:
+                    cleartext = secrets.token_urlsafe(32)
+                    with transaction.atomic():
+                        NotificationPushActionToken.objects.create(
+                            delivery=delivery,
+                            recipient=recipient,
+                            action="done",
+                            token_hash=sha256(cleartext.encode("utf-8")).hexdigest(),
+                            expires_at=timezone.now() + timedelta(days=14),
+                        )
+                        action_options["done_token"] = cleartext
+                        ctx = {**(transient or {}), "push_options": action_options}
+                        transaction.on_commit(
+                            lambda channel=channel, notification=notification, recipient=recipient,
+                            delivery=delivery, ctx=ctx: _dispatch_delivery(
+                                channel=channel, notification=notification, recipient=recipient,
+                                delivery=delivery, ctx=ctx,
+                            )
+                        )
+                else:
+                    ctx = {**(transient or {}), "push_options": action_options}
+            if not (channel == "push" and "done" in options["action_labels"]):
+                _dispatch_delivery(
+                    channel=channel, notification=notification, recipient=recipient,
+                    delivery=delivery, ctx=ctx,
+                )
 
     return notification
 

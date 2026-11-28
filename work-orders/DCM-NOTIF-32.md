@@ -70,3 +70,17 @@ The operator confirmed the session, expiry and failure-handling requirements in 
 The operator requested integration of the review findings on 2026-11-25. The masked CSRF token route and the revised Envelope await Gate #1 for implementation.
 
 Gate #1 approved by the operator 2026-11-28 (in chat, after the origin source `PUBLIC_ORIGIN` and the hashed token model with its migration were added to Part A).
+
+## Completion
+
+Implemented by codex/gpt-5.6-terra (medium), release 3.47.0, migration `0012_notificationpushactiontoken`. Fix round by the same route; the endpoint tests, the dispatch regression and the test stack were corrected by the Orchestrator because the sandbox cannot reach the database.
+
+**Review:** two rounds, lenses envelope, regression, duplication, tests, sec_review on codex/gpt-6.1-terra and gpt-6-luna. Round 1 raised 7 findings (all accepted, fixed): payload size vs. serialization and escaping, `/\evil.example` open-redirect, renotify tag only at type level, session-only authentication, recipient lock for parallel tokens, token pruning, test coverage. Round 2 (closing) raised 7 (all accepted): one regression (oversize title aborting the caller, fixed in `_send_push`) and six test gaps (fixed as a post-review test delta). `sec_review` returned no finding in round 2. Carried: 1 (feed serializer has no explicit test that no token field exists; realtime events and logs are asserted).
+
+**Tests:** `tests.py` backend gate 2226/2226 green (full scope once, then the notifications directory after the last fix; the earlier full run saw a tree change). Test-management scopes: `test_real_disposal_preserves_other_instance` red (leftover Docker volume `dcm-synthetic-tm-34406452...`, owner not verifiable, disposal script skipped it) and one parametrized launcher id reported missing although all 91 ran: pre-existing red, open, register row added.
+
+**Own pass against Part A:** done as asked; nothing beyond Part A (the `critical=True` in two test types is a test-fixture choice). Origin is `PUBLIC_ORIGIN` exactly; token is SHA-256 hashed, 14 days, one use; the done transition equals the feed action (`done_at` plus `notification.status` after commit).
+
+**Not verified (Part C):** the synthetic push with a real browser/worker against a running DCM stack was not run; the worker's exact headers are covered on both sides by unit tests (UCM worker test, DCM client tests with real session cookie and enforced CSRF). Status stays `in-review` until that run or an operator exception.
+
+Part B: accurate.

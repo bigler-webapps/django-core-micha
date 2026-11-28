@@ -43,6 +43,14 @@ class NotificationType:
     # reach axis to actually be legible to the user in ui-core-micha's
     # NotificationSettings (NOTIF-26 scope H).
     label_key: str | None = None
+    # Optional browser-push presentation. Labels are text-registry keys resolved
+    # per recipient at delivery time; apps never store rendered labels in content.
+    push_icon: str | None = None
+    push_badge: str | None = None
+    push_tag: str | None = None
+    push_renotify: bool = False
+    push_open_label_key: str | None = None
+    push_done_label_key: str | None = None
 
     def __post_init__(self):
         if self.mode not in VALID_NOTIFICATION_MODES:

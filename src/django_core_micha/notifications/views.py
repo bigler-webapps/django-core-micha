@@ -15,18 +15,21 @@ domain by that primitive's default, so older dcm releases remain compatible.
 
 from django.conf import settings
 from django.core import signing
+from django.middleware.csrf import CsrfViewMiddleware, get_token
 from django.db import transaction
 from django.db.models import Q, Max
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import generics, status, views
-from rest_framework.exceptions import NotFound
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.utils.urls import replace_query_param, remove_query_param
 
 from .delivery import notification_envelope, push_to_users
-from .models import NotificationPreference, NotificationRecipient, PushSubscription, get_notification_model
+from .models import NotificationPreference, NotificationPushActionToken, NotificationRecipient, PushSubscription, get_notification_model
 from .serializers import (
     CanonicalMarkInputSerializer,
     CanonicalNotificationSerializer,
@@ -34,6 +37,7 @@ from .serializers import (
     NotificationSubscriptionInputSerializer,
     PushSubscriptionInputSerializer,
     PushSubscriptionSerializer,
+    PushDoneInputSerializer,
 )
 from .subscriptions import set_subscription
 from .todo.registry import iter_registered_todo_types
@@ -116,6 +120,103 @@ class PushSubscriptionView(views.APIView):
 class VapidPublicKeyView(views.APIView):
     def get(self, request):
         return Response({"vapidPublicKey": getattr(settings, "VAPID_PUBLIC_KEY", "")})
+
+
+def _same_public_origin(origin):
+    from urllib.parse import urlsplit
+
+    if not origin:
+        return False
+    try:
+        supplied = urlsplit(origin)
+        expected = urlsplit(getattr(settings, "PUBLIC_ORIGIN", ""))
+        return (
+            supplied.scheme, supplied.hostname, supplied.port, supplied.path, supplied.query, supplied.fragment,
+        ) == (
+            expected.scheme, expected.hostname, expected.port, "", "", "",
+        )
+    except ValueError:
+        return False
+
+
+class PushCsrfView(views.APIView):
+    """Issue a masked CSRF token only to the authenticated application origin."""
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not isinstance(request.successful_authenticator, SessionAuthentication):
+            return Response({"detail": "Denied."}, status=status.HTTP_403_FORBIDDEN)
+        origin = request.headers.get("Origin")
+        if origin and not _same_public_origin(origin):
+            return Response({"detail": "Denied."}, status=status.HTTP_403_FORBIDDEN)
+        response = Response({"csrf_token": get_token(request._request)})
+        response["Cache-Control"] = "no-store"
+        return response
+
+
+class PushDoneView(views.APIView):
+    """Consume one recipient-bound done action without exposing token diagnostics."""
+
+    authentication_classes = [SessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def handle_exception(self, exc):
+        if isinstance(exc, PermissionDenied):
+            return Response({"detail": "Denied."}, status=status.HTTP_403_FORBIDDEN)
+        return super().handle_exception(exc)
+
+    @staticmethod
+    def _csrf_valid(request):
+        # Invoke Django's normal origin/referer and masked-token validation, but return
+        # the action endpoint's intentionally generic denial payload.
+        return CsrfViewMiddleware(lambda _request: None).process_view(
+            request._request, lambda _request: None, (), {}
+        ) is None
+
+    def post(self, request):
+        if not isinstance(request.successful_authenticator, SessionAuthentication):
+            return Response({"detail": "Denied."}, status=status.HTTP_403_FORBIDDEN)
+        if not _same_public_origin(request.headers.get("Origin")) or not self._csrf_valid(request):
+            return Response({"detail": "Denied."}, status=status.HTTP_403_FORBIDDEN)
+        serializer = PushDoneInputSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({"detail": "Denied."}, status=status.HTTP_403_FORBIDDEN)
+        from hashlib import sha256
+
+        now = timezone.now()
+        token_hash = sha256(serializer.validated_data["token"].encode("utf-8")).hexdigest()
+        notification_id = None
+        with transaction.atomic():
+            token = (
+                NotificationPushActionToken.objects.select_for_update()
+                .select_related("recipient__notification")
+                .filter(
+                    token_hash=token_hash,
+                    recipient__user=request.user,
+                    action="done",
+                    consumed_at__isnull=True,
+                    expires_at__gt=now,
+                )
+                .first()
+            )
+            if token is None:
+                return Response({"detail": "Denied."}, status=status.HTTP_403_FORBIDDEN)
+            token.consumed_at = now
+            token.save(update_fields=["consumed_at"])
+            recipient = NotificationRecipient.objects.select_for_update().get(pk=token.recipient_id)
+            notification_id = recipient.notification_id
+            if recipient.done_at is None:
+                recipient.done_at = now
+                recipient.save(update_fields=["done_at"])
+                transaction.on_commit(lambda: push_to_users(
+                    [request.user], notification_envelope({
+                        "type": "notification.status", "notification_id": notification_id,
+                        "status": {"seen": recipient.seen_at is not None, "dismissed": recipient.dismissed_at is not None, "done": True},
+                    })
+                ))
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class _OptionalInboxView(views.APIView):

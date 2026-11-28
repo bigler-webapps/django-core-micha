@@ -167,7 +167,51 @@ def _send_email(*, title, body, url, users, bypass_preference_check=False):
     return outcomes
 
 
-def _send_push(*, title, body, url, users, bypass_preference_check=False):
+_PUSH_PLAINTEXT_BUDGET = 3800
+
+
+def _push_payload(*, title, body, url, extras=None):
+    """Return a bounded UTF-8 browser-push payload without exposing fallback details."""
+
+    payload = {"title": title, "body": body, "url": url}
+    extras = dict(extras or {})
+
+    def serialized(value):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    def size(value):
+        return len(serialized(value).encode("utf-8"))
+
+    for key in ("icon", "badge", "tag", "renotify", "actions", "done_token"):
+        if key in extras:
+            payload[key] = extras[key]
+    # Optional presentation must never prevent the legacy notification from arriving.
+    for key in ("actions", "done_token", "renotify", "badge", "icon", "tag"):
+        if size(payload) <= _PUSH_PLAINTEXT_BUDGET:
+            break
+        payload.pop(key, None)
+    if not any(action.get("action") == "done" for action in payload.get("actions", [])):
+        payload.pop("done_token", None)
+    elif not payload.get("done_token"):
+        payload.pop("done_token", None)
+        payload["actions"] = [action for action in payload["actions"] if action.get("action") != "done"]
+    if size(payload) > _PUSH_PLAINTEXT_BUDGET:
+        payload["body"] = ""
+        if size(payload) > _PUSH_PLAINTEXT_BUDGET:
+            raise ValueError("Push title and URL exceed the plaintext budget")
+        low, high = 0, len(body)
+        while low < high:
+            middle = (low + high + 1) // 2
+            payload["body"] = body[:middle]
+            if size(payload) <= _PUSH_PLAINTEXT_BUDGET:
+                low = middle
+            else:
+                high = middle - 1
+        payload["body"] = body[:low]
+    return serialized(payload)
+
+
+def _send_push(*, title, body, url, users, bypass_preference_check=False, extras=None):
     """Send browser push to opted-in subscriptions; remove expired ones.
 
     ``bypass_preference_check`` is for callers (the notification router) that have
@@ -198,7 +242,12 @@ def _send_push(*, title, body, url, users, bypass_preference_check=False):
         logger.warning("Could not resolve browser-push subscriptions: %s", exc)
         return
 
-    payload = json.dumps({"title": title, "body": body, "url": url})
+    try:
+        payload = _push_payload(title=title, body=body, url=url, extras=extras)
+    except ValueError:
+        # An unsendably large title/URL must not abort the caller's remaining recipients and channels.
+        logger.warning("Browser-push notification skipped: title and URL exceed the payload budget")
+        return
     for subscription in subscriptions:
         try:
             webpush(

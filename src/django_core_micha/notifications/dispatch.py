@@ -144,12 +144,36 @@ class PushDispatcher:
         if hidden_body_key and not _push_preview_enabled(recipient.user):
             content = {**content, "body_key": hidden_body_key}
         title, body, url = _render_content(content, recipient.user, ctx)
+        options = (ctx or {}).get("push_options", {})
+        actions = []
+        language = _recipient_language(recipient.user)
+        for action, label_key in options.get("action_labels", {}).items():
+            label = _resolve_text_key(label_key, language, {}, kind=f"push-{action}")
+            if label:
+                item = {"action": action, "title": label}
+                if action == "open" and options.get("open_url"):
+                    item["url"] = options["open_url"]
+                actions.append(item)
+        extras = {
+            key: value for key, value in {
+                "icon": options.get("icon"), "badge": options.get("badge"),
+                "tag": options.get("tag"), "renotify": options.get("renotify") or None,
+                "actions": actions or None, "done_token": options.get("done_token"),
+            }.items() if value is not None
+        }
+        # A token only has meaning while its matching done action remains present.
+        if not any(item["action"] == "done" for item in actions):
+            extras.pop("done_token", None)
+        push_kwargs = {}
+        if extras:
+            push_kwargs["extras"] = extras
         _send_push(
             title=title,
             body=body,
             url=url,
             users=[recipient.user],
             bypass_preference_check=True,
+            **push_kwargs,
         )
         return DeliveryResult(ok=True)
 
